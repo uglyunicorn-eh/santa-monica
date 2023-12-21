@@ -1,2 +1,3 @@
-# santa-monika
-Anonymous Ded Morozes / API
+# Anonymous Ded Morozes
+
+This is back-end side of the Anonymous Ded Morozes
