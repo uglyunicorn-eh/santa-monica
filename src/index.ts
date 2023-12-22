@@ -1,13 +1,27 @@
-import express, { Express, Request, Response } from "express";
+import cors from "cors";
 import dotenv from "dotenv";
+import express, { Express, Request, Response } from "express";
+import helmet from "helmet";
+import morgan from "morgan";
+
+import { commonHeaders } from "src/utils/express/commonHeaders";
 
 dotenv.config();
 
-const app: Express = express();
 const port = process.env.PORT || 3000;
 
+const app: Express = express();
+
+app.use(morgan("dev"));
+app.use(helmet());
+app.use(cors());
+app.use(express.json());
+app.use(commonHeaders());
+
 app.get("/", (req: Request, res: Response) => {
-  res.send("Express + TypeScript Server");
+  res.json({
+    foo: "bar",
+  });
 });
 
 app.listen(port, () => {
