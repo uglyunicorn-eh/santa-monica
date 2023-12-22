@@ -8,7 +8,7 @@ import { commonHeaders } from "src/utils/express/commonHeaders";
 
 dotenv.config();
 
-const port = process.env.PORT || 3000;
+const port = process.env.PORT;
 
 const app: Express = express();
 
@@ -24,6 +24,10 @@ app.get("/", (req: Request, res: Response) => {
   });
 });
 
-app.listen(port, () => {
-  console.log(`[server]: Server is running at http://localhost:${port}`);
-});
+if (port) {
+  app.listen(port, () => {
+    console.log(`[server]: Server is running at http://localhost:${port}`);
+  });
+}
+
+module.exports = app;
