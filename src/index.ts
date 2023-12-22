@@ -4,7 +4,7 @@ import express, { Express, Request, Response } from "express";
 import helmet from "helmet";
 import morgan from "morgan";
 
-import { commonHeaders } from "./utils/express/commonHeaders";
+import { commonHeaders } from "src/utils/express/commonHeaders";
 
 dotenv.config();
 

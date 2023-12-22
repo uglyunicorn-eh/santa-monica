@@ -2,7 +2,6 @@
   "compilerOptions": {
     "target": "esnext",
     "module": "commonjs",
-    // "rootDir": "./src",
     "moduleResolution": "node",
     "resolveJsonModule": true,
     "sourceMap": false,
@@ -15,14 +14,8 @@
     "strict": true,
     "noImplicitAny": true,
     "skipLibCheck": true,
-
-    // "baseUrl": ".",
-    // "paths": {
-    //   "*": [
-    //     "node_modules/*",
-    //     "src/*"
-    //   ],
-    // }
+    "baseUrl": "",
+    "paths": {
+    }
   },
-  // "include": ["src/**/*"]
 }

@@ -4,7 +4,7 @@ module.exports = {
   entry: './src/lambda.ts',
   target: 'node',
   mode: 'production',
-  // devtool: 'source-map',
+  devtool: 'source-map',
   module: {
     rules: [
       {
@@ -16,6 +16,9 @@ module.exports = {
   },
   resolve: {
     extensions: ['.tsx', '.ts', '.js'],
+    alias: {
+      src: path.resolve(__dirname, 'src'),
+    }
   },
   output: {
     path: path.join(__dirname, 'dist'),
