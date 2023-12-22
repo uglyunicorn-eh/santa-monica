@@ -1,13 +1,28 @@
 {
   "name": "santa-monica",
-  "description": "Back yard of the Anonymous Ded Morozes",
+  "description": "Backyard of the Anonymous Ded Morozes",
   "version": "2.0.0.preview",
   "license": "MIT",
-  "main": "src/index.ts",
+  "main": "main.js",
+  "config": {
+    "s3BucketName": "gnomik.me",
+    "region": "us-west-2",
+    "cloudFormationStackName": "gnomik",
+    "functionName": "gnomik",
+    "domain": "api.gnomik.me"
+  },
   "scripts": {
+    "invoke-lambda": "cross-var aws lambda invoke --function-name $npm_package_config_functionName --region $npm_package_config_region --payload file://api-gateway-event.json lambda-invoke-response.json && cat lambda-invoke-response.json",
+    "create-bucket": "cross-var aws s3 mb s3://$npm_package_config_s3BucketName --region $npm_package_config_region",
+    "delete-bucket": "cross-var aws s3 rb s3://$npm_package_config_s3BucketName --region $npm_package_config_region",
+    "package": "cross-var aws cloudformation package --template ./sam-template.yaml --s3-bucket $npm_package_config_s3BucketName --output-template sam-template.packaged.yaml --region $npm_package_config_region",
+    "deploy": "cross-var aws cloudformation deploy --template-file sam-template.packaged.yaml --stack-name $npm_package_config_cloudFormationStackName --capabilities CAPABILITY_IAM --region $npm_package_config_region --parameter-overrides DomainName=$npm_package_config_domain",
+    "package-deploy": "yarn build && yarn package && yarn deploy",
+    "delete-stack": "cross-var aws cloudformation delete-stack --stack-name $npm_package_config_cloudFormationStackName --region $npm_package_config_region",
+    "setup": "yarn && (cross-var aws s3api get-bucket-location --bucket $npm_package_config_s3BucketName --region $npm_package_config_region || yarn create-bucket) && yarn package-deploy",
+    "build": "webpack-cli",
     "start": "ts-node src/index.ts",
     "dev": "NODE_PATH=./ nodemon -r dotenv/config src/index.ts dotenv_config_path=.env.local",
-    "build": "tsc",
     "lint": "eslint --fix src test",
     "test": "jest",
     "typecheck": "tsc --noEmit"
@@ -23,6 +38,7 @@
   },
   "homepage": "https://github.com/uglyunicorn-eh/santa-monica",
   "dependencies": {
+    "@codegenie/serverless-express": "^4.12.5",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
@@ -34,8 +50,13 @@
     "@types/express": "^4.17.21",
     "@types/morgan": "^1.9.9",
     "@types/node": "^20.10.5",
+    "cross-var": "^1.1.0",
     "nodemon": "^3.0.2",
+    "source-map-support": "^0.5.21",
+    "ts-loader": "^9.5.1",
     "ts-node": "^10.9.2",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "webpack": "^5.89.0",
+    "webpack-cli": "^5.1.4"
   }
 }

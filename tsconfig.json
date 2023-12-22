@@ -2,18 +2,27 @@
   "compilerOptions": {
     "target": "esnext",
     "module": "commonjs",
-    "rootDir": "./src",
+    // "rootDir": "./src",
     "moduleResolution": "node",
-    "baseUrl": "./",
     "resolveJsonModule": true,
+    "sourceMap": false,
     "allowJs": false,
-    "outDir": "./dist",
+    "outDir": "dist",
     "removeComments": true,
     "isolatedModules": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "strict": true,
     "noImplicitAny": true,
-    "skipLibCheck": true
-  }
+    "skipLibCheck": true,
+
+    // "baseUrl": ".",
+    // "paths": {
+    //   "*": [
+    //     "node_modules/*",
+    //     "src/*"
+    //   ],
+    // }
+  },
+  // "include": ["src/**/*"]
 }

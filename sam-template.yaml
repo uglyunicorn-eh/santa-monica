@@ -1,0 +1,43 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Anonymous Ded Morozes backyard infrastructure
+
+Resources:
+  MyApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+
+  MyLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./dist/main.js
+      Runtime: nodejs20.x
+      PackageType: Zip
+      Handler: main.handler
+      Timeout: 20
+      FunctionName: gnomik-api-function
+
+      Events:
+        RootGet:
+          Type: Api
+          Properties:
+            Path: /
+            Method: get
+            RestApiId:
+              Ref: MyApi
+        AnotherGet:
+          Type: Api
+          Properties:
+            Path: /another
+            Method: get
+            RestApiId:
+              Ref: MyApi
+
+  MyApiMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Properties:
+      ApiId: !Ref MyApi
+      DomainName: api.gnomik.me
+      Stage: prod

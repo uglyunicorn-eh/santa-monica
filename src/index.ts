@@ -4,13 +4,13 @@ import express, { Express, Request, Response } from "express";
 import helmet from "helmet";
 import morgan from "morgan";
 
-import { commonHeaders } from "src/utils/express/commonHeaders";
+import { commonHeaders } from "./utils/express/commonHeaders";
 
 dotenv.config();
 
 const port = process.env.PORT;
 
-const app: Express = express();
+export const app: Express = express();
 
 app.use(morgan("dev"));
 app.use(helmet());
@@ -20,7 +20,13 @@ app.use(commonHeaders());
 
 app.get("/", (req: Request, res: Response) => {
   res.json({
-    foo: "bar",
+    foo: "bar1",
+  });
+});
+
+app.get("/another", (req: Request, res: Response) => {
+  res.json({
+    koo: "voo",
   });
 });
 
@@ -29,5 +35,3 @@ if (port) {
     console.log(`[server]: Server is running at http://localhost:${port}`);
   });
 }
-
-module.exports = app;
