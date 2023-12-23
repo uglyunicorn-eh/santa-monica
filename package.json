@@ -16,7 +16,7 @@
     "create-bucket": "cross-var aws s3 mb s3://$npm_package_config_s3BucketName --region $npm_package_config_region",
     "delete-bucket": "cross-var aws s3 rb s3://$npm_package_config_s3BucketName --region $npm_package_config_region",
     "package": "cross-var aws cloudformation package --template ./sam-template.yaml --s3-bucket $npm_package_config_s3BucketName --output-template sam-template.packaged.yaml --region $npm_package_config_region",
-    "deploy": "cross-var aws cloudformation deploy --template-file sam-template.packaged.yaml --stack-name $npm_package_config_cloudFormationStackName --capabilities CAPABILITY_IAM --region $npm_package_config_region --parameter-overrides DomainName=$npm_package_config_domain",
+    "deploy": "cross-var aws cloudformation deploy --template-file sam-template.packaged.yaml --stack-name $npm_package_config_cloudFormationStackName --capabilities CAPABILITY_IAM --region $npm_package_config_region --parameter-overrides DomainName=$npm_package_config_domain --parameter-overrides SENTRY_DSN=$SENTRY_DSN",
     "package-deploy": "yarn build && yarn package && yarn deploy",
     "delete-stack": "cross-var aws cloudformation delete-stack --stack-name $npm_package_config_cloudFormationStackName --region $npm_package_config_region",
     "setup": "yarn && (cross-var aws s3api get-bucket-location --bucket $npm_package_config_s3BucketName --region $npm_package_config_region || yarn create-bucket) && yarn package-deploy",
@@ -39,6 +39,9 @@
   "homepage": "https://github.com/uglyunicorn-eh/santa-monica",
   "dependencies": {
     "@codegenie/serverless-express": "^4.12.5",
+    "@sentry/profiling-node": "^1.3.2",
+    "@sentry/serverless": "^7.91.0",
+    "@sentry/webpack-plugin": "^2.10.2",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",

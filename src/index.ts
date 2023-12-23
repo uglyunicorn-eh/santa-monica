@@ -25,6 +25,9 @@ app.get("/", (req: Request, res: Response) => {
   });
 });
 
+app.get("/error", (req: Request, res: Response) => {
+  throw new Error("Don't panic it's a drill.");
+});
 
 if (port) {
   app.listen(port, () => {

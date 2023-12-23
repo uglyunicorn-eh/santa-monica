@@ -5,3 +5,6 @@ node_modules
 .env.local
 sam-template.packaged.yaml
 *.log
+
+# Sentry Config File
+.env.sentry-build-plugin

@@ -3,6 +3,11 @@ AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 Description: Anonymous Ded Morozes backyard infrastructure
 
+Parameters:
+  SENTRY_DSN:
+    Type: String
+    Description: Sentry DSN
+
 Resources:
   MyApi:
     Type: AWS::Serverless::Api
@@ -19,12 +24,24 @@ Resources:
       Timeout: 20
       FunctionName: gnomik-api-function
 
+      Environment:
+        Variables:
+          NODE_ENV: production
+          SENTRY_DSN: !Ref SENTRY_DSN
+
       Events:
         RootGet:
           Type: Api
           Properties:
             Path: /
-            Method: get
+            Method: any
+            RestApiId:
+              Ref: MyApi
+        ErrorGet:
+          Type: Api
+          Properties:
+            Path: /{proxy+}
+            Method: any
             RestApiId:
               Ref: MyApi
 
