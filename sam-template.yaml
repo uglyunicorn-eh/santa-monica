@@ -4,7 +4,7 @@ Transform: AWS::Serverless-2016-10-31
 Description: Anonymous Ded Morozes backyard infrastructure
 
 Parameters:
-  SENTRY_DSN:
+  sentryDsn:
     Type: String
     Description: Sentry DSN
 
@@ -27,7 +27,7 @@ Resources:
       Environment:
         Variables:
           NODE_ENV: production
-          SENTRY_DSN: !Ref SENTRY_DSN
+          SENTRY_DSN: !Ref sentryDsn
 
       Events:
         RootGet:
