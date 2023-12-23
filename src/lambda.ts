@@ -1,6 +1,6 @@
 import serverlessExpress from '@codegenie/serverless-express';
 // import { ProfilingIntegration } from "@sentry/profiling-node";
-import Sentry from "@sentry/serverless";
+import * as Sentry from "@sentry/serverless";
 import 'source-map-support/register';
 import { app } from '.';
 
