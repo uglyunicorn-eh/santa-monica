@@ -36,10 +36,6 @@ app.use(cors());
 app.use(express.json());
 app.use(commonHeaders());
 
-if (SENTRY_DSN) {
-  app.use(Sentry.Handlers.errorHandler());
-}
-
 app.get("/", (req: Request, res: Response) => {
   res.json({
     hello: "world",
@@ -51,6 +47,11 @@ app.get("/", (req: Request, res: Response) => {
 app.get("/error", (req: Request, res: Response) => {
   throw new Error("Don't panic it's a drill.");
 });
+
+
+if (SENTRY_DSN) {
+  app.use(Sentry.Handlers.errorHandler());
+}
 
 if (port) {
   app.listen(port, () => {
