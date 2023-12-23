@@ -1,5 +1,4 @@
 import serverlessExpress from '@codegenie/serverless-express';
-import { ProfilingIntegration } from "@sentry/profiling-node";
 import * as Sentry from "@sentry/serverless";
 import 'source-map-support/register';
 import { app } from '.';
@@ -13,9 +12,6 @@ if (SENTRY_DSN) {
     dsn: SENTRY_DSN,
     release: `${process.env.npm_package_name}@${process.env.npm_package_version}`,
     environment: process.env.NODE_ENV,
-    integrations: [
-      new ProfilingIntegration(),
-    ],
     // Performance Monitoring
     tracesSampleRate: 1.0,
     // Set sampling rate for profiling - this is relative to tracesSampleRate
