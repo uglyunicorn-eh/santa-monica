@@ -1,5 +1,5 @@
 import serverlessExpress from '@codegenie/serverless-express';
-// import { ProfilingIntegration } from "@sentry/profiling-node";
+import { ProfilingIntegration } from "@sentry/profiling-node";
 import * as Sentry from "@sentry/serverless";
 import 'source-map-support/register';
 import { app } from '.';
@@ -11,13 +11,15 @@ let lambdaHandler: any = serverlessExpress({ app });
 if (SENTRY_DSN) {
   Sentry.AWSLambda.init({
     dsn: SENTRY_DSN,
-    //   // integrations: [
-    //   //   new ProfilingIntegration(),
-    //   // ],
-    //   // // Performance Monitoring
-    //   // tracesSampleRate: 1.0,
-    //   // // Set sampling rate for profiling - this is relative to tracesSampleRate
-    //   // profilesSampleRate: 1.0,
+    release: `${process.env.npm_package_name}@${process.env.npm_package_version}`,
+    environment: process.env.NODE_ENV,
+    integrations: [
+      new ProfilingIntegration(),
+    ],
+    // Performance Monitoring
+    tracesSampleRate: 1.0,
+    // Set sampling rate for profiling - this is relative to tracesSampleRate
+    profilesSampleRate: 1.0,
   });
   lambdaHandler = Sentry.AWSLambda.wrapHandler(lambdaHandler);
 }

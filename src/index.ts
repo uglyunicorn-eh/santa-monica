@@ -22,6 +22,7 @@ app.get("/", (req: Request, res: Response) => {
   res.json({
     hello: "world",
     this: "is good!!!",
+    env: `${process.env.npm_package_name}@${process.env.npm_package_version}`,
   });
 });
 

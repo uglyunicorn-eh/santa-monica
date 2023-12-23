@@ -36,6 +36,9 @@ module.exports = {
   plugins: [sentryWebpackPlugin({
     authToken: process.env.SENTRY_AUTH_TOKEN,
     org: "uglyunicorn",
-    project: "santa-monica"
+    project: "santa-monica",
+    release: {
+      name: `${process.env.npm_package_name}@${process.env.npm_package_version}`,
+    },
   })]
 }
