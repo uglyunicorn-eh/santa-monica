@@ -1,3 +1,5 @@
+import { RewriteFrames } from '@sentry/integrations';
+import * as Sentry from '@sentry/node';
 import cors from "cors";
 import dotenv from "dotenv";
 import express, { Express, Request, Response } from "express";
@@ -8,11 +10,25 @@ import { commonHeaders } from "src/utils/express/commonHeaders";
 
 import PACKAGE from 'package.json';
 
+const SENTRY_DSN = process.env.SENTRY_DSN;
+
 dotenv.config();
 
 const port = process.env.PORT;
 
 export const app: Express = express();
+
+if (SENTRY_DSN) {
+  Sentry.init({
+    dsn: SENTRY_DSN,
+    release: `${PACKAGE.name}@${PACKAGE.version}`,
+    environment: process.env.NODE_ENV,
+    integrations: [new RewriteFrames()],
+    tracesSampleRate: 1.0,
+    profilesSampleRate: 1.0,
+  });
+  app.use(Sentry.Handlers.requestHandler());
+}
 
 app.use(morgan("dev"));
 app.use(helmet());
