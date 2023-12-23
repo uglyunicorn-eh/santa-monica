@@ -36,6 +36,10 @@ app.use(cors());
 app.use(express.json());
 app.use(commonHeaders());
 
+if (SENTRY_DSN) {
+  app.use(Sentry.Handlers.errorHandler());
+}
+
 app.get("/", (req: Request, res: Response) => {
   res.json({
     hello: "world",
