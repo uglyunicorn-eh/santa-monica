@@ -16,6 +16,7 @@
     "skipLibCheck": true,
     "baseUrl": "",
     "paths": {
+      "package.json": ["package.json"],
     }
   },
 }

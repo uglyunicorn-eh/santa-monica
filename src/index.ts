@@ -6,6 +6,8 @@ import morgan from "morgan";
 
 import { commonHeaders } from "src/utils/express/commonHeaders";
 
+import PACKAGE from 'package.json';
+
 dotenv.config();
 
 const port = process.env.PORT;
@@ -22,7 +24,7 @@ app.get("/", (req: Request, res: Response) => {
   res.json({
     hello: "world",
     this: "is good!!!",
-    env: `${process.env.npm_package_name}@${process.env.npm_package_version}`,
+    env: `${PACKAGE.name}@${PACKAGE.version}`,
   });
 });
 

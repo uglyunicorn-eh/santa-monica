@@ -4,6 +4,8 @@ const {
 
 const path = require('path')
 
+var PACKAGE = require('./package.json');
+
 module.exports = {
   entry: './src/lambda.ts',
   target: 'node',
@@ -24,6 +26,7 @@ module.exports = {
     extensions: ['.tsx', '.ts', '.js'],
     alias: {
       src: path.resolve(__dirname, 'src'),
+      "package.json": path.resolve(__dirname, 'package.json'),
     }
   },
 
@@ -38,7 +41,7 @@ module.exports = {
     org: "uglyunicorn",
     project: "santa-monica",
     release: {
-      name: `${process.env.npm_package_name}@${process.env.npm_package_version}`,
+      name: `${PACKAGE.name}@${PACKAGE.version}`,
     },
   })]
 }
