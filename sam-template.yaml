@@ -34,14 +34,14 @@ Resources:
           Type: Api
           Properties:
             Path: /
-            Method: any
+            Method: get
             RestApiId:
               Ref: MyApi
         ErrorGet:
           Type: Api
           Properties:
-            Path: /{proxy+}
-            Method: any
+            Path: /error
+            Method: get
             RestApiId:
               Ref: MyApi
 
