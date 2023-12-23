@@ -20,15 +20,11 @@ app.use(commonHeaders());
 
 app.get("/", (req: Request, res: Response) => {
   res.json({
-    foo: "bar1",
+    hello: "world",
+    this: "is good!!!",
   });
 });
 
-app.get("/another", (req: Request, res: Response) => {
-  res.json({
-    koo: "voo",
-  });
-});
 
 if (port) {
   app.listen(port, () => {

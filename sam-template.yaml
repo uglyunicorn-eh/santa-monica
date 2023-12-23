@@ -27,13 +27,6 @@ Resources:
             Method: get
             RestApiId:
               Ref: MyApi
-        AnotherGet:
-          Type: Api
-          Properties:
-            Path: /another
-            Method: get
-            RestApiId:
-              Ref: MyApi
 
   MyApiMapping:
     Type: AWS::ApiGatewayV2::ApiMapping
