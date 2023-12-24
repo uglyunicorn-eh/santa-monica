@@ -50,8 +50,8 @@ export const app: Express = express();
   let db: Db;
 
   try {
-    db = (await mongoClient.connect()).db();
-    app.use(commonContext({ db }));
+    // db = (await mongoClient.connect()).db();
+    // app.use(commonContext({ db }));
   }
   catch (error) {
     Sentry.captureException(error);
@@ -60,9 +60,10 @@ export const app: Express = express();
   app.get(
     "/",
     async (req: Request, res: Response) => {
-      const db = req.context.db;
+      // const db = req.context.db;
 
-      const parties = await db.collection('Party').find().toArray();
+      // const parties = await db.collection('Party').find().toArray();
+      const parties = null;
 
       res.ok({ name, version, author, parties });
     },
