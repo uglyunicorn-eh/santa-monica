@@ -7,9 +7,13 @@ export const typeDefs = `#graphql
   type Query {
     app: App!
     user: User
-    # node(id: ID!): Node
-    # party(code: String!): Party
-    # parties(first: Int = 25): [Party!]
+    node(id: ID!): Node
+    party(code: String!): Party
+    parties(first: Int = 25): [Party!]
+  }
+
+  type Mutation {
+    parties: PartiesOpts!
   }
 
   type App {
@@ -20,7 +24,85 @@ export const typeDefs = `#graphql
 
   type User implements Node {
     id: ID!
-    name: String
+    name: String!
+  }
+
+  type Party implements Node {
+    id: ID!
+    name: String!
+    password: String
+    code: String!
+    isJoined: Boolean!
+    isHost: Boolean!
+    isProtected: Boolean!
+    isClosed: Boolean!
+    participantCount: Int
+    participants: [String!]
+    target: User
+  }
+
+  enum MutationStatus {
+    ok
+    error
+  }
+
+  type UserError {
+    fieldName: String
+    messages: [String!]
+  }
+
+  interface MutationPayload {
+    status: MutationStatus!
+    userErrors: [UserError!]
+  }
+
+  type PartiesOpts {
+    createParty(input: CreatePartyInput!): CreatePartyPayload!
+    joinParty(input: JoinPartyInput!): JoinPartyPayload!
+    leaveParty(input: LeavePartyInput!): LeavePartyPayload!
+    closeParty(input: ClosePartyInput!): ClosePartyPayload!
+  }
+
+  input CreatePartyInput {
+    name: String!
+    password: String
+  }
+
+  type CreatePartyPayload implements MutationPayload {
+    status: MutationStatus!
+    userErrors: [UserError!]
+    node: Party
+  }
+
+  input JoinPartyInput {
+    party: ID!
+    password: String
+  }
+
+  type JoinPartyPayload implements MutationPayload {
+    status: MutationStatus!
+    userErrors: [UserError!]
+    node: Party
+  }
+
+  input LeavePartyInput {
+    party: ID!
+  }
+
+  type LeavePartyPayload implements MutationPayload {
+    status: MutationStatus!
+    userErrors: [UserError!]
+    node: Party
+  }
+
+  input ClosePartyInput {
+    party: ID!
+  }
+
+  type ClosePartyPayload implements MutationPayload {
+    status: MutationStatus!
+    userErrors: [UserError!]
+    node: Party
   }
 
 `;
