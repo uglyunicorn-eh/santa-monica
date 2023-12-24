@@ -43,6 +43,10 @@ app.get("/", (req: Request, res: Response) => {
   });
 });
 
+app.get("/fail", (req: Request, res: Response) => {
+  throw new Error("Don't panic! This is a drill! Piu-piu-piu!");
+
+});
 
 if (SENTRY_DSN) {
   app.use(Sentry.Handlers.errorHandler());
