@@ -28,6 +28,7 @@ export const createServer = async (context: Partial<ApolloContext> = {}) => {
     plugins: [
       ApolloServerPluginLandingPageDisabled(),
     ],
+    introspection: true,
   });
   await server.start();
   return server;
