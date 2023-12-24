@@ -4,11 +4,11 @@ import cors from "cors";
 import dotenv from "dotenv";
 import express, { Express, Request, Response } from "express";
 import helmet from "helmet";
-import { MongoClient } from 'mongodb';
+import { Db, MongoClient } from 'mongodb';
 import morgan from "morgan";
 
 import { createServer } from 'src/apollo';
-import { commonHeaders, commonHelpers } from "src/utils/express";
+import { commonContext, commonHeaders, commonHelpers } from "src/utils/express";
 
 import { author, name, version } from 'package.json';
 
@@ -23,8 +23,6 @@ const mongoClient = new MongoClient(MONGODB_URI);
 export const app: Express = express();
 
 (async function main() {
-
-  const db = (await mongoClient.connect()).db();
 
   if (SENTRY_DSN) {
     Sentry.init({
@@ -47,7 +45,17 @@ export const app: Express = express();
   app.use(express.json());
 
   app.use(commonHeaders());
-  app.use(commonHelpers({ db }));
+  app.use(commonHelpers());
+
+  let db: Db;
+
+  try {
+    db = (await mongoClient.connect()).db();
+    app.use(commonContext({ db }));
+  }
+  catch (error) {
+    Sentry.captureException(error);
+  }
 
   app.get(
     "/",

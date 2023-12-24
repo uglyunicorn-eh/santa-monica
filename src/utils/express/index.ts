@@ -9,12 +9,18 @@ type Props = {
   db: Db;
 };
 
-export const commonHelpers = ({ db }: Props) => {
+export const commonContext = ({ db }: Props) => {
   return (req: Request, res: Response, next: NextFunction) => {
     req.context = {
       db,
     };
 
+    next();
+  };
+};
+
+export const commonHelpers = () => {
+  return (req: Request, res: Response, next: NextFunction) => {
     res.ok = (data?: any, status: number = 200) => {
       res.status(status).json({
         status: 'ok',
