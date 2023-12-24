@@ -19,6 +19,9 @@
     "baseUrl": "",
     "paths": {
       "package.json": ["package.json"],
-    }
+    },
+  },
+  "ts-node": {
+    "files": true,
   },
 }

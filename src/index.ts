@@ -9,7 +9,7 @@ import morgan from "morgan";
 import { createServer } from 'src/apollo';
 import { commonHeaders, commonHelpers } from "src/utils/express";
 
-import PACKAGE from 'package.json';
+import { name, version, author } from 'package.json';
 
 dotenv.config();
 
@@ -23,7 +23,7 @@ export const app: Express = express();
   if (SENTRY_DSN) {
     Sentry.init({
       dsn: SENTRY_DSN,
-      release: `${PACKAGE.name}@${PACKAGE.version}`,
+      release: `${name}@${version}`,
       environment: process.env.NODE_ENV,
       integrations: [
         new Sentry.Integrations.Http({ tracing: true }),
@@ -43,13 +43,24 @@ export const app: Express = express();
   app.use(commonHeaders());
   app.use(commonHelpers());
 
-  app.use(expressMiddleware(await createServer()));
+
+  app.get(
+    "/",
+    (req: Request, res: Response) => {
+      res.ok({ name, version, author });
+    },
+  );
+
+  app.all(
+    "/graph",
+    expressMiddleware(await createServer()),
+  );
 
   app.get(
     "/fail",
     (req: Request, res: Response) => {
       const error = "Don't panic! This is a drill! Piu-piu-piu!";
-      // res.die({ error }, 500);
+      res.die({ error }, 500);
       Sentry.captureMessage(error);
     },
   );
@@ -59,7 +70,7 @@ export const app: Express = express();
   }
 
   app.use((_err: any, req: any, res: any, _next: any) => {
-    // res.die({ error: 'Ugly Unicorn just puked a little bit :(', errorId: req.sentry }, 500);
+    res.die({ error: 'Ugly Unicorn just puked a little bit :(', errorId: req.sentry }, 500);
   });
 
   if (port) {
