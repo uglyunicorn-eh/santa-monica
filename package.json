@@ -1,7 +1,7 @@
 {
   "name": "santa-monica",
   "description": "Backyard of the Anonymous Ded Morozes",
-  "version": "2.0.1-preview",
+  "version": "2.0.2-preview",
   "license": "MIT",
   "main": "main.js",
   "config": {
