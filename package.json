@@ -4,6 +4,7 @@
   "version": "2.0.2-preview",
   "license": "MIT",
   "main": "main.js",
+  "author": "Ugly Unicorn <info@uglyunicorn.ca>",
   "config": {
     "s3BucketName": "gnomik-builds",
     "region": "us-west-2",
@@ -32,7 +33,6 @@
     "url": "git@github.com:uglyunicorn-eh/santa-monica.git"
   },
   "keywords": [],
-  "author": "Pavel Reznikov <pashka.reznikov@gmail.com>",
   "bugs": {
     "url": "https://github.com/uglyunicorn-eh/santa-monica/issues"
   },

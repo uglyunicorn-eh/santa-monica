@@ -1,19 +1,22 @@
 import { ApolloServer } from '@apollo/server';
 import { ApolloServerPluginLandingPageDisabled } from '@apollo/server/plugin/disabled';
 
+import { author, name, version } from 'package.json';
+
+import { typeDefs } from './typeDefs';
+
 export type ApolloContext = {
 
 };
 
-const typeDefs = `#graphql
-  type Query {
-    hello: String
-  }
-`;
-
 const resolvers = {
   Query: {
-    hello: () => 'world',
+    app: () => ({
+      name,
+      author,
+      version,
+    }),
+    user: () => null,
   },
 };
 
