@@ -63,6 +63,8 @@ export const app: Express = express();
       // const db = req.context.db;
       try {
         const db = await mongoClient.connect();
+        const parties = await db.db().collection('Party').find().toArray();
+        return res.ok({ parties });
       }
       catch (error) {
         return res.die({ error }, 500);
