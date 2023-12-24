@@ -50,7 +50,7 @@ export const app: Express = express();
   let db: Db;
 
   try {
-    // db = (await mongoClient.connect()).db();
+    // db = await mongoClient.connect();
     // app.use(commonContext({ db }));
   }
   catch (error) {
@@ -61,14 +61,14 @@ export const app: Express = express();
     "/",
     async (req: Request, res: Response) => {
       // const db = req.context.db;
-      try {
-        const db = await mongoClient.connect();
-        const parties = await db.db().collection('Party').find().toArray();
-        return res.ok({ parties });
-      }
-      catch (error) {
-        return res.die({ error }, 500);
-      }
+      // try {
+      //   const db = await mongoClient.connect();
+      //   const parties = await db.db().collection('Party').find().toArray();
+      //   return res.ok({ parties });
+      // }
+      // catch (error) {
+      //   return res.die({ error }, 500);
+      // }
 
       // const parties = await db.collection('Party').find().toArray();
       const parties = null;
