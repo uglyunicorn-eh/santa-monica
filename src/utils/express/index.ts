@@ -1,13 +1,18 @@
-import { Request, Response, NextFunction } from "express";
+import { NextFunction, Request, Response } from "express";
+import { Db } from "mongodb";
 
 export interface RequestContext {
-  // db: Db;
+  db: Db;
 }
 
-export const commonHelpers = (/*db: Db*/) => {
+type Props = {
+  db: Db;
+};
+
+export const commonHelpers = ({ db }: Props) => {
   return (req: Request, res: Response, next: NextFunction) => {
     req.context = {
-      // db,
+      db,
     };
 
     res.ok = (data?: any, status: number = 200) => {

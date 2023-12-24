@@ -47,11 +47,13 @@ export const app: Express = express();
   app.use(express.json());
 
   app.use(commonHeaders());
-  app.use(commonHelpers());
+  app.use(commonHelpers({ db }));
 
   app.get(
     "/",
-    async (_: Request, res: Response) => {
+    async (req: Request, res: Response) => {
+      const db = req.context.db;
+
       const parties = await db.collection('Party').find().toArray();
 
       res.ok({ name, version, author, parties });
