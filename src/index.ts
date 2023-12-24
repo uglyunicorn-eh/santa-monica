@@ -5,7 +5,7 @@ import express, { Express, Request, Response } from "express";
 import helmet from "helmet";
 import morgan from "morgan";
 
-import { commonHeaders } from "src/utils/express/commonHeaders";
+import { commonHeaders, commonHelpers } from "src/utils/express";
 
 import PACKAGE from 'package.json';
 
@@ -35,18 +35,27 @@ app.use(morgan("dev"));
 app.use(helmet());
 app.use(cors());
 app.use(express.json());
+
 app.use(commonHeaders());
+app.use(commonHelpers());
 
-app.get("/", (req: Request, res: Response) => {
-  res.json({
-    version: `${PACKAGE.name}@${PACKAGE.version}`,
-  });
-});
+app.get(
+  "/",
+  (req: Request, res: Response) => {
+    res.json({
+      version: `${PACKAGE.name}@${PACKAGE.version}`,
+    });
+  },
+);
 
-app.get("/fail", (req: Request, res: Response) => {
-  throw new Error("Don't panic! This is a drill! Piu-piu-piu!");
-
-});
+app.get(
+  "/fail",
+  (req: Request, res: Response) => {
+    const error = "Don't panic! This is a drill! Piu-piu-piu!";
+    res.die({ error }, 500);
+    Sentry.captureMessage(error);
+  },
+);
 
 if (SENTRY_DSN) {
   app.use(Sentry.Handlers.errorHandler());
