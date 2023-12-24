@@ -8,6 +8,10 @@ Parameters:
     Type: String
     Description: Sentry DSN
 
+  mongodbUri:
+    Type: String
+    Description: MongoDB URI
+
 Resources:
   MyApi:
     Type: AWS::Serverless::Api
@@ -28,6 +32,7 @@ Resources:
         Variables:
           NODE_ENV: production
           SENTRY_DSN: !Ref sentryDsn
+          MONGODB_URI: !Ref mongodbUri
 
       Events:
         RootGet:

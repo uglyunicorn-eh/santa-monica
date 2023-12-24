@@ -4,21 +4,27 @@ import cors from "cors";
 import dotenv from "dotenv";
 import express, { Express, Request, Response } from "express";
 import helmet from "helmet";
+import { MongoClient } from 'mongodb';
 import morgan from "morgan";
 
 import { createServer } from 'src/apollo';
 import { commonHeaders, commonHelpers } from "src/utils/express";
 
-import { name, version, author } from 'package.json';
+import { author, name, version } from 'package.json';
 
 dotenv.config();
 
 const SENTRY_DSN = process.env.SENTRY_DSN;
+const MONGODB_URI = process.env.MONGODB_URI!;
 const port = process.env.PORT;
+
+const mongoClient = new MongoClient(MONGODB_URI);
 
 export const app: Express = express();
 
 (async function main() {
+
+  const db = (await mongoClient.connect()).db();
 
   if (SENTRY_DSN) {
     Sentry.init({
@@ -43,22 +49,30 @@ export const app: Express = express();
   app.use(commonHeaders());
   app.use(commonHelpers());
 
-
   app.get(
     "/",
-    (req: Request, res: Response) => {
-      res.ok({ name, version, author });
+    async (_: Request, res: Response) => {
+      const parties = await db.collection('Party').find().toArray();
+
+      res.ok({ name, version, author, parties });
     },
   );
 
   app.all(
     "/graph",
-    expressMiddleware(await createServer()),
+    expressMiddleware(
+      await createServer(),
+      {
+        context: async () => ({
+          db,
+        }),
+      },
+    ),
   );
 
   app.get(
     "/fail",
-    (req: Request, res: Response) => {
+    (_: Request, res: Response) => {
       const error = "Don't panic! This is a drill! Piu-piu-piu!";
       res.die({ error }, 500);
       Sentry.captureMessage(error);
