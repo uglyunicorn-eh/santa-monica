@@ -4,7 +4,7 @@
     "module": "commonjs",
     "moduleResolution": "node",
     "resolveJsonModule": true,
-    "sourceMap": true,
+    "inlineSourceMap": true,
     "inlineSources": true,
     "sourceRoot": "/",
     "allowJs": false,

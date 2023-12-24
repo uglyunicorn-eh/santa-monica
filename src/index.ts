@@ -52,6 +52,10 @@ if (SENTRY_DSN) {
   app.use(Sentry.Handlers.errorHandler());
 }
 
+app.use((_err: any, req: any, res: any, _next: any) => {
+  res.die({ error: 'Ugly Unicorn just puked a little bit :(', errorId: req.sentry }, 500);
+});
+
 if (port) {
   app.listen(port, () => {
     console.log(`[server]: Server is running at http://localhost:${port}`);
