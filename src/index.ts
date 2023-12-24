@@ -46,14 +46,8 @@ app.use(commonHeaders());
 
 app.get("/", (req: Request, res: Response) => {
   res.json({
-    hello: "world",
-    this: "is good!!!",
-    env: `${PACKAGE.name}@${PACKAGE.version}`,
+    version: `${PACKAGE.name}@${PACKAGE.version}`,
   });
-});
-
-app.get("/error", (req: Request, res: Response) => {
-  throw new Error("Don't panic it's a drill.");
 });
 
 
