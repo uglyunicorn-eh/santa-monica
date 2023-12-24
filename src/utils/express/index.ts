@@ -6,23 +6,24 @@ export interface RequestContext {
 
 export const commonHelpers = (/*db: Db*/) => {
   return (req: Request, res: Response, next: NextFunction) => {
-    req.context = {
-      // db,
-    };
+    // req.context
+    // req.context = {
+    //   // db,
+    // };
 
-    res.ok = (data?: any, status: number = 200) => {
-      res.status(status).json({
-        status: 'ok',
-        ...data,
-      });
-    };
+    // res.ok = (data?: any, status: number = 200) => {
+    //   res.status(status).json({
+    //     status: 'ok',
+    //     ...data,
+    //   });
+    // };
 
-    res.die = (data?: any, status: number = 400) => {
-      res.status(status).json({
-        status: 'error',
-        ...data,
-      });
-    };
+    // res.die = (data?: any, status: number = 400) => {
+    //   res.status(status).json({
+    //     status: 'error',
+    //     ...data,
+    //   });
+    // };
 
     next();
   };

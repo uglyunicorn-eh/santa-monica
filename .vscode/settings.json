@@ -1,8 +1,8 @@
 {
-  "javascript.preferences.importModuleSpecifier": "relative",
+  "javascript.preferences.importModuleSpecifier": "non-relative",
   "cSpell.words": [
     "gnomik",
     "Morozes"
   ],
-  "typescript.preferences.importModuleSpecifier": "relative"
+  "typescript.preferences.importModuleSpecifier": "non-relative"
 }

@@ -38,17 +38,21 @@
   },
   "homepage": "https://github.com/uglyunicorn-eh/santa-monica",
   "dependencies": {
+    "@apollo/server": "^4.9.5",
     "@codegenie/serverless-express": "^4.12.5",
     "@sentry/integrations": "^7.91.0",
     "@sentry/node": "^7.91.0",
     "@sentry/webpack-plugin": "^2.10.2",
+    "body-parser": "^1.20.2",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
+    "graphql": "^16.8.1",
     "helmet": "^7.1.0",
     "morgan": "^1.10.0"
   },
   "devDependencies": {
+    "@types/body-parser": "^1.19.5",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/morgan": "^1.9.9",
