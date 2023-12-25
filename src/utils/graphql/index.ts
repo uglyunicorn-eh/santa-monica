@@ -8,3 +8,5 @@ export function getPathFromInfo({ path }: GraphQLResolveInfo): string {
   items.push(path.key);
   return items.join('.');
 }
+
+export { default as resolvable } from './resolvable';

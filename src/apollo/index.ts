@@ -6,12 +6,16 @@ import { applyMiddleware } from 'graphql-middleware';
 import { ApolloContext } from './context';
 import { authMiddleware, guardMiddleware } from './middleware';
 import resolvers from './resolvers';
+import mutations from './mutations';
 import { typeDefs } from './typeDefs';
 
 export const createServer = async () => {
   const schemaDef = makeExecutableSchema({
     typeDefs,
-    resolvers,
+    resolvers: {
+      ...resolvers,
+      ...mutations,
+    }
   });
 
   const schema = applyMiddleware(

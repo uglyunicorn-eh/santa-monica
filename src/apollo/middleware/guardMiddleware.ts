@@ -8,7 +8,7 @@ export const guardMiddleware = async (resolve: any, root: any, args: any, contex
 
   const path = getPathFromInfo(info);
 
-  if (context.user === null) {
+  if (!context.user) {
     if (info.operation.operation === 'mutation') {
       throw new Error('UNAUTHENTICATED');
     } else if (!/(^app$)|(^app\.)|(^party$)|(^party\.)/.exec(path)) {
