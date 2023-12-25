@@ -13,6 +13,7 @@ export const typeDefs = `#graphql
 
   type Mutation {
     parties: PartiesOpts!
+    auth: AuthOpts!
   }
 
   type App {
@@ -102,6 +103,19 @@ export const typeDefs = `#graphql
     status: MutationStatus!
     userErrors: [UserError!]
     node: Party
+  }
+
+  type AuthOpts {
+    enter(input: EnterInput!): EnterPayload!
+  }
+
+  input EnterInput {
+    email: String!
+  }
+
+  type EnterPayload implements MutationPayload {
+    status: MutationStatus!
+    userErrors: [UserError!]
   }
 
 `;
