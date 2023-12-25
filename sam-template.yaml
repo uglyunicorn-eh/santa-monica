@@ -12,6 +12,10 @@ Parameters:
     Type: String
     Description: MongoDB URI
 
+  sendgridApiKey:
+    Type: String
+    Description: SendGrid API key
+
 Resources:
   MyApi:
     Type: AWS::Serverless::Api
@@ -33,6 +37,7 @@ Resources:
           NODE_ENV: production
           SENTRY_DSN: !Ref sentryDsn
           MONGODB_URI: !Ref mongodbUri
+          SENDGRID_API_KEY: !Ref sendgridApiKey
 
       Events:
         RootGet:
