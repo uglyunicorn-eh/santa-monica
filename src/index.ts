@@ -4,7 +4,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import express, { Express, Request, Response } from "express";
 import helmet from "helmet";
-import { Db, MongoClient } from 'mongodb';
+import { MongoClient } from 'mongodb';
 import morgan from "morgan";
 
 import { createServer } from 'src/apollo';
@@ -59,11 +59,7 @@ export const app: Express = express();
   app.get(
     "/",
     async (req: Request, res: Response) => {
-      const db = await (req.context as RequestContext).getDbConnection();
-
-      const parties = await db.collection('Party').find().toArray();
-
-      res.ok({ name, version, author, parties });
+      return res.ok({ name, version, author });
     },
   );
 
@@ -72,8 +68,9 @@ export const app: Express = express();
     expressMiddleware(
       await createServer(),
       {
-        context: async () => ({
-          dbConn,
+        context: async ({ req }) => ({
+          db: await (req.context as RequestContext).getDbConnection(),
+          user: null as any,
         }),
       },
     ),

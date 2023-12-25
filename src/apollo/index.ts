@@ -5,7 +5,7 @@ import { ApolloContext } from './context';
 import { typeDefs } from './typeDefs';
 import resolvers from './resolvers';
 
-export const createServer = async (context: Partial<ApolloContext> = {}) => {
+export const createServer = async () => {
   const server = new ApolloServer<ApolloContext>({
     typeDefs,
     resolvers,

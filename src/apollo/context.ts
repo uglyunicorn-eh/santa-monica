@@ -1,5 +1,7 @@
-import { MongoClient } from "mongodb";
+import { BaseContext } from "@apollo/server";
+import { Db } from "mongodb";
 
-export type ApolloContext = {
-  dbConn: MongoClient,
+export interface ApolloContext extends BaseContext {
+  db: Db,
+  user?: any,
 };
