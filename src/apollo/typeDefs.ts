@@ -7,7 +7,6 @@ export const typeDefs = `#graphql
   type Query {
     app: App!
     user: User
-    node(id: ID!): Node
     party(code: String!): Party
     parties(first: Int = 25): [Party!]
   }

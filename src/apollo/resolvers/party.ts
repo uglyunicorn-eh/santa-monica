@@ -67,12 +67,17 @@ export default {
   },
 
   parties: async (root: any, { first }: PartiesArgs, { user, db }: ApolloContext, info: any) => {
-    // const memberships = await db.collection('PartyMembership').find({ member: user!._id }).limit(first).toArray();
-    // const partyIds: ObjectId[] = memberships.map(({ party }) => party);
-    // const parties = await db.collection('Party').find({ _id: { $in: partyIds } }).toArray();
-    // return parties.map(async partyEntity => await partyEntityToNode(db, partyEntity as PartyEntity, user));
-
-    const parties = await db.collection('Party').find().toArray();
+    const memberships = await db
+      .collection('PartyMembership')
+      .find(user ? { member: user!._id } : { _id: new ObjectId() })
+      .sort({ _id: -1 })
+      .limit(first)
+      .toArray();
+    const partyIds: ObjectId[] = memberships.map(({ party }) => party);
+    const parties = await db.collection('Party').find({ _id: { $in: partyIds } }).toArray();
     return parties.map(async partyEntity => await partyEntityToNode(db, partyEntity as PartyEntity, user));
+
+    // const parties = await db.collection('Party').find().sort({ _id: -1 }).toArray();
+    // return parties.map(async partyEntity => await partyEntityToNode(db, partyEntity as PartyEntity, user));
   },
 };
