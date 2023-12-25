@@ -1,18 +1,26 @@
 import { NextFunction, Request, Response } from "express";
-import { MongoClient } from "mongodb";
+import { Db, MongoClient } from "mongodb";
 
 export interface RequestContext {
-  dbConn: MongoClient;
+  getDbConnection: () => Promise<Db>;
 }
 
 type Props = {
-  dbConn: MongoClient;
+  mongoClient: MongoClient;
 };
 
-export const commonContext = ({ dbConn }: Props) => {
+export const commonContext = ({ mongoClient }: Props) => {
+  let dbConn: MongoClient;
+
   return (req: Request, res: Response, next: NextFunction) => {
     req.context = {
-      dbConn,
+      getDbConnection: async () => {
+        if (!dbConn) {
+          dbConn = await mongoClient.connect();
+        }
+
+        return dbConn.db();
+      }
     };
 
     next();
