@@ -1,5 +1,5 @@
-import { Db } from "mongodb";
+import { MongoClient } from "mongodb";
 
 export type ApolloContext = {
-  db: Db,
+  dbConn: MongoClient,
 };

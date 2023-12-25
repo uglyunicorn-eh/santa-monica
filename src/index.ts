@@ -8,7 +8,7 @@ import { Db, MongoClient } from 'mongodb';
 import morgan from "morgan";
 
 import { createServer } from 'src/apollo';
-import { commonContext, commonHeaders, commonHelpers } from "src/utils/express";
+import { RequestContext, commonContext, commonHeaders, commonHelpers } from "src/utils/express";
 
 import { author, name, version } from 'package.json';
 
@@ -47,11 +47,11 @@ export const app: Express = express();
   app.use(commonHeaders());
   app.use(commonHelpers());
 
-  let db: Db;
+  let dbConn: MongoClient;
 
   try {
-    // db = await mongoClient.connect();
-    // app.use(commonContext({ db }));
+    dbConn = await mongoClient.connect();
+    app.use(commonContext({ dbConn }));
   }
   catch (error) {
     Sentry.captureException(error);
@@ -60,18 +60,9 @@ export const app: Express = express();
   app.get(
     "/",
     async (req: Request, res: Response) => {
-      // const db = req.context.db;
-      // try {
-      //   const db = await mongoClient.connect();
-      //   const parties = await db.db().collection('Party').find().toArray();
-      //   return res.ok({ parties });
-      // }
-      // catch (error) {
-      //   return res.die({ error }, 500);
-      // }
+      const db = (req.context as RequestContext).dbConn.db();
 
-      // const parties = await db.collection('Party').find().toArray();
-      const parties = null;
+      const parties = await db.collection('Party').find().toArray();
 
       res.ok({ name, version, author, parties });
     },
@@ -83,7 +74,7 @@ export const app: Express = express();
       await createServer(),
       {
         context: async () => ({
-          db,
+          dbConn,
         }),
       },
     ),

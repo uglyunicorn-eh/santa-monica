@@ -1,18 +1,18 @@
 import { NextFunction, Request, Response } from "express";
-import { Db } from "mongodb";
+import { MongoClient } from "mongodb";
 
 export interface RequestContext {
-  db: Db;
+  dbConn: MongoClient;
 }
 
 type Props = {
-  db: Db;
+  dbConn: MongoClient;
 };
 
-export const commonContext = ({ db }: Props) => {
+export const commonContext = ({ dbConn }: Props) => {
   return (req: Request, res: Response, next: NextFunction) => {
     req.context = {
-      db,
+      dbConn,
     };
 
     next();
