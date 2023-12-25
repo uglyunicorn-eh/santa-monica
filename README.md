@@ -1,9 +1,3 @@
----
-runme:
-  id: 01HJH4R6WAQC4Q5CPXPYSV78S0
-  version: v2.0
----
-
 # Anonymous Ded Morozes
 
 ![Welcome to Santa Monica](santa-monica.png)
