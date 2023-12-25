@@ -47,8 +47,6 @@ export const app: Express = express();
   app.use(commonHeaders());
   app.use(commonHelpers());
 
-  let dbConn: MongoClient;
-
   try {
     app.use(commonContext({ mongoClient }));
   }

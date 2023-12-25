@@ -1,14 +1,27 @@
 import { ApolloServer } from '@apollo/server';
 import { ApolloServerPluginLandingPageDisabled } from '@apollo/server/plugin/disabled';
+import { makeExecutableSchema } from '@graphql-tools/schema';
+import { applyMiddleware } from 'graphql-middleware';
 
 import { ApolloContext } from './context';
-import { typeDefs } from './typeDefs';
+import { authMiddleware, guardMiddleware } from './middleware';
 import resolvers from './resolvers';
+import { typeDefs } from './typeDefs';
 
 export const createServer = async () => {
-  const server = new ApolloServer<ApolloContext>({
+  const schemaDef = makeExecutableSchema({
     typeDefs,
     resolvers,
+  });
+
+  const schema = applyMiddleware(
+    schemaDef,
+    authMiddleware,
+    guardMiddleware,
+  );
+
+  const server = new ApolloServer<ApolloContext>({
+    schema,
     includeStacktraceInErrorResponses: false,
     plugins: [
       ApolloServerPluginLandingPageDisabled(),
