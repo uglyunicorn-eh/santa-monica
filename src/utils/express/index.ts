@@ -1,16 +1,25 @@
+import Sendgrid from "@sendgrid/mail";
+import { PersonalizationData } from "@sendgrid/helpers/classes/personalization";
+
 import { NextFunction, Request, Response } from "express";
 import { Db, MongoClient } from "mongodb";
 
+import { from } from "src/config.json";
+
 export interface RequestContext {
   getDbConnection: () => Promise<Db>;
+  sendMail: (templateId: string, to: PersonalizationData | PersonalizationData[]) => Promise<void>;
 }
 
 type Props = {
   mongoClient: MongoClient;
+  sendgridApiKey: string;
 };
 
-export const commonContext = ({ mongoClient }: Props) => {
+export const commonContext = ({ mongoClient, sendgridApiKey }: Props) => {
   let dbConn: MongoClient;
+
+  Sendgrid.setApiKey(sendgridApiKey);
 
   return (req: Request, res: Response, next: NextFunction) => {
     req.context = {
@@ -20,7 +29,13 @@ export const commonContext = ({ mongoClient }: Props) => {
         }
 
         return dbConn.db();
-      }
+      },
+
+      sendMail: async (templateId: string, to: PersonalizationData | PersonalizationData[]) => {
+        const personalizations = Array.isArray(to) ? to : [to];
+        const isMultiple = personalizations.length > 1;
+        await Sendgrid.send({ templateId, from, personalizations, isMultiple });
+      },
     };
 
     next();

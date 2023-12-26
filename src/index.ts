@@ -8,7 +8,7 @@ import { MongoClient } from 'mongodb';
 import morgan from "morgan";
 
 import { createServer } from 'src/apollo';
-import { RequestContext, commonContext, commonHeaders, commonHelpers } from "src/utils/express";
+import { commonContext, commonHeaders, commonHelpers } from "src/utils/express";
 
 import { author, name, version } from 'package.json';
 
@@ -16,7 +16,8 @@ dotenv.config();
 
 const SENTRY_DSN = process.env.SENTRY_DSN;
 const MONGODB_URI = process.env.MONGODB_URI!;
-const port = process.env.PORT;
+const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY!;
+const PORT = process.env.PORT;
 
 const mongoClient = new MongoClient(MONGODB_URI);
 
@@ -48,7 +49,10 @@ export const app: Express = express();
   app.use(commonHelpers());
 
   try {
-    app.use(commonContext({ mongoClient }));
+    app.use(commonContext({
+      mongoClient,
+      sendgridApiKey: SENDGRID_API_KEY,
+    }));
   }
   catch (error) {
     Sentry.captureException(error);
@@ -67,8 +71,9 @@ export const app: Express = express();
       await createServer(),
       {
         context: async ({ req }) => ({
-          db: await (req.context as RequestContext).getDbConnection(),
+          db: await req.context.getDbConnection(),
           user: null as any,
+          sendMail: req.context.sendMail,
         }),
       },
     ),
@@ -91,9 +96,9 @@ export const app: Express = express();
     res.die({ error: 'Ugly Unicorn just puked a little bit :(', errorId: req.sentry }, 500);
   });
 
-  if (port) {
-    app.listen(port, () => {
-      console.log(`[server]: Server is running at http://localhost:${port}`);
+  if (PORT) {
+    app.listen(PORT, () => {
+      console.log(`[server]: Server is running at http://localhost:${PORT}`);
     });
   }
 
