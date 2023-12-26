@@ -106,15 +106,15 @@ export const typeDefs = `#graphql
   }
 
   type AuthOpts {
-    enter(input: EnterInput!): EnterPayload!
+    enterRequest(input: EnterRequestInput!): EnterRequestPayload!
   }
 
-  input EnterInput {
+  input EnterRequestInput {
     email: String!
     party: String
   }
 
-  type EnterPayload implements MutationPayload {
+  type EnterRequestPayload implements MutationPayload {
     status: MutationStatus!
     userErrors: [UserError!]
   }

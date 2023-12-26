@@ -16,7 +16,7 @@ export type ClosePartyInput = {
   party: string;
 }
 
-export type EnterInput = {
+export type EnterRequestInput = {
   email: string;
   party: string;
 }

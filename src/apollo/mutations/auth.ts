@@ -4,7 +4,7 @@ import { ApolloContext } from 'src/apollo/context';
 import { TokenPayload } from 'src/utils/jwt';
 
 import { enterInputSchema } from './validation';
-import { EnterInput } from './types';
+import { EnterRequestInput } from './types';
 
 import { baseUrl, sendgridTemplates } from 'src/config.json';
 
@@ -16,7 +16,7 @@ interface EnterRequestToken extends TokenPayload {
 export default {
   auth: () => ({
 
-    enter: _(enterInputSchema)(async (input: EnterInput, context: ApolloContext) => {
+    enterRequest: _(enterInputSchema)(async (input: EnterRequestInput, context: ApolloContext) => {
       const { db, user, sendMail, issueToken } = context;
 
       if (!user) {
