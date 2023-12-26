@@ -16,6 +16,10 @@ Parameters:
     Type: String
     Description: SendGrid API key
 
+  rsaPrivateKey:
+    Type: String
+    Description: RSA private key
+
 Resources:
   MyApi:
     Type: AWS::Serverless::Api
@@ -38,6 +42,7 @@ Resources:
           SENTRY_DSN: !Ref sentryDsn
           MONGODB_URI: !Ref mongodbUri
           SENDGRID_API_KEY: !Ref sendgridApiKey
+          RSA_PRIVATE_KEY: !Ref rsaPrivateKey
 
       Events:
         RootGet:

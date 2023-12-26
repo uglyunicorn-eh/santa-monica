@@ -3,5 +3,8 @@
     "name": "Anonymous Ded Morozes",
     "email": "info@gnomik.me"
   },
-  "baseUrl": "https://gnomik.me"
+  "baseUrl": "https://gnomik.me",
+  "sendgridTemplates": {
+    "signIn": "d-2b7845c2dfec4068aa2d25496516262f"
+  }
 }
