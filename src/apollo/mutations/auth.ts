@@ -10,6 +10,7 @@ import { baseUrl, sendgridTemplates } from 'src/config.json';
 
 interface EnterRequestToken extends TokenPayload {
   email: string;
+  party?: string;
 }
 
 export default {
@@ -21,6 +22,7 @@ export default {
       if (!user) {
         const tokenPayload = {
           email: input.email,
+          ...(input.party && { party: input.party })
         }
         const token = await issueToken<EnterRequestToken>("EnterRequest", tokenPayload, { ttl: 300 });
 

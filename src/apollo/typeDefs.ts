@@ -111,6 +111,7 @@ export const typeDefs = `#graphql
 
   input EnterInput {
     email: String!
+    party: String
   }
 
   type EnterPayload implements MutationPayload {
