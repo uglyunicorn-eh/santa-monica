@@ -9,15 +9,19 @@ import morgan from "morgan";
 
 import { createServer } from 'src/apollo';
 import { commonContext, commonHeaders, commonHelpers } from "src/utils/express";
+import { TokenPayload } from 'src/utils/jwt';
 
 import { author, name, version } from 'package.json';
+import { IssueTokenOptions } from 'src/apollo/context';
 
 dotenv.config();
 
 const SENTRY_DSN = process.env.SENTRY_DSN;
 const MONGODB_URI = process.env.MONGODB_URI!;
-const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY!;
 const PORT = process.env.PORT;
+
+const privateKey = process.env.RSA_PRIVATE_KEY!.split('\\n').join('\n');
+const sendgridApiKey = process.env.SENDGRID_API_KEY!;
 
 const mongoClient = new MongoClient(MONGODB_URI);
 
@@ -51,7 +55,8 @@ export const app: Express = express();
   try {
     app.use(commonContext({
       mongoClient,
-      sendgridApiKey: SENDGRID_API_KEY,
+      sendgridApiKey,
+      privateKey,
     }));
   }
   catch (error) {
@@ -74,6 +79,20 @@ export const app: Express = express();
           db: await req.context.getDbConnection(),
           user: null as any,
           sendMail: req.context.sendMail,
+          issueToken: <P extends TokenPayload = TokenPayload>(type: string, payload: P, options?: IssueTokenOptions) => {
+            options = options || {};
+            return req.context.makeToken({
+              header: {
+                typ: "JWT",
+                alg: "RS256",
+                t: type,
+              },
+              payload: {
+                ...payload,
+                ...(options.ttl ? { exp: Math.floor(Date.now() / 1000) + options.ttl } : {}),
+              },
+            });
+          },
         }),
       },
     ),

@@ -1,22 +1,25 @@
-import Sendgrid from "@sendgrid/mail";
 import { PersonalizationData } from "@sendgrid/helpers/classes/personalization";
-
+import Sendgrid from "@sendgrid/mail";
 import { NextFunction, Request, Response } from "express";
 import { Db, MongoClient } from "mongodb";
 
-import { from } from "src/config.json";
+import { Token, TokenPayload, TokenValue, encoderFactory } from "src/utils/jwt";
+
+import { from, domain } from "src/config.json";
 
 export interface RequestContext {
   getDbConnection: () => Promise<Db>;
   sendMail: (templateId: string, to: PersonalizationData | PersonalizationData[]) => Promise<void>;
+  makeToken: <T extends string, P extends TokenPayload = TokenPayload>(token: Token<T, P>) => Promise<TokenValue>;
 }
 
 type Props = {
   mongoClient: MongoClient;
   sendgridApiKey: string;
+  privateKey: string;
 };
 
-export const commonContext = ({ mongoClient, sendgridApiKey }: Props) => {
+export const commonContext = ({ mongoClient, sendgridApiKey, privateKey }: Props) => {
   let dbConn: MongoClient;
 
   Sendgrid.setApiKey(sendgridApiKey);
@@ -36,6 +39,8 @@ export const commonContext = ({ mongoClient, sendgridApiKey }: Props) => {
         const isMultiple = personalizations.length > 1;
         await Sendgrid.send({ templateId, from, personalizations, isMultiple });
       },
+
+      makeToken: encoderFactory({ domain, privateKey }),
     };
 
     next();

@@ -1,17 +1,28 @@
 import _ from 'src/utils/graphql/resolvable';
 import { ApolloContext } from 'src/apollo/context';
 
+import { TokenPayload } from 'src/utils/jwt';
+
 import { enterInputSchema } from './validation';
 import { EnterInput } from './types';
 
 import { baseUrl, sendgridTemplates } from 'src/config.json';
 
+interface EnterRequestToken extends TokenPayload {
+  email: string;
+}
+
 export default {
   auth: () => ({
 
-    enter: _(enterInputSchema)(async (input: EnterInput, { db, user, sendMail }: ApolloContext) => {
+    enter: _(enterInputSchema)(async (input: EnterInput, context: ApolloContext) => {
+      const { db, user, sendMail, issueToken } = context;
+
       if (!user) {
-        const token = '';
+        const tokenPayload = {
+          email: input.email,
+        }
+        const token = await issueToken<EnterRequestToken>("EnterRequest", tokenPayload, { ttl: 300 });
 
         await sendMail(
           sendgridTemplates.signIn,
