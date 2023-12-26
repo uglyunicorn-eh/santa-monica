@@ -1,6 +1,6 @@
-# Anonymous Ded Morozes
-
 ![Welcome to Santa Monica](santa-monica.jpg)
+
+# Anonymous Ded Morozes
 
 This is back-end side of the Anonymous Ded Morozes
 
