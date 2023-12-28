@@ -16,35 +16,40 @@ export default {
   auth: () => ({
 
     enterRequest: _(enterRequestInputSchema)(async (input: EnterRequestInput, context: ApolloContext) => {
-      const { db, userId, sendMail, issueToken } = context;
+      const { db, sendMail, issueToken } = context;
 
-      const Party = db.collection('Party');
+      let party: PartyEntity | undefined = undefined;
 
-      if (!userId) {
-        let partyNodeId = input.party ? NodeId.fromString(input.party) : null;
-        if (partyNodeId) {
-          const party = await Party.findOne({ _id: partyNodeId.id }) as PartyEntity;
-          if (!party) {
-            throw new Error("Unknown party");
-          }
+      if (input.party) {
+        party = await db.collection('Party').findOne({ slug: input.party }) as PartyEntity;
+        if (!party) {
+          return {
+            status: 'error',
+            userErrors: [{
+              fieldName: 'party',
+              messages: ["Invalid party code."],
+            }],
+          };
         }
-
-        const tokenPayload = {
-          email: input.email,
-          ...(partyNodeId && { party: nodeIdToStr(partyNodeId) })
-        }
-        const token = await issueToken<EnterRequestToken>("EnterRequest", tokenPayload, { ttl: 300 });
-
-        await sendMail(
-          sendgridTemplates.signIn,
-          {
-            to: input.email,
-            dynamicTemplateData: {
-              magicLink: `${baseUrl}/enter/${token}`,
-            },
-          },
-        );
       }
+
+      const tokenPayload = {
+        email: input.email,
+        ...(party ? { party: party.slug } : {})
+      }
+      const token = await issueToken<EnterRequestToken>("EnterRequest", tokenPayload, { ttl: 300 });
+
+      console.log({ token })
+
+      await sendMail(
+        sendgridTemplates.signIn,
+        {
+          to: input.email,
+          dynamicTemplateData: {
+            magicLink: `${baseUrl}/enter/${token}`,
+          },
+        },
+      );
 
       return {};
     }),
