@@ -6,9 +6,10 @@ import { EnterInput, EnterRequestInput } from './types';
 import { enterInputSchema, enterRequestInputSchema } from './validation';
 
 import { baseUrl, sendgridTemplates } from 'src/config.json';
-import { UserEntity } from "src/models";
+import { PartyEntity, UserEntity } from "src/models";
 import { nodeIdToStr } from 'src/utils/strings/nodeId';
 import { EnterRequestToken, UserToken } from 'src/apollo/types';
+import NodeId from 'src/utils/nodeId';
 
 
 export default {
@@ -17,10 +18,20 @@ export default {
     enterRequest: _(enterRequestInputSchema)(async (input: EnterRequestInput, context: ApolloContext) => {
       const { db, userId, sendMail, issueToken } = context;
 
+      const Party = db.collection('Party');
+
       if (!userId) {
+        let partyNodeId = input.party ? NodeId.fromString(input.party) : null;
+        if (partyNodeId) {
+          const party = await Party.findOne({ _id: partyNodeId.id }) as PartyEntity;
+          if (!party) {
+            partyNodeId = null;
+          }
+        }
+
         const tokenPayload = {
           email: input.email,
-          ...(input.party && { party: input.party })
+          ...(partyNodeId && { party: nodeIdToStr(partyNodeId) })
         }
         const token = await issueToken<EnterRequestToken>("EnterRequest", tokenPayload, { ttl: 300 });
 

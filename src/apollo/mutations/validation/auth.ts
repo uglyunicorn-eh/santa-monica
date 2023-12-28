@@ -4,7 +4,7 @@ import * as YupHelpers from 'src/utils/yup/index';
 
 export const enterRequestInputSchema = yup.object().shape({
   email: YupHelpers.string('Email').email("Must be a valid email").required(),
-  party: YupHelpers.string('Party').matches(/^[QWERTYUIPASDFGHJKLZXCVBNMO]{5}$/, "Invalid party code").notRequired(),
+  party: YupHelpers.string('Party').notRequired(),
 });
 
 export const enterInputSchema = yup.object().shape({
