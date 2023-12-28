@@ -5,6 +5,7 @@ export type CreatePartyInput = {
 
 export type JoinPartyInput = {
   party: string;
+  name: string;
   password?: string;
 }
 

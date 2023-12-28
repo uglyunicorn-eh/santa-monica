@@ -76,6 +76,7 @@ export const typeDefs = `#graphql
 
   input JoinPartyInput {
     party: ID!
+    name: String!
     password: String
   }
 

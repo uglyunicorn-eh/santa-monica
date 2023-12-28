@@ -25,7 +25,7 @@ export default {
         if (partyNodeId) {
           const party = await Party.findOne({ _id: partyNodeId.id }) as PartyEntity;
           if (!party) {
-            partyNodeId = null;
+            throw new Error("Unknown party");
           }
         }
 
