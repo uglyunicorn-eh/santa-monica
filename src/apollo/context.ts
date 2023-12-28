@@ -13,4 +13,5 @@ export interface ApolloContext extends BaseContext {
   user?: any;
   sendMail: (templateId: string, to: PersonalizationData | PersonalizationData[]) => Promise<void>;
   issueToken: <P extends TokenPayload = TokenPayload>(type: string, payload: P, options?: IssueTokenOptions) => Promise<TokenValue>;
+  jwtVerify: <P extends TokenPayload = TokenPayload>(token: string) => Promise<P>;
 };

@@ -50,7 +50,7 @@ export const encoderFactory = <T extends string, P extends TokenPayload = TokenP
 };
 
 const encode = async<T extends string, P extends TokenPayload>(token: Token<T, P>, privateKey: string): Promise<string> => {
-  const key = await createPrivateKey(privateKey);
+  const key = createPrivateKey(privateKey);
 
   const _ = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
 
@@ -60,7 +60,7 @@ const encode = async<T extends string, P extends TokenPayload>(token: Token<T, P
   return `${data}.${sig}`;
 };
 
-const createPrivateKey = async (privateKey: string): Promise<crypto.KeyObject> => {
+export const createPrivateKey = (privateKey: string): crypto.KeyObject => {
   return crypto.createPrivateKey({
     key: Buffer.from(privateKey),
   });

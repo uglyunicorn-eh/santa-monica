@@ -15,8 +15,8 @@ export type PartyEntity = Entity & {
 
 export type UserEntity = Entity & {
   name: string;
-  picture: string;
-  // profiles: IUserProfiles;
+  email: string;
+  joined: Date;
 };
 
 export type PartyMembershipEntity = Entity & {

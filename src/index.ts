@@ -4,15 +4,17 @@ import cors from "cors";
 import dotenv from "dotenv";
 import express, { Express, Request, Response } from "express";
 import helmet from "helmet";
+import * as jose from "jose";
 import { MongoClient } from 'mongodb';
 import morgan from "morgan";
 
 import { createServer } from 'src/apollo';
 import { commonContext, commonHeaders, commonHelpers } from "src/utils/express";
-import { TokenPayload } from 'src/utils/jwt';
+import { TokenPayload, createPrivateKey } from 'src/utils/jwt';
 
 import { author, name, version } from 'package.json';
 import { IssueTokenOptions } from 'src/apollo/context';
+import { domain } from 'src/config.json';
 
 dotenv.config();
 
@@ -24,6 +26,7 @@ const privateKey = process.env.RSA_PRIVATE_KEY!.split('\\n').join('\n');
 const sendgridApiKey = process.env.SENDGRID_API_KEY!;
 
 const mongoClient = new MongoClient(MONGODB_URI);
+const rsaPrivateKey = createPrivateKey(privateKey);
 
 export const app: Express = express();
 
@@ -78,8 +81,10 @@ export const app: Express = express();
         context: async ({ req }) => ({
           db: await req.context.getDbConnection(),
           user: null as any,
+
           sendMail: req.context.sendMail,
-          issueToken: <P extends TokenPayload = TokenPayload>(type: string, payload: P, options?: IssueTokenOptions) => {
+
+          issueToken: async <P extends TokenPayload = TokenPayload>(type: string, payload: P, options?: IssueTokenOptions) => {
             options = options || {};
             return req.context.makeToken({
               header: {
@@ -92,6 +97,11 @@ export const app: Express = express();
                 ...(options.ttl ? { exp: Math.floor(Date.now() / 1000) + options.ttl } : {}),
               },
             });
+          },
+
+          jwtVerify: async <P extends TokenPayload = TokenPayload>(token: string) => {
+            const jwtToken = await jose.jwtVerify<P>(token, rsaPrivateKey, { issuer: domain });
+            return jwtToken.payload;
           },
         }),
       },

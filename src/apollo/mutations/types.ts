@@ -20,3 +20,7 @@ export type EnterRequestInput = {
   email: string;
   party: string;
 }
+
+export type EnterInput = {
+  enterRequestToken: string;
+}

@@ -53,6 +53,7 @@
     "graphql": "^16.8.1",
     "graphql-middleware": "^6.1.35",
     "helmet": "^7.1.0",
+    "jose": "^5.2.0",
     "lodash": "^4.17.21",
     "mongodb": "^6.3.0",
     "morgan": "^1.10.0",
