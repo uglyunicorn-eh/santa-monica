@@ -70,11 +70,10 @@ export default {
     const memberships = await db
       .collection('PartyMembership')
       .find(userId ? { member: userId } : { _id: new ObjectId() })
-      .sort({ _id: -1 })
       .limit(first)
       .toArray();
     const partyIds: ObjectId[] = memberships.map(({ party }) => party);
-    const parties = await db.collection('Party').find({ _id: { $in: partyIds } }).toArray();
+    const parties = await db.collection('Party').find({ _id: { $in: partyIds } }).sort({ _id: -1 }).toArray();
     return parties.map(async partyEntity => await partyEntityToNode(db, partyEntity as PartyEntity, userId));
   },
 };
