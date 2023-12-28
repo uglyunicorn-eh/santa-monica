@@ -8,7 +8,7 @@ export const guardMiddleware = async (resolve: any, root: any, args: any, contex
 
   const path = getPathFromInfo(info);
 
-  if (!context.user) {
+  if (!context.userId) {
     if (/(^auth$)|(^auth\.)/.exec(path)) {
       // do nothing
     } else if (info.operation.operation === 'mutation') {

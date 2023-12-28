@@ -1,3 +1,5 @@
+import { TokenPayload } from "src/utils/jwt";
+
 export type Node = {
   id: string;
 };
@@ -36,3 +38,12 @@ export interface NodeMutationPayload<T extends Node = Node> extends MutationPayl
 export type MutationInput<T> = {
   input: T;
 };
+
+export interface EnterRequestToken extends TokenPayload {
+  email: string;
+  party?: string;
+}
+
+export interface UserToken extends TokenPayload {
+  sub: string;
+}

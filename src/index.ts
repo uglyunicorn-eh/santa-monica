@@ -4,17 +4,14 @@ import cors from "cors";
 import dotenv from "dotenv";
 import express, { Express, Request, Response } from "express";
 import helmet from "helmet";
-import * as jose from "jose";
 import { MongoClient } from 'mongodb';
 import morgan from "morgan";
 
 import { createServer } from 'src/apollo';
+import { makeContext } from 'src/apollo/context';
 import { commonContext, commonHeaders, commonHelpers } from "src/utils/express";
-import { TokenPayload, createPrivateKey } from 'src/utils/jwt';
 
 import { author, name, version } from 'package.json';
-import { IssueTokenOptions } from 'src/apollo/context';
-import { domain } from 'src/config.json';
 
 dotenv.config();
 
@@ -26,7 +23,6 @@ const privateKey = process.env.RSA_PRIVATE_KEY!.split('\\n').join('\n');
 const sendgridApiKey = process.env.SENDGRID_API_KEY!;
 
 const mongoClient = new MongoClient(MONGODB_URI);
-const rsaPrivateKey = createPrivateKey(privateKey);
 
 export const app: Express = express();
 
@@ -56,11 +52,7 @@ export const app: Express = express();
   app.use(commonHelpers());
 
   try {
-    app.use(commonContext({
-      mongoClient,
-      sendgridApiKey,
-      privateKey,
-    }));
+    app.use(commonContext({ mongoClient, sendgridApiKey, privateKey }));
   }
   catch (error) {
     Sentry.captureException(error);
@@ -68,53 +60,12 @@ export const app: Express = express();
 
   app.get(
     "/",
-    async (req: Request, res: Response) => {
-      return res.ok({ name, version, author });
-    },
+    (_: Request, res: Response) => res.ok({ name, version, author }),
   );
 
   app.all(
     "/graph",
-    expressMiddleware(
-      await createServer(),
-      {
-        context: async ({ req }) => ({
-          db: await req.context.getDbConnection(),
-          user: null as any,
-
-          sendMail: req.context.sendMail,
-
-          issueToken: async <P extends TokenPayload = TokenPayload>(type: string, payload: P, options?: IssueTokenOptions) => {
-            options = options || {};
-            return req.context.makeToken({
-              header: {
-                typ: "JWT",
-                alg: "RS256",
-                t: type,
-              },
-              payload: {
-                ...payload,
-                ...(options.ttl ? { exp: Math.floor(Date.now() / 1000) + options.ttl } : {}),
-              },
-            });
-          },
-
-          jwtVerify: async <P extends TokenPayload = TokenPayload>(token: string) => {
-            const jwtToken = await jose.jwtVerify<P>(token, rsaPrivateKey, { issuer: domain });
-            return jwtToken.payload;
-          },
-        }),
-      },
-    ),
-  );
-
-  app.get(
-    "/fail",
-    (_: Request, res: Response) => {
-      const error = "Don't panic! This is a drill! Piu-piu-piu!";
-      res.die({ error }, 500);
-      Sentry.captureMessage(error);
-    },
+    expressMiddleware(await createServer(), { context: makeContext }),
   );
 
   if (SENTRY_DSN) {

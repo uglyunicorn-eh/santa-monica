@@ -1,38 +1,28 @@
 import { GraphQLResolveInfo } from 'graphql';
 
 import { ApolloContext } from 'src/apollo/context';
+import { UserToken } from 'src/apollo/types';
+import { UserEntity } from 'src/models';
+import { strToNodeId } from 'src/utils/strings/nodeId';
 
-export const authMiddleware = async (resolve: any, root: any, args: any, context: ApolloContext,
-  info: GraphQLResolveInfo) => {
-  // if (context.token === null) {
-  //   let auth = context.req.headers.authorization;
-  //   if (auth) {
-  //     /* istanbul ignore next */
-  //     if (typeof auth !== 'string') {
-  //       auth = auth[0];
-  //     }
-  //     const [authType, token] = (auth as string).split(' ', 2);
-  //     if (authType !== 'Bearer') {
-  //       throw new Error('403: Authorization error');
-  //     }
+export const authMiddleware = async (resolve: any, root: any, args: any, context: ApolloContext, info: GraphQLResolveInfo) => {
+  const { db, authToken, jwtVerify } = context;
 
-  //     try {
-  //       const { id } = JWT.verify(token, authRsaKey) as ITokenPayload;
-  //       const entityId = ObjectId.createFromHexString(id);
-  //       const user = await context.db.collection('User').findOne({ _id: entityId }) as IUserEntity;
+  if (authToken) {
+    try {
+      const { sub } = await jwtVerify<UserToken>(authToken);
 
-  //       if (user === null) {
-  //         throw new Error('403: Authorization error');
-  //       }
+      context.userId = strToNodeId(sub).id;
 
-  //       context.token = token;
-  //       context.user = user;
-  //     } catch {
-  //       context.token = null;
-  //       context.user = null;
-  //     }
-  //   }
-  // }
+      context.retrieveUser = async () => {
+        const User = db.collection('User');
+        return await User.findOne({ _id: context.userId }) as UserEntity || undefined;
+      }
+    }
+    catch {
+      throw new Error('Authorization error');
+    }
+  }
 
   return await resolve(root, args, context, info);
 };

@@ -28,10 +28,11 @@ const generatePartySlug = async (db: Db) => {
 export default {
   parties: () => ({
 
-    createParty: _(createPartyInputSchema)(async (input: CreatePartyInput, { db, user }: ApolloContext) => {
+    createParty: _(createPartyInputSchema)(async (input: CreatePartyInput, { db, userId, retrieveUser }: ApolloContext) => {
+      const user = await retrieveUser();
       const entity = {
         _id: new ObjectId(),
-        host: user!._id,
+        host: user._id,
         name: input.name,
         password: input.password || null,
         slug: await generatePartySlug(db),
@@ -44,12 +45,12 @@ export default {
         name: user!.name,
       });
       return {
-        node: await partyEntityToNode(db, entity, user),
+        node: await partyEntityToNode(db, entity, userId),
       };
     }),
 
-    joinParty: _(joinPartyInputSchema)(async ({ party, password }: JoinPartyInput, { db, user }: ApolloContext) => {
-      if (!user) {
+    joinParty: _(joinPartyInputSchema)(async ({ party, password }: JoinPartyInput, { db, userId, retrieveUser }: ApolloContext) => {
+      if (!userId) {
         return {
           status: 'error',
           userErrors: [{
@@ -78,9 +79,10 @@ export default {
         };
       }
 
-      if (await db.collection('PartyMembership').findOne({ party: partyEntity._id, member: user._id })) {
+      if (await db.collection('PartyMembership').findOne({ party: partyEntity._id, member: userId })) {
+
         return {
-          node: await partyEntityToNode(db, partyEntity, user),
+          node: await partyEntityToNode(db, partyEntity, userId),
         };
       }
 
@@ -102,6 +104,8 @@ export default {
         };
       }
 
+      const user = await retrieveUser();
+
       await db.collection('Party').updateOne({ _id: partyEntity._id }, { $inc: { participantCount: 1 } });
       await db.collection('PartyMembership').insertOne({
         party: partyEntity._id,
@@ -110,12 +114,12 @@ export default {
       });
 
       return {
-        node: await partyEntityToNode(db, partyEntity, user),
+        node: await partyEntityToNode(db, partyEntity, userId),
       };
     }),
 
-    leaveParty: _(leavePartyInputSchema)(async ({ party }: LeavePartyInput, { db, user }: ApolloContext) => {
-      if (!user) {
+    leaveParty: _(leavePartyInputSchema)(async ({ party }: LeavePartyInput, { db, userId }: ApolloContext) => {
+      if (!userId) {
         return {
           status: 'error',
           userErrors: [{
@@ -144,10 +148,10 @@ export default {
         };
       }
 
-      const membership = await db.collection('PartyMembership').findOne({ party: partyEntity._id, member: user._id });
+      const membership = await db.collection('PartyMembership').findOne({ party: partyEntity._id, member: userId });
       if (!membership) {
         return {
-          node: await partyEntityToNode(db, partyEntity, user),
+          node: await partyEntityToNode(db, partyEntity, userId),
         };
       }
 
@@ -163,15 +167,15 @@ export default {
       }
 
       await db.collection('Party').updateOne({ _id: partyEntity._id }, { $inc: { participantCount: -1 } });
-      await db.collection('PartyMembership').deleteMany({ party: partyEntity._id, member: user._id });
+      await db.collection('PartyMembership').deleteMany({ party: partyEntity._id, member: userId });
 
       return {
-        node: await partyEntityToNode(db, partyEntity, user),
+        node: await partyEntityToNode(db, partyEntity, userId),
       };
     }),
 
-    closeParty: _(closePartyInputSchema)(async ({ party }: ClosePartyInput, { db, user }: ApolloContext) => {
-      if (!user) {
+    closeParty: _(closePartyInputSchema)(async ({ party }: ClosePartyInput, { db, userId }: ApolloContext) => {
+      if (!userId) {
         return {
           status: 'error',
           userErrors: [{
@@ -199,7 +203,7 @@ export default {
           }],
         };
       }
-      if (!partyEntity.host.equals(user._id)) {
+      if (!partyEntity.host.equals(userId)) {
         return {
           userErrors: [{
             fieldName: 'party',
@@ -239,7 +243,7 @@ export default {
 
       partyEntity = await db.collection('Party').findOne({ _id: partyNodeId.id }) as PartyEntity;
       return {
-        node: await partyEntityToNode(db, partyEntity, user),
+        node: await partyEntityToNode(db, partyEntity, userId),
       };
     }),
   }),

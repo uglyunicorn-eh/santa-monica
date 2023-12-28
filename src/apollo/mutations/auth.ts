@@ -2,31 +2,22 @@ import { ObjectId } from 'mongodb';
 import { ApolloContext } from 'src/apollo/context';
 import _ from 'src/utils/graphql/resolvable';
 
-import { TokenPayload } from 'src/utils/jwt';
-
 import { EnterInput, EnterRequestInput } from './types';
 import { enterInputSchema, enterRequestInputSchema } from './validation';
 
 import { baseUrl, sendgridTemplates } from 'src/config.json';
 import { UserEntity } from "src/models";
 import { nodeIdToStr } from 'src/utils/strings/nodeId';
+import { EnterRequestToken, UserToken } from 'src/apollo/types';
 
-interface EnterRequestToken extends TokenPayload {
-  email: string;
-  party?: string;
-}
-
-interface UserToken extends TokenPayload {
-  sub: string;
-}
 
 export default {
   auth: () => ({
 
     enterRequest: _(enterRequestInputSchema)(async (input: EnterRequestInput, context: ApolloContext) => {
-      const { db, user, sendMail, issueToken } = context;
+      const { db, userId, sendMail, issueToken } = context;
 
-      if (!user) {
+      if (!userId) {
         const tokenPayload = {
           email: input.email,
           ...(input.party && { party: input.party })
