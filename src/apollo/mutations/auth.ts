@@ -5,12 +5,11 @@ import _ from 'src/utils/graphql/resolvable';
 import { EnterInput, EnterRequestInput } from './types';
 import { enterInputSchema, enterRequestInputSchema } from './validation';
 
-import { baseUrl, sendgridTemplates } from 'src/config.json';
 import { PartyEntity, UserEntity } from "src/models";
 import { nodeIdToStr } from 'src/utils/strings/nodeId';
 import { EnterRequestToken, UserToken } from 'src/apollo/types';
-import NodeId from 'src/utils/nodeId';
 
+import { baseUrl, sendgridTemplates } from 'src/config.json';
 
 export default {
   auth: () => ({
@@ -38,8 +37,6 @@ export default {
         ...(party ? { party: party.slug } : {})
       }
       const token = await issueToken<EnterRequestToken>("EnterRequest", tokenPayload, { ttl: 300 });
-
-      console.log({ token })
 
       await sendMail(
         sendgridTemplates.signIn,
