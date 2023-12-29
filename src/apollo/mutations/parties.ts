@@ -84,7 +84,6 @@ export default {
       }
 
       if (await db.collection('PartyMembership').findOne({ party: partyEntity._id, member: userId })) {
-
         return {
           node: await partyEntityToNode(db, partyEntity, userId),
         };
