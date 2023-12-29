@@ -49,7 +49,9 @@ export default {
       };
     }),
 
-    joinParty: _(joinPartyInputSchema)(async ({ party, password }: JoinPartyInput, { db, userId, retrieveUser }: ApolloContext) => {
+    joinParty: _(joinPartyInputSchema)(async ({ party, name, password }: JoinPartyInput, context: ApolloContext) => {
+      const { db, userId, retrieveUser } = context;
+
       if (!userId) {
         return {
           status: 'error',
@@ -106,11 +108,21 @@ export default {
 
       const user = await retrieveUser();
 
+      name = name || user!.name;
+      if (!name) {
+        return {
+          userErrors: [{
+            fieldName: 'name',
+            messages: ["We we unable to get your name."],
+          }],
+        };
+      }
+
       await db.collection('Party').updateOne({ _id: partyEntity._id }, { $inc: { participantCount: 1 } });
       await db.collection('PartyMembership').insertOne({
         party: partyEntity._id,
         member: user!._id,
-        name: user!.name,
+        name,
       });
 
       return {
