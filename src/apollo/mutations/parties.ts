@@ -279,7 +279,7 @@ export default {
         }
       };
       const to = emails.map(email => ({ to: email, dynamicTemplateData }));
-      const res = await sendMail(sendgridTemplates.partyNotification, to);
+      await sendMail(sendgridTemplates.partyNotification, to);
 
       return {
         node: await partyEntityToNode(db, partyEntity, userId),
