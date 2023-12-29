@@ -20,7 +20,8 @@ export const authMiddleware = async (resolve: any, root: any, args: any, context
       }
     }
     catch {
-      throw new Error('Authorization error');
+      context.userId = undefined;
+      context.authToken = undefined;
     }
   }
 
