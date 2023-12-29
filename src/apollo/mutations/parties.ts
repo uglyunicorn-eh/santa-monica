@@ -65,6 +65,7 @@ export default {
       const partyNodeId = NodeId.fromString(party);
       if (partyNodeId.kind !== 'Party') {
         return {
+          status: 'error',
           userErrors: [{
             fieldName: 'party',
             messages: ['Unknown input type. Must be Party.'],
@@ -74,6 +75,7 @@ export default {
       const partyEntity = await db.collection('Party').findOne({ _id: partyNodeId.id }) as (PartyEntity | null);
       if (!partyEntity) {
         return {
+          status: 'error',
           userErrors: [{
             fieldName: 'party',
             messages: ['Party does not exist.'],
@@ -90,6 +92,7 @@ export default {
 
       if (partyEntity.isClosed) {
         return {
+          status: 'error',
           userErrors: [{
             fieldName: 'party',
             messages: ['Party is already packed. Sorry, we cannot accept a new participant...'],
@@ -99,6 +102,7 @@ export default {
 
       if ((partyEntity.password || '').toUpperCase() !== (password || '').toUpperCase()) {
         return {
+          status: 'error',
           userErrors: [{
             fieldName: 'password',
             messages: ["Hmm... Seems you've got a wrong secret phrase. Please try a different one or ask your friend for a hint."],
@@ -111,6 +115,7 @@ export default {
       name = name || user!.name;
       if (!name) {
         return {
+          status: 'error',
           userErrors: [{
             fieldName: 'name',
             messages: ["We we unable to get your name."],
