@@ -14,6 +14,8 @@ import { randomString } from 'src/utils/strings/random';
 import { ClosePartyInput, CreatePartyInput, JoinPartyInput, LeavePartyInput } from "./types";
 import { closePartyInputSchema, createPartyInputSchema, joinPartyInputSchema, leavePartyInputSchema } from "./validation";
 
+import { baseUrl, sendgridTemplates } from 'src/config.json';
+
 const generatePartySlug = async (db: Db) => {
   const PartyCollection = db.collection('Party');
   while (true) {
@@ -191,7 +193,9 @@ export default {
       };
     }),
 
-    closeParty: _(closePartyInputSchema)(async ({ party }: ClosePartyInput, { db, userId }: ApolloContext) => {
+    closeParty: _(closePartyInputSchema)(async ({ party }: ClosePartyInput, context: ApolloContext) => {
+      const { db, userId, sendMail } = context;
+
       if (!userId) {
         return {
           status: 'error',
@@ -259,6 +263,24 @@ export default {
       await db.collection('Party').updateOne({ _id: partyEntity._id }, { $set: { isClosed: true } });
 
       partyEntity = await db.collection('Party').findOne({ _id: partyNodeId.id }) as PartyEntity;
+
+      const participants = members.map(m => m.member);
+      let emails =
+        (
+          await db.collection('User')
+            .find({ _id: { $in: participants } }, { projection: { email: true } })
+            .toArray()
+        ).map(({ email }) => email);
+
+      const dynamicTemplateData = {
+        party: {
+          name: partyEntity.name,
+          url: `${baseUrl}/p/${partyEntity.slug}/`,
+        }
+      };
+      const to = emails.map(email => ({ to: email, dynamicTemplateData }));
+      const res = await sendMail(sendgridTemplates.partyNotification, to);
+
       return {
         node: await partyEntityToNode(db, partyEntity, userId),
       };

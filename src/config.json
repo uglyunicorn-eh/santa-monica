@@ -6,6 +6,7 @@
   "domain": "api.gnomik.me",
   "baseUrl": "https://gnomik.me",
   "sendgridTemplates": {
-    "signIn": "d-2b7845c2dfec4068aa2d25496516262f"
+    "signIn": "d-2b7845c2dfec4068aa2d25496516262f",
+    "partyNotification": "d-e0a669f8c20841f49273039e53967941"
   }
 }
