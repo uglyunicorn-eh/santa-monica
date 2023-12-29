@@ -129,7 +129,7 @@ export default {
         member: user!._id,
         name,
       });
-      await db.collection('User').updateOne({ _id: user!._id }, { name });
+      await db.collection('User').updateOne({ _id: user!._id }, { $set: { name } });
 
       return {
         node: await partyEntityToNode(db, partyEntity, userId),
