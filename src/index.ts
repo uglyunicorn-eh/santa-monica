@@ -7,7 +7,7 @@ import { importHandler } from 'src/admin';
 import { graphqlHandler } from 'src/apollo/adapter';
 import { Env } from 'src/env';
 
-import { name, version } from 'package.json';
+import { homepage, name, version } from 'package.json';
 
 export { PartyDO } from 'src/do/PartyDO';
 export { UserDO } from 'src/do/UserDO';
@@ -24,7 +24,7 @@ app.use(async (c, next) => {
   c.res.headers.set('X-Powered-By', 'Maple syrup and magic, eh!');
 });
 
-app.get('/', c => c.json({ status: 'ok', name, version }));
+app.get('/', c => c.json({ status: 'ok', name, version, github: homepage }));
 
 app.all('/graph', graphqlHandler);
 
