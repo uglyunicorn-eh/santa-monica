@@ -1,2 +1,4 @@
-JWT_SECRET=change-me-to-a-random-32-byte-string
+# P-256 private key for signing tokens (ES256), PKCS#8 PEM on one line with \n line breaks. Generate one with:
+#   openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 | awk 'NF {printf "%s\\n", $0}'
+JWT_PRIVATE_KEY=
 ADMIN_SECRET=change-me

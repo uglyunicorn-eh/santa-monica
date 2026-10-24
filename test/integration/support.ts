@@ -90,7 +90,7 @@ export async function signInWithMagicLink(email: string, party?: string) {
 
 export type Person = Awaited<ReturnType<typeof signInWithMagicLink>>;
 
-export const jwt = (secret: string = env.JWT_SECRET) => createJwtHelpers({ secret, issuer: domain });
+export const jwt = (privateKey: string = env.JWT_PRIVATE_KEY) => createJwtHelpers({ privateKey, issuer: domain });
 
 export const mintEnterRequestToken = (payload: EnterRequestToken, ttl = 300, secret?: string) =>
   jwt(secret).issueToken<EnterRequestToken>('EnterRequest', payload, { ttl });

@@ -1,4 +1,4 @@
-// Ported from the SendGrid "partyNotification" template. Placeholders: {{party.name}}, {{party.url}}, {{assetsUrl}}.
+// Ported from the SendGrid "partyNotification" template. Placeholders: {{party.name}}, {{party.url}}, {{assetsUrl}}, {{assetsVersion}}.
 export const subject = "{{party.name}}";
 
 export const html = `<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
@@ -147,7 +147,7 @@ export const html = `<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "h
     <tbody>
       <tr>
         <td style="font-size:6px; line-height:10px; padding:0px 0px 0px 0px;" valign="top" align="center">
-          <img class="max-width" border="0" style="display:block; color:#000000; text-decoration:none; font-family:Helvetica, arial, sans-serif; font-size:16px; max-width:100% !important; width:100%; height:auto !important;" width="600" alt="" data-proportionally-constrained="true" data-responsive="true" src="{{assetsUrl}}/email/party.gif">
+          <img class="max-width" border="0" style="display:block; color:#000000; text-decoration:none; font-family:Helvetica, arial, sans-serif; font-size:16px; max-width:100% !important; width:100%; height:auto !important;" width="600" alt="" data-proportionally-constrained="true" data-responsive="true" src="{{assetsUrl}}/email/party.gif?v={{assetsVersion}}">
         </td>
       </tr>
     </tbody>
@@ -252,7 +252,7 @@ Our elves have just finished their complex calculations, and now they know your 
       <tr>
         <td style="font-size:6px; line-height:10px; padding:0px 0px 0px 0px;" valign="top" align="center">
           
-        <a href="https://uglyunicorn.ca/"><img class="max-width" border="0" style="display:block; color:#000000; text-decoration:none; font-family:Helvetica, arial, sans-serif; font-size:16px;" width="64" alt="Home of Ugly Unicorn" data-proportionally-constrained="true" data-responsive="false" src="{{assetsUrl}}/email/uglyunicorn.png" height="64"></a></td>
+        <a href="https://uglyunicorn.ca/"><img class="max-width" border="0" style="display:block; color:#000000; text-decoration:none; font-family:Helvetica, arial, sans-serif; font-size:16px;" width="64" alt="Home of Ugly Unicorn" data-proportionally-constrained="true" data-responsive="false" src="{{assetsUrl}}/email/uglyunicorn.png?v={{assetsVersion}}" height="64"></a></td>
       </tr>
     </tbody>
   </table></td>

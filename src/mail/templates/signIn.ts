@@ -1,4 +1,4 @@
-// Ported from the SendGrid "signIn" template. Placeholders: {{magicLink}}, {{assetsUrl}}.
+// Ported from the SendGrid "signIn" template. Placeholders: {{magicLink}}, {{assetsUrl}}, {{assetsVersion}}.
 export const subject = "Sign in to Anonymous Ded Morozes";
 
 export const html = `<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
@@ -165,7 +165,7 @@ export const html = `<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "h
     <tbody>
       <tr>
         <td style="font-size:6px; line-height:10px; padding:0px 0px 0px 0px;" valign="top" align="center">
-          <img class="max-width" border="0" style="display:block; color:#000000; text-decoration:none; font-family:Helvetica, arial, sans-serif; font-size:16px; max-width:80% !important; width:80%; height:auto !important;" width="216" alt="" data-proportionally-constrained="true" data-responsive="true" src="{{assetsUrl}}/email/gnomik.png">
+          <img class="max-width" border="0" style="display:block; color:#000000; text-decoration:none; font-family:Helvetica, arial, sans-serif; font-size:16px; max-width:80% !important; width:80%; height:auto !important;" width="216" alt="" data-proportionally-constrained="true" data-responsive="true" src="{{assetsUrl}}/email/gnomik.png?v={{assetsVersion}}">
         </td>
       </tr>
     </tbody>
@@ -252,7 +252,7 @@ export const html = `<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "h
       <tr>
         <td style="font-size:6px; line-height:10px; padding:0px 0px 0px 0px;" valign="top" align="center">
           
-        <a href="https://uglyunicorn.ca/"><img class="max-width" border="0" style="display:block; color:#000000; text-decoration:none; font-family:Helvetica, arial, sans-serif; font-size:16px;" width="64" alt="Home of Ugly Unicorn" data-proportionally-constrained="true" data-responsive="false" src="{{assetsUrl}}/email/uglyunicorn.png" height="64"></a></td>
+        <a href="https://uglyunicorn.ca/"><img class="max-width" border="0" style="display:block; color:#000000; text-decoration:none; font-family:Helvetica, arial, sans-serif; font-size:16px;" width="64" alt="Home of Ugly Unicorn" data-proportionally-constrained="true" data-responsive="false" src="{{assetsUrl}}/email/uglyunicorn.png?v={{assetsVersion}}" height="64"></a></td>
       </tr>
     </tbody>
   </table></td>

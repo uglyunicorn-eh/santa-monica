@@ -13,7 +13,7 @@ The API is a Cloudflare Worker (Hono + Apollo Server) with its data in Durable O
 
 ```bash
 npm install
-cp .dev.vars.example .dev.vars   # then set JWT_SECRET (and ADMIN_SECRET for imports)
+cp .dev.vars.example .dev.vars   # then set JWT_PRIVATE_KEY (and ADMIN_SECRET for imports)
 npm run dev                      # http://localhost:8787, GraphQL at /graph
 npm run typecheck
 npm test                         # unit + integration
@@ -31,7 +31,7 @@ npm test                         # unit + integration
 - **Merges to main** (`.github/workflows/deploy.yml`): CI runs, then production is deployed to `https://api.gnomik.me` and smoke-tested.
 - `.github/workflows/ci.yml` is the shared test job; it can also be run by hand.
 
-GitHub secrets: `CLOUDFLARE_API_TOKEN` (a Cloudflare API token from the "Edit Cloudflare Workers" template, with access to the account and the gnomik.me zone), `CLOUDFLARE_ACCOUNT_ID`, and `PREVIEW_JWT_SECRET` (any random string, used to sign preview sessions).
+GitHub secrets: `CLOUDFLARE_API_TOKEN` (a Cloudflare API token from the "Edit Cloudflare Workers" template, with access to the account and the gnomik.me zone), `CLOUDFLARE_ACCOUNT_ID`, and `PREVIEW_JWT_PRIVATE_KEY` (a P-256 private key used to sign preview tokens; previews have no frontend, so any key works).
 
 ## Logs and errors
 
@@ -46,4 +46,17 @@ npx wrangler deploy --env=""                                  # production (api.
 npx wrangler deploy --env preview --name gnomik-api-pr-123    # a preview
 ```
 
-Production secrets are set with `npx wrangler secret put JWT_SECRET`.
+Production secrets are set with `npx wrangler secret put JWT_PRIVATE_KEY`.
+
+## Tokens
+
+Magic-link and session tokens are ES256 JWTs (issuer `api.gnomik.me`) signed with `JWT_PRIVATE_KEY`, a P-256 private key in PKCS#8 PEM (real or escaped `\n` line breaks). The frontend ([santa-barbara](https://github.com/uglyunicorn-eh/santa-barbara)) verifies them in the browser with the matching public key, `publicKey` in its `src/config.json`, so the two must stay a pair: rotating the key means updating that file too.
+
+To rotate:
+
+```bash
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out jwt.pem
+openssl pkey -in jwt.pem -pubout                     # public key for santa-barbara's src/config.json
+npx wrangler secret put JWT_PRIVATE_KEY < jwt.pem
+rm jwt.pem
+```
