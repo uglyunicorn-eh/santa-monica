@@ -1,3 +1,4 @@
+import { env } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 
 import { nodeIdToStr } from 'src/utils/strings/nodeId';
@@ -136,8 +137,8 @@ describe('tokens', () => {
     expect((await gql(ENTER, { token })).data.auth.enter).toMatchObject(invalid);
   });
 
-  it('rejects a magic-link token signed with another secret', async () => {
-    const token = await mintEnterRequestToken({ email: uniqueEmail() }, 300, 'some-other-secret-that-is-long-enough');
+  it('rejects a magic-link token signed with another key', async () => {
+    const token = await mintEnterRequestToken({ email: uniqueEmail() }, 300, env.TEST_OTHER_PRIVATE_KEY);
     expect((await gql(ENTER, { token })).data.auth.enter).toMatchObject(invalid);
   });
 
@@ -157,7 +158,7 @@ describe('tokens', () => {
     const person = await signInWithMagicLink(uniqueEmail());
     const sub = person.id;
     const expired = await mintUserToken({ sub, email: person.email }, -60);
-    const forged = await mintUserToken({ sub, email: person.email }, 3600, 'some-other-secret-that-is-long-enough');
+    const forged = await mintUserToken({ sub, email: person.email }, 3600, env.TEST_OTHER_PRIVATE_KEY);
     const notAUser = await mintUserToken({ sub: nodeIdToStr({ kind: 'Party', id: 'QWERT' }), email: person.email });
 
     for (const token of [expired, forged, notAUser, 'garbage']) {

@@ -19,7 +19,7 @@ import { domain } from 'src/config.json';
 
 let counter = 0;
 const uniqueEmail = (label = 'user') => `${label}-${Date.now().toString(36)}-${++counter}@example.com`;
-const jwt = createJwtHelpers({ secret: env.JWT_SECRET, issuer: domain });
+const jwt = createJwtHelpers({ privateKey: env.JWT_PRIVATE_KEY, issuer: domain });
 
 type TestContext = ApolloContext & { sent: { to: string; message: MailMessage }[] };
 

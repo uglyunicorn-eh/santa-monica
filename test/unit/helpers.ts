@@ -6,7 +6,7 @@ import { nodeIdToStr } from 'src/utils/strings/nodeId';
 
 import { domain } from 'src/config.json';
 
-export const jwt = () => createJwtHelpers({ secret: env.JWT_SECRET, issuer: domain });
+export const jwt = () => createJwtHelpers({ privateKey: env.JWT_PRIVATE_KEY, issuer: domain });
 
 /** Creates a user the way `enter` does and returns a session token for it. */
 export async function signIn(email: string, name = '') {

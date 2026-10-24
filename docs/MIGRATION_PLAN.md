@@ -23,7 +23,7 @@ Non-goals: changing the GraphQL schema, the magic-link flow, or the wording and 
 | Cross-object writes | `PartyDO` is the source of truth. Changes to users go through a transactional outbox in `PartyDO`, delivered by its alarm to idempotent `UserDO` methods | A membership change and its follow-ups commit together and are retried until delivered, so the two sides always converge. |
 | Mail | Cloudflare Email Service via the `send_email` binding (`env.EMAIL.send`) | No API key or SDK, native to Workers. It has no hosted templates, so the two SendGrid templates are re-created as render functions in the repo. |
 | Errors | `@sentry/cloudflare` | Sentry's official Workers SDK. `@sentry/node` assumes Node. |
-| JWT | `jose`, HS256 with a new `JWT_SECRET` | `utils/jwt.ts` uses Node `crypto` and `Buffer`. Existing tokens do not need to survive. Everyone signs in again after cutover. |
+| JWT | `jose`, RS256 with `JWT_PRIVATE_KEY` (the old Lambda key) | The frontend verifies tokens in the browser with the matching RSA public key, so tokens must stay RS256 with the same key pair. HS256 was tried first and broke sign-in on the frontend. |
 | Abuse and spikes | Workers rate-limiting binding on `enterRequest`, per IP and per email | `enterRequest` is unauthenticated and sends mail to any address. A spike also brings abuse that would burn the email quota. Turnstile is deferred: add it only if abuse shows up, since it needs a frontend change. |
 
 Fallback: if Apollo 4 does not run cleanly under Hono in the spike, switch to `graphql-yoga`. The schema and resolvers carry over either way.

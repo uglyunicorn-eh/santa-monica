@@ -41,14 +41,14 @@ jobs:
       - name: Write preview secrets
         run: |
           umask 077
-          printf 'JWT_SECRET=%s\n' "$PREVIEW_JWT_SECRET" > "$RUNNER_TEMP/preview-secrets.env"
+          jq -n --arg key "$PREVIEW_JWT_PRIVATE_KEY" '{JWT_PRIVATE_KEY: $key}' > "$RUNNER_TEMP/preview-secrets.json"
         env:
-          PREVIEW_JWT_SECRET: ${{ secrets.PREVIEW_JWT_SECRET }}
+          PREVIEW_JWT_PRIVATE_KEY: ${{ secrets.PREVIEW_JWT_PRIVATE_KEY }}
       - uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy --env preview --name ${{ env.WORKER }} --var PUBLIC_URL:${{ env.PREVIEW_URL }} --secrets-file ${{ runner.temp }}/preview-secrets.env
+          command: deploy --env preview --name ${{ env.WORKER }} --var PUBLIC_URL:${{ env.PREVIEW_URL }} --secrets-file ${{ runner.temp }}/preview-secrets.json
       - name: Smoke test the preview
         run: npm run smoke
         env:

@@ -29,6 +29,6 @@ export const makeContext = async (c: Context<{ Bindings: Env }>): Promise<Apollo
     userEmail: undefined,
     retrieveUser: async () => { throw new Error("Unable to retrieve user"); },
     sendMail: (to, message) => sendMail(env, to, message),
-    ...createJwtHelpers({ secret: env.JWT_SECRET, issuer: domain }),
+    ...createJwtHelpers({ privateKey: env.JWT_PRIVATE_KEY, issuer: domain }),
   };
 };
