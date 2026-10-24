@@ -48,6 +48,7 @@ export default {
 
       const tokenPayload = {
         email,
+        jti: crypto.randomUUID(),
         ...(input.party ? { party: input.party } : {})
       }
       const token = await issueToken<EnterRequestToken>("EnterRequest", tokenPayload, { ttl: 300 });
@@ -74,11 +75,23 @@ export default {
       const { enterRequestToken } = input;
 
       try {
-        const jwtToken = await jwtVerify<EnterRequestToken>(enterRequestToken, 'EnterRequest');
+        const { email: tokenEmail, jti, exp } = await jwtVerify<EnterRequestToken>(enterRequestToken, 'EnterRequest');
+        if (!jti || !exp) {
+          throw new Error('Magic-link token without an id or expiry.');
+        }
 
-        const email = jwtToken.email.toLowerCase();
+        const email = tokenEmail.toLowerCase();
 
-        const user = await env.USER.getByName(email).ensure(email);
+        const user = await env.USER.getByName(email).redeemMagicLink(email, jti, exp * 1000);
+        if (!user) {
+          return {
+            status: 'error',
+            userErrors: [{
+              fieldName: 'enterRequestToken',
+              messages: ["This magic link has already been used. Please request a new one."],
+            }],
+          };
+        }
 
         const [sub, ttl] = [nodeIdToStr({ kind: 'User', id: user.id }), 60 * 60 * 24 * 30];
         const userToken = await issueToken<UserToken>("UserToken", { sub, email }, { ttl });

@@ -105,14 +105,43 @@ describe('auth mutations', () => {
 
   it('signs in with a magic-link token and rejects anything else', async () => {
     const email = uniqueEmail();
-    const token = await jwt.issueToken<EnterRequestToken>('EnterRequest', { email: email.toUpperCase() }, { ttl: 60 });
+    const token = await jwt.issueToken<EnterRequestToken>('EnterRequest', { email: email.toUpperCase(), jti: crypto.randomUUID() }, { ttl: 60 });
     const entered = await auth().enter({ input: { enterRequestToken: token } }, context()) as any;
     expect(entered).toMatchObject({ status: 'ok', user: { name: '' } });
     expect(await jwt.jwtVerify<UserToken>(entered.userToken, 'UserToken')).toMatchObject({ sub: entered.user.id, email });
 
     expect(await auth().enter({ input: { enterRequestToken: entered.userToken } }, context())).toMatchObject({
-      status: 'error', userErrors: [{ fieldName: 'enterRequestToken' }],
+      status: 'error', userErrors: [{ fieldName: 'enterRequestToken', messages: ['Invalid request token.'] }],
     });
+  });
+
+  it('puts a fresh id in every magic link', async () => {
+    const ctx = context();
+    const email = uniqueEmail();
+    await auth().enterRequest({ input: { email, party: undefined as any } }, ctx);
+    await auth().enterRequest({ input: { email, party: undefined as any } }, ctx);
+    const ids = await Promise.all(ctx.sent.map(async ({ message }) => {
+      const token = /enter\/([\w-]+\.[\w-]+\.[\w-]+)/.exec(message.text)![1];
+      return (await jwt.jwtVerify<EnterRequestToken>(token, 'EnterRequest')).jti;
+    }));
+    expect(ids[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(ids[1]).not.toBe(ids[0]);
+  });
+
+  it('lets a magic link be used only once', async () => {
+    const token = await jwt.issueToken<EnterRequestToken>('EnterRequest', { email: uniqueEmail(), jti: crypto.randomUUID() }, { ttl: 60 });
+    expect(await auth().enter({ input: { enterRequestToken: token } }, context())).toMatchObject({ status: 'ok' });
+    expect(await auth().enter({ input: { enterRequestToken: token } }, context())).toEqual({
+      status: 'error', userErrors: [{ fieldName: 'enterRequestToken', messages: ['This magic link has already been used. Please request a new one.'] }],
+    });
+  });
+
+  it('rejects magic-link tokens without an id or an expiry', async () => {
+    const invalid = { status: 'error', userErrors: [{ fieldName: 'enterRequestToken', messages: ['Invalid request token.'] }] };
+    const withoutId = await jwt.issueToken<EnterRequestToken>('EnterRequest', { email: uniqueEmail() }, { ttl: 60 });
+    const withoutExpiry = await jwt.issueToken<EnterRequestToken>('EnterRequest', { email: uniqueEmail(), jti: crypto.randomUUID() });
+    expect(await auth().enter({ input: { enterRequestToken: withoutId } }, context())).toMatchObject(invalid);
+    expect(await auth().enter({ input: { enterRequestToken: withoutExpiry } }, context())).toMatchObject(invalid);
   });
 });
 

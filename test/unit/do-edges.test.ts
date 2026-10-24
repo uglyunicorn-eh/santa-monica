@@ -183,6 +183,24 @@ describe('UserDO', () => {
     expect(second).toEqual(first);
   });
 
+  it('redeems each magic link once, and forgets links once they have expired', async () => {
+    const email = `redeem-${++counter}@example.com`;
+    const stub = env.USER.getByName(email);
+    const inFiveMinutes = Date.now() + 5 * 60 * 1000;
+
+    const user = await stub.redeemMagicLink(email, 'link-1', inFiveMinutes);
+    expect(user).toMatchObject({ email });
+    expect(await stub.redeemMagicLink(email, 'link-1', inFiveMinutes)).toBeNull();
+    expect(await stub.redeemMagicLink(email, 'link-2', inFiveMinutes)).toEqual(user);
+
+    await stub.redeemMagicLink(email, 'old-link', Date.now() - 1000);
+    await stub.redeemMagicLink(email, 'link-3', inFiveMinutes);
+    await runInDurableObject(stub, async (_instance, state) => {
+      const jtis = state.storage.sql.exec<{ jti: string }>('SELECT jti FROM used_magic_links ORDER BY jti').toArray().map(r => r.jti);
+      expect(jtis).toEqual(['link-1', 'link-2', 'link-3']);
+    });
+  });
+
   it('imports a user, replacing what was there', async () => {
     const email = `imported-${++counter}@example.com`;
     const stub = env.USER.getByName(email);

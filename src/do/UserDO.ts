@@ -32,6 +32,10 @@ export class UserDO extends DurableObject<Env> {
           name TEXT NOT NULL,
           created_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS used_magic_links (
+          jti TEXT PRIMARY KEY,
+          expires_at INTEGER NOT NULL
+        );
       `);
     });
   }
@@ -49,6 +53,19 @@ export class UserDO extends DurableObject<Env> {
     const user = { id: newObjectId(), email, name: '', joined: Date.now() };
     this.sql.exec('INSERT INTO user (id, email, name, joined) VALUES (?, ?, ?, ?)', user.id, user.email, user.name, user.joined);
     return user;
+  }
+
+  /**
+   * Signs in with a magic link: returns the user (creating it on the first sign-in), or null when this link
+   * was already used. Used links are kept only until they expire.
+   */
+  redeemMagicLink(email: string, jti: string, expiresAt: number): UserRecord | null {
+    this.sql.exec('DELETE FROM used_magic_links WHERE expires_at < ?', Date.now());
+    if (this.sql.exec('SELECT 1 FROM used_magic_links WHERE jti = ?', jti).toArray().length) {
+      return null;
+    }
+    this.sql.exec('INSERT INTO used_magic_links (jti, expires_at) VALUES (?, ?)', jti, expiresAt);
+    return this.ensure(email);
   }
 
   get(): UserRecord | null {

@@ -42,6 +42,8 @@ export type MutationInput<T> = {
 export interface EnterRequestToken extends TokenPayload {
   email: string;
   party?: string;
+  /** Random id that makes the magic link single-use. */
+  jti?: string;
 }
 
 export interface UserToken extends TokenPayload {

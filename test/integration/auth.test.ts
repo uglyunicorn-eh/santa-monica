@@ -38,13 +38,30 @@ describe('magic-link sign-in', () => {
     expect(await mailbox(email)).toHaveLength(2);
   });
 
-  it('lets the same magic link be used more than once while it is valid', async () => {
+  it('lets each magic link be used only once', async () => {
     const email = uniqueEmail('reuse');
     await gql(ENTER_REQUEST, { email });
+    await gql(ENTER_REQUEST, { email });
+    const [first, second] = (await mailbox(email)).map(magicLinkToken);
+
+    expect((await gql(ENTER, { token: first })).data.auth.enter.status).toBe('ok');
+    expect((await gql(ENTER, { token: first })).data.auth.enter).toEqual({
+      status: 'error',
+      userErrors: [{ fieldName: 'enterRequestToken', messages: ['This magic link has already been used. Please request a new one.'] }],
+      userToken: null,
+      user: null,
+    });
+
+    // An unused link from the same person still works.
+    expect((await gql(ENTER, { token: second })).data.auth.enter.status).toBe('ok');
+  });
+
+  it('lets only one of two simultaneous clicks through', async () => {
+    const email = uniqueEmail('race');
+    await gql(ENTER_REQUEST, { email });
     const token = magicLinkToken((await mailbox(email))[0]);
-    const a = await gql(ENTER, { token });
-    const b = await gql(ENTER, { token });
-    expect(a.data.auth.enter.user.id).toBe(b.data.auth.enter.user.id);
+    const results = await Promise.all([gql(ENTER, { token }), gql(ENTER, { token }), gql(ENTER, { token })]);
+    expect(results.map(r => r.data.auth.enter.status).sort()).toEqual(['error', 'error', 'ok']);
   });
 
   it('accepts a party code for an existing party', async () => {
