@@ -14,9 +14,7 @@
     "test:unit": "vitest run --project unit --coverage",
     "test:integration": "vitest run --project integration",
     "smoke": "node scripts/smoke.ts",
-    "typecheck": "tsc --noEmit && tsc -p scripts",
-    "export-mongo": "node --env-file=.env.local scripts/export-mongo.ts",
-    "import": "node scripts/import.ts"
+    "typecheck": "tsc --noEmit && tsc -p scripts"
   },
   "repository": {
     "type": "git",
@@ -40,11 +38,10 @@
     "@cloudflare/vitest-plugin": "^1.4.7",
     "@cloudflare/workers-types": "^5.20261024.1",
     "@types/node": "^22.19.0",
-    "@vitest/coverage-istanbul": "^4.1.12",
-    "mongodb": "^6.21.0",
-    "typescript": "^5.9.3",
-    "vite": "^7.3.0",
-    "vitest": "^4.1.12",
+    "@vitest/coverage-istanbul": "^5.0.5",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.7",
+    "vitest": "^5.0.5",
     "wrangler": "^4.152.0"
   },
   "allowScripts": {

@@ -11,9 +11,6 @@ export type UserPartyRecord = {
   createdAt: number;
 };
 
-export type UserSnapshot = UserRecord & {
-  parties: UserPartyRecord[];
-};
 
 export type Member = {
   id: string;
@@ -48,26 +45,4 @@ export type CreatePartyInput = {
   name: string;
   password: string | null;
   host: Member;
-};
-
-export type MemberSnapshot = Member & {
-  targetId: string | null;
-  targetName: string | null;
-  joinedAt: number;
-};
-
-export type PartySnapshot = {
-  id: string;
-  slug: string;
-  name: string;
-  password: string | null;
-  hostId: string;
-  isClosed: boolean;
-  createdAt: number;
-  members: MemberSnapshot[];
-};
-
-export type ImportSnapshot = {
-  users: UserSnapshot[];
-  parties: PartySnapshot[];
 };

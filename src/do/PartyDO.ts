@@ -4,7 +4,7 @@ import { Env } from 'src/env';
 import { isPermanentMailError, renderPartyNotification, sendMail } from 'src/mail';
 import santaShuffle from 'src/utils/santaShuffle';
 
-import { CreatePartyInput, Member, PartyResult, PartySnapshot, PartyView, UserPartyRecord } from './types';
+import { CreatePartyInput, Member, PartyResult, PartyView, UserPartyRecord } from './types';
 
 import { baseUrl } from 'src/config.json';
 
@@ -142,7 +142,8 @@ export class PartyDO extends DurableObject<Env> {
     }
 
     const target = isClosed && membership?.target_id
-      ? { id: membership.target_id, name: membership.target_name ?? '' }
+      // close() always sets target_id and target_name together.
+      ? { id: membership.target_id, name: membership.target_name! }
       : null;
 
     return {
@@ -289,25 +290,6 @@ export class PartyDO extends DurableObject<Env> {
     return { ok: true, view: this.buildView({ ...party, is_closed: 1 }, userId) };
   }
 
-  /** Replaces the whole party with the snapshot. Used by the Mongo import, safe to re-run. */
-  importParty(snapshot: PartySnapshot): { memberships: number } {
-    this.ensureSchema();
-    this.ctx.storage.transactionSync(() => {
-      this.sql.exec('DELETE FROM party');
-      this.sql.exec('DELETE FROM memberships');
-      this.sql.exec(
-        'INSERT INTO party (id, slug, name, password, host_id, is_closed, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        snapshot.id, snapshot.slug, snapshot.name, snapshot.password, snapshot.hostId, snapshot.isClosed ? 1 : 0, snapshot.createdAt,
-      );
-      for (const m of snapshot.members) {
-        this.sql.exec(
-          'INSERT INTO memberships (member_id, member_email, name, target_id, target_name, joined_at) VALUES (?, ?, ?, ?, ?, ?)',
-          m.id, m.email, m.name, m.targetId, m.targetName, m.joinedAt,
-        );
-      }
-    });
-    return { memberships: this.memberCount() };
-  }
 
   private async deliver(message: OutboxMessage) {
     switch (message.kind) {
@@ -384,7 +366,7 @@ export class PartyDO extends DurableObject<Env> {
     }
   }
 
-  /** Number of undelivered outbox messages. Used by tests and the import endpoint. */
+  /** Number of undelivered outbox messages. Used by tests. */
   pendingOutbox(): number {
     if (!this.hasSchema()) {
       return 0;

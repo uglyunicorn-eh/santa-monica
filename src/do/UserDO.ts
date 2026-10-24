@@ -3,7 +3,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { Env } from 'src/env';
 import { newObjectId } from 'src/utils/ids';
 
-import { UserPartyRecord, UserRecord, UserSnapshot } from './types';
+import { UserPartyRecord, UserRecord } from './types';
 
 type UserRow = { id: string; email: string; name: string; joined: number };
 type PartyRow = { slug: string; name: string; created_at: number };
@@ -94,19 +94,4 @@ export class UserDO extends DurableObject<Env> {
       .map(({ slug, name, created_at }) => ({ slug, name, createdAt: created_at }));
   }
 
-  /** Replaces the whole user with the snapshot. Used by the Mongo import, safe to re-run. */
-  importUser(snapshot: UserSnapshot): { parties: number } {
-    this.ctx.storage.transactionSync(() => {
-      this.sql.exec('DELETE FROM user');
-      this.sql.exec('DELETE FROM parties');
-      this.sql.exec(
-        'INSERT INTO user (id, email, name, joined) VALUES (?, ?, ?, ?)',
-        snapshot.id, snapshot.email, snapshot.name, snapshot.joined,
-      );
-      for (const party of snapshot.parties) {
-        this.addParty(party);
-      }
-    });
-    return { parties: snapshot.parties.length };
-  }
 }

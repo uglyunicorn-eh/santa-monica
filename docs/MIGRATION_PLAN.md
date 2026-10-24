@@ -1,6 +1,6 @@
 # Migration plan: AWS Lambda + Express + MongoDB Atlas → Cloudflare Workers + Hono + Durable Objects
 
-Status: Phases 1 and 2 are implemented on the `cf-migration` branch (see "Implementation status" at the end). Phase 0 checks, the deploy to workers.dev and cutover are still to do.
+Status: **complete** (October 2026). The API runs on Cloudflare at `api.gnomik.me`; the data was imported from Atlas, and Atlas, the Lambda stack and SendGrid are retired. The migration tooling (export script, import endpoint) has been removed. This document is kept as a record of the decisions; the README describes the system as it is now.
 
 ## Goals
 
