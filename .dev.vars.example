@@ -2,4 +2,3 @@
 #   openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 | awk 'NF {printf "%s\\n", $0}'
 JWT_PRIVATE_KEY=
 ADMIN_SECRET=change-me
-SENTRY_DSN=

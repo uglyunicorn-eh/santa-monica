@@ -33,6 +33,12 @@ npm test                         # unit + integration
 
 GitHub secrets: `CLOUDFLARE_API_TOKEN` (a Cloudflare API token from the "Edit Cloudflare Workers" template, with access to the account and the gnomik.me zone), `CLOUDFLARE_ACCOUNT_ID`, and `PREVIEW_JWT_PRIVATE_KEY` (a P-256 private key used to sign preview tokens; previews have no frontend, so any key works).
 
+## Logs and errors
+
+Production logs (every `console.*` call plus Cloudflare's invocation logs) and request traces are kept in Workers Logs and exported to Better Stack, source `gnomik-api`, by Cloudflare's OpenTelemetry export. No SDK is involved: the destinations `betterstack-logs` and `betterstack-traces` are defined in the Cloudflare dashboard (Workers & Pages → Observability → Telemetry) and referenced by name in `wrangler.jsonc`. Previews keep their logs in Workers Logs only.
+
+Unexpected errors return a 500 with an `errorId`; the same id is logged with the error (`message: "Unhandled error"`), so a reported error can be looked up in Better Stack.
+
 ## Deploying by hand
 
 ```bash
@@ -40,7 +46,7 @@ npx wrangler deploy --env=""                                  # production (api.
 npx wrangler deploy --env preview --name gnomik-api-pr-123    # a preview
 ```
 
-Production secrets are set with `npx wrangler secret put JWT_PRIVATE_KEY` (and `SENTRY_DSN`).
+Production secrets are set with `npx wrangler secret put JWT_PRIVATE_KEY`.
 
 ## Tokens
 

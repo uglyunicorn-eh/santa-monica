@@ -11,5 +11,4 @@ export interface Env {
   /** RSA private key (PEM). The frontend verifies tokens with the matching public key. */
   JWT_PRIVATE_KEY: string;
   ADMIN_SECRET?: string;
-  SENTRY_DSN?: string;
 }

@@ -1,4 +1,3 @@
-import * as Sentry from '@sentry/cloudflare';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { secureHeaders } from 'hono/secure-headers';
@@ -30,15 +29,12 @@ app.all('/graph', graphqlHandler);
 
 app.post('/admin/import', importHandler);
 
+// Unexpected errors are logged with an id that is also returned to the client, so a reported error can be found in
+// the logs (Workers Logs and Better Stack).
 app.onError((err, c) => {
-  const errorId = Sentry.captureException(err);
-  console.error(err);
+  const errorId = crypto.randomUUID();
+  console.error({ message: 'Unhandled error', errorId, path: c.req.path, error: String(err), stack: err.stack });
   return c.json({ status: 'error', error: 'Ugly Unicorn just puked a little bit :(', errorId }, 500);
 });
 
-export default Sentry.withSentry(
-  (env: Env) => env.SENTRY_DSN
-    ? { dsn: env.SENTRY_DSN, release: `${name}@${version}`, tracesSampleRate: 1.0 }
-    : undefined,
-  { fetch: app.fetch } satisfies ExportedHandler<Env>,
-);
+export default { fetch: app.fetch } satisfies ExportedHandler<Env>;

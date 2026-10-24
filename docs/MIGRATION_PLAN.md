@@ -22,7 +22,7 @@ Non-goals: changing the GraphQL schema, the magic-link flow, or the wording and 
 | Lookups | `PartyDO` is addressed by slug and `UserDO` by lowercased email, both with `getByName()` | Gives slug and email uniqueness for free, without separate index objects. |
 | Cross-object writes | `PartyDO` is the source of truth. Changes to users go through a transactional outbox in `PartyDO`, delivered by its alarm to idempotent `UserDO` methods | A membership change and its follow-ups commit together and are retried until delivered, so the two sides always converge. |
 | Mail | Cloudflare Email Service via the `send_email` binding (`env.EMAIL.send`) | No API key or SDK, native to Workers. It has no hosted templates, so the two SendGrid templates are re-created as render functions in the repo. |
-| Errors | `@sentry/cloudflare` | Sentry's official Workers SDK. `@sentry/node` assumes Node. |
+| Errors and logs | Better Stack via Cloudflare's OpenTelemetry export (Sentry removed) | No SDK in the Worker: Cloudflare exports logs and traces to Better Stack. Unhandled errors are logged with an `errorId` that is also returned to the client. |
 | JWT | `jose`, ES256 with `JWT_PRIVATE_KEY` (a new P-256 key) | The frontend verifies tokens in the browser, so it holds the matching public key (in its `src/config.json`) and verifies ES256. HS256 was tried first and broke sign-in on the frontend; the old RSA pair was replaced at the same time. |
 | Abuse and spikes | Workers rate-limiting binding on `enterRequest`, per IP and per email | `enterRequest` is unauthenticated and sends mail to any address. A spike also brings abuse that would burn the email quota. Turnstile is deferred: add it only if abuse shows up, since it needs a frontend change. |
 
@@ -220,12 +220,12 @@ Right after cutover:
 - Legacy Facebook `profiles` are dropped on import.
 - Old ids (node ids, tokens) don't need to survive. All data is kept: users, parties, memberships, targets, party passwords and slugs.
 - Data model: one `PartyDO` per party (by slug) and one `UserDO` per user (by email), with a transactional outbox between them.
-- Rate limiting now, Turnstile deferred, Sentry kept, load test optional.
+- Rate limiting now, Turnstile deferred, load test optional. Sentry was later replaced by Better Stack (logs and traces through Cloudflare's OpenTelemetry export).
 
 ## Implementation status
 
 Done on `cf-migration`:
-- Worker (Hono + Apollo adapter), `PartyDO` and `UserDO` with the outbox, JWT on `jose`, Cloudflare Email Service templates, rate limiting, Sentry on the fetch handler, temporary import endpoint.
+- Worker (Hono + Apollo adapter), `PartyDO` and `UserDO` with the outbox, JWT on `jose`, Cloudflare Email Service templates, rate limiting, temporary import endpoint.
 - `scripts/export-mongo.ts` exported the real data (86 users, 4 legacy users, 36 parties, 179 memberships) and `scripts/import.ts` imported it into a local `wrangler dev`. Counts match, re-runs are idempotent, and all 165 members of closed parties who have an email see their correct target and party list through the API.
 - Tests (vitest with `@cloudflare/vitest-plugin`): 83 unit tests with 100% coverage required (istanbul) and 61 integration scenarios that run end to end through the Worker in local workerd, with a mail sink standing in for Email Service. CI runs the typecheck and both suites on every push and PR; the deploy workflow runs CI, deploys, then smoke-tests the deployment (`scripts/smoke.ts`).
 - Email images are served by the Worker from `public/email/` at `PUBLIC_URL`.
@@ -234,7 +234,7 @@ Differences from the plan:
 - Apollo Server 5 instead of 4 (4 is end-of-life). The adapter API is the same.
 - npm (with `package-lock.json`) instead of yarn. Yarn 1 and npm 10 fail to resolve the new dependency set; npm 11 works (the workflow uses `npx npm@11 ci`).
 - `closeParty` now requires at least two participants. Before, a one-person party could be closed and produced a broken draw.
-- Sentry instruments the Worker's fetch handler only. Outbox failures inside `PartyDO` are logged to Workers Logs.
+- Logging: Sentry was removed. Logs and traces go to Workers Logs and Better Stack; unhandled errors carry an `errorId`.
 - The `api.gnomik.me` custom domain is not in `wrangler.jsonc` yet, so a deploy only goes to workers.dev. The deploy workflow is manual until cutover.
 
 Still to do: Phase 0 (frontend operations from santa-barbara for contract tests, plan features and email quota, `gnomik.me` email onboarding), deploying to workers.dev with `JWT_SECRET` and `ADMIN_SECRET`, the import there, testing with the frontend, cutover and cleanup.
