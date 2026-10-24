@@ -85,6 +85,22 @@ const checks: Check[] = [
   },
 ];
 
+// A freshly deployed Worker (especially a new preview hostname) can answer 404 for a few seconds, so wait until it
+// serves / before checking anything.
+const READY_TIMEOUT_MS = 60_000;
+const startedAt = Date.now();
+while (true) {
+  const status = await fetch(new URL('/', base)).then(res => res.status, () => 0);
+  if (status === 200) {
+    break;
+  }
+  if (Date.now() - startedAt > READY_TIMEOUT_MS) {
+    console.log(`FAIL ${base} did not come up within ${READY_TIMEOUT_MS / 1000}s (last status ${status})`);
+    process.exit(1);
+  }
+  await new Promise(resolve => setTimeout(resolve, 3000));
+}
+
 let failed = 0;
 for (const check of checks) {
   try {
