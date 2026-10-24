@@ -1,6 +1,6 @@
 import app from './app';
 import user from './user';
-import party from './party';
+import party, { partyFields } from './party';
 
 export default {
   Query: {
@@ -8,4 +8,5 @@ export default {
     ...user,
     ...party,
   },
+  Party: partyFields,
 };

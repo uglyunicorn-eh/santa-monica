@@ -116,8 +116,8 @@ describe('API action spans', () => {
     const ctx = await signedIn();
     const spans = captureSpans();
 
-    const created = await mutations.Mutation.parties().createParty({ input: { name: 'Spans party', password: 'pw' } }, ctx) as any;
-    const invalid = await mutations.Mutation.parties().createParty({ input: { name: '' } }, ctx) as any;
+    const created = await mutations.Mutation.parties(null, {}, ctx).createParty({ input: { name: 'Spans party', password: 'pw' } }, ctx) as any;
+    const invalid = await mutations.Mutation.parties(null, {}, ctx).createParty({ input: { name: '' } }, ctx) as any;
 
     expect(created.status).toBe('ok');
     expect(invalid.status).toBe('error');
@@ -132,7 +132,7 @@ describe('API action spans', () => {
 
   it('records spans for queries', async () => {
     const ctx = await signedIn();
-    const created = await mutations.Mutation.parties().createParty({ input: { name: 'Query spans' } }, ctx) as any;
+    const created = await mutations.Mutation.parties(null, {}, ctx).createParty({ input: { name: 'Query spans' } }, ctx) as any;
     const spans = captureSpans();
 
     await resolvers.Query.party(null, { code: created.node.code }, ctx);

@@ -11,6 +11,13 @@ This is back-end side of the Anonymous Ded Morozes
 
 The API is a Cloudflare Worker (Hono + Apollo Server) with its data in Durable Objects: one `PartyDO` per party and one `UserDO` per user. Mail goes through Cloudflare Email Service. See [docs/MIGRATION_PLAN.md](docs/MIGRATION_PLAN.md) for the design.
 
+Keeping Durable Object calls low:
+
+- Each `UserDO` keeps a summary of the user's parties (name, host, protected, closed), so "my parties" is one call. Fields the summary doesn't have (participants, target, password) are loaded from the party only when a query asks for them, at most once per party per request.
+- A party updates its members' summaries through its outbox. All of a user's queued changes go out in one `UserDO.apply` call, built from the party's current state when it's sent.
+- The session token is checked once per request. Joining uses the session's email and doesn't read the profile.
+- `test/unit/efficiency.test.ts` counts the calls each operation makes.
+
 ```bash
 npm install
 cp .dev.vars.example .dev.vars   # then set JWT_PRIVATE_KEY
@@ -21,7 +28,7 @@ npm test                         # unit + integration
 
 ## Tests
 
-- `npm run test:unit` tests every module directly (Durable Objects, resolvers, mutations, middleware, the HTTP layer, tokens, mail) and requires 100% coverage of lines, branches, functions and statements. The HTML report is written to `coverage/`.
+- `npm run test:unit` tests every module directly (Durable Objects, resolvers, mutations, request auth, the HTTP layer, tokens, mail) and requires 100% coverage of lines, branches, functions and statements. The HTML report is written to `coverage/`.
 - `npm run test:integration` runs every API scenario end to end through the Worker's real entry point in a local workerd: magic-link sign-in using the actual emailed link, rate limits, tokens, creating, joining, leaving and closing parties, the draw, notification emails and retries, and the HTTP surface. Email goes to a test mail sink (`test/integration/mail-sink.js`) instead of Cloudflare Email Service, so tests can read what was sent. Recipients starting with `fail+` simulate a failed delivery.
 - `npm run smoke` runs read-only checks against a deployed Worker (`SMOKE_URL=https://...`).
 

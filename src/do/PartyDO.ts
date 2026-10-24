@@ -4,7 +4,7 @@ import { Env } from 'src/env';
 import { isPermanentMailError, renderPartyNotification, sendMail } from 'src/mail';
 import santaShuffle from 'src/utils/santaShuffle';
 
-import { CreatePartyInput, Member, PartyResult, PartyView, UserPartyRecord } from './types';
+import { CreatePartyInput, Member, PartyResult, PartyView, UserUpdate } from './types';
 
 import { baseUrl } from 'src/config.json';
 
@@ -27,13 +27,16 @@ type MembershipRow = {
   joined_at: number;
 };
 
+// user.sync sends the member's current view of this party (added, closed, or removed if they left). It is computed at
+// delivery time, so it is always current and safe to repeat. user.addParty / user.removeParty are older forms of it.
 type OutboxMessage =
-  | { kind: 'user.addParty'; email: string; party: UserPartyRecord }
-  | { kind: 'user.removeParty'; email: string; slug: string }
+  | { kind: 'user.sync' | 'user.addParty' | 'user.removeParty'; email: string }
   | { kind: 'user.setName'; email: string; name: string }
   | { kind: 'mail.partyNotification'; email: string; partyName: string; slug: string };
 
-type OutboxRow = { id: number; payload: string; attempts: number };
+type OutboxRow = { id: number; payload: string; attempts: number; next_attempt_at: number };
+
+type OutboxBatch = { key: string; rows: OutboxRow[]; messages: OutboxMessage[] };
 
 const MAX_ATTEMPTS = 15;
 const MAX_BACKOFF_MS = 60 * 60 * 1000;
@@ -121,8 +124,26 @@ export class PartyDO extends DurableObject<Env> {
     await this.runOutbox(message => message.kind.startsWith('user.'));
   }
 
-  private partyRecord(party: PartyRow): UserPartyRecord {
-    return { slug: party.slug, name: party.name, createdAt: party.created_at };
+  /** The party as a member sees it in their list, or its removal if they are no longer a member. */
+  private memberUpdate(email: string): UserUpdate {
+    const party = this.party()!;
+    const membership = this.sql
+      .exec<{ member_id: string }>('SELECT member_id FROM memberships WHERE member_email = ?', email)
+      .toArray()[0];
+    if (!membership) {
+      return { type: 'removeParty', slug: party.slug };
+    }
+    return {
+      type: 'addParty',
+      party: {
+        slug: party.slug,
+        name: party.name,
+        createdAt: party.created_at,
+        isHost: membership.member_id === party.host_id,
+        isProtected: Boolean(party.password),
+        isClosed: Boolean(party.is_closed),
+      },
+    };
   }
 
   private buildView(party: PartyRow, userId?: string): PartyView {
@@ -192,7 +213,7 @@ export class PartyDO extends DurableObject<Env> {
         input.host.id, input.host.email, input.host.name, now,
       );
       if (input.host.email) {
-        this.enqueue({ kind: 'user.addParty', email: input.host.email, party: this.partyRecord(party) });
+        this.enqueue({ kind: 'user.sync', email: input.host.email });
       }
     });
     await this.deliverUserUpdates();
@@ -224,7 +245,7 @@ export class PartyDO extends DurableObject<Env> {
         member.id, member.email, displayName, Date.now(),
       );
       if (member.email) {
-        this.enqueue({ kind: 'user.addParty', email: member.email, party: this.partyRecord(party) });
+        this.enqueue({ kind: 'user.sync', email: member.email });
         this.enqueue({ kind: 'user.setName', email: member.email, name: displayName });
       }
     });
@@ -248,7 +269,7 @@ export class PartyDO extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       this.sql.exec('DELETE FROM memberships WHERE member_id = ?', userId);
       if (membership.member_email) {
-        this.enqueue({ kind: 'user.removeParty', email: membership.member_email, slug: party.slug });
+        this.enqueue({ kind: 'user.sync', email: membership.member_email });
       }
     });
     await this.deliverUserUpdates();
@@ -280,8 +301,10 @@ export class PartyDO extends DurableObject<Env> {
         );
       }
       this.sql.exec('UPDATE party SET is_closed = 1');
+      // Every member's party list shows the party as closed, and everyone gets the notification email.
       for (const member of members) {
         if (member.member_email) {
+          this.enqueue({ kind: 'user.sync', email: member.member_email });
           this.enqueue({ kind: 'mail.partyNotification', email: member.member_email, partyName: party.name, slug: party.slug });
         }
       }
@@ -291,20 +314,26 @@ export class PartyDO extends DurableObject<Env> {
   }
 
 
-  private async deliver(message: OutboxMessage) {
-    switch (message.kind) {
-      case 'user.addParty':
-        return await this.env.USER.getByName(message.email).addParty(message.party);
-      case 'user.removeParty':
-        return await this.env.USER.getByName(message.email).removeParty(message.slug);
-      case 'user.setName':
-        return await this.env.USER.getByName(message.email).setName(message.name);
-      case 'mail.partyNotification':
-        return await sendMail(this.env, message.email, renderPartyNotification({
-          party: { name: message.partyName, url: `${baseUrl}/p/${message.slug}/` },
-          assetsUrl: this.env.PUBLIC_URL,
-        }));
+  /** Delivers a batch: one email, or all queued changes for one user in a single UserDO call. */
+  private async deliver({ messages }: OutboxBatch) {
+    const [first] = messages;
+    if (first.kind === 'mail.partyNotification') {
+      return await sendMail(this.env, first.email, renderPartyNotification({
+        party: { name: first.partyName, url: `${baseUrl}/p/${first.slug}/` },
+        assetsUrl: this.env.PUBLIC_URL,
+      }));
     }
+    const updates: UserUpdate[] = [];
+    let synced = false;
+    for (const message of messages) {
+      if (message.kind === 'user.setName') {
+        updates.push({ type: 'setName', name: message.name });
+      } else if (!synced) {
+        synced = true;
+        updates.push(this.memberUpdate(first.email));
+      }
+    }
+    return await this.env.USER.getByName(first.email).apply(updates);
   }
 
   async alarm() {
@@ -323,42 +352,53 @@ export class PartyDO extends DurableObject<Env> {
     }
     const now = Date.now();
     const rows = this.sql
-      .exec<OutboxRow & { next_attempt_at: number }>('SELECT id, payload, attempts, next_attempt_at FROM outbox ORDER BY id')
+      .exec<OutboxRow>('SELECT id, payload, attempts, next_attempt_at FROM outbox ORDER BY id')
       .toArray();
 
-    // Messages for the same user are delivered in order: while an earlier one is waiting for a retry, later ones wait too.
+    // One batch per user (all their due changes, in order) and one per email. While an earlier change for a user is
+    // waiting for a retry, later ones wait too, so a user never sees changes out of order.
+    const batches = new Map<string, OutboxBatch>();
     const blocked = new Set<string>();
     for (const row of rows) {
       const message = JSON.parse(row.payload) as OutboxMessage;
-      const orderKey = message.kind.startsWith('user.') ? message.email : `mail:${row.id}`;
-      if (blocked.has(orderKey)) {
+      const key = message.kind.startsWith('user.') ? message.email : `mail:${row.id}`;
+      if (blocked.has(key)) {
         continue;
       }
       if (row.next_attempt_at > now) {
-        blocked.add(orderKey);
+        blocked.add(key);
         continue;
       }
       if (!filter(message)) {
         continue;
       }
+      const batch = batches.get(key) ?? { key, rows: [], messages: [] };
+      batch.rows.push(row);
+      batch.messages.push(message);
+      batches.set(key, batch);
+    }
+
+    await Promise.all([...batches.values()].map(async batch => {
+      const ids = batch.rows.map(row => row.id);
       try {
-        await this.deliver(message);
-        this.sql.exec('DELETE FROM outbox WHERE id = ?', row.id);
+        await this.deliver(batch);
+        this.sql.exec(`DELETE FROM outbox WHERE id IN (${ids.map(() => '?').join(',')})`, ...ids);
       } catch (error) {
-        const attempts = row.attempts + 1;
+        const attempts = batch.rows[0].attempts + 1;
+        const kind = batch.messages[0].kind;
         if (isPermanentMailError(error) || attempts >= MAX_ATTEMPTS) {
-          console.error('Dropping outbox message', { kind: message.kind, attempts, error: String(error) });
-          this.sql.exec('DELETE FROM outbox WHERE id = ?', row.id);
-          continue;
+          console.error('Dropping outbox messages', { kind, count: ids.length, attempts, error: String(error) });
+          this.sql.exec(`DELETE FROM outbox WHERE id IN (${ids.map(() => '?').join(',')})`, ...ids);
+          return;
         }
-        console.warn('Outbox delivery failed, will retry', { kind: message.kind, attempts, error: String(error) });
-        blocked.add(orderKey);
+        console.warn('Outbox delivery failed, will retry', { kind, count: ids.length, attempts, error: String(error) });
+        const retryAt = Date.now() + Math.min(1000 * 2 ** attempts, MAX_BACKOFF_MS);
         this.sql.exec(
-          'UPDATE outbox SET attempts = ?, next_attempt_at = ? WHERE id = ?',
-          attempts, Date.now() + Math.min(1000 * 2 ** attempts, MAX_BACKOFF_MS), row.id,
+          `UPDATE outbox SET attempts = ?, next_attempt_at = ? WHERE id IN (${ids.map(() => '?').join(',')})`,
+          attempts, retryAt, ...ids,
         );
       }
-    }
+    }));
 
     const next = this.sql.exec<{ at: number | null }>('SELECT MIN(next_attempt_at) AS at FROM outbox').one().at;
     if (next !== null) {

@@ -1,4 +1,4 @@
-import { ApolloContext } from 'src/apollo/context';
+import { ApolloContext, requireUser } from 'src/apollo/context';
 import { PARTY_CODE_RE, partyViewToNode } from 'src/apollo/resolvers/party';
 import { MutationPayload } from 'src/apollo/types';
 import { PartyResult } from 'src/do/types';
@@ -47,10 +47,18 @@ const toPayload = (result: PartyResult) => result.ok
   };
 
 export default {
-  parties: () => ({
+  // Every party mutation needs a session; the handlers below can rely on userId and userEmail.
+  parties: (root: unknown, args: unknown, context: ApolloContext) => {
+    requireUser(context);
+    return partyMutations;
+  },
+};
+
+const partyMutations = {
 
     createParty: _(createPartyInputSchema, 'createParty')(async (input: CreatePartyInput, { env, userEmail, retrieveUser }: ApolloContext) => {
       annotate({ 'party.protected': Boolean(input.password) });
+      // The host's display name lives in their profile, so creating a party reads it (one UserDO call).
       const user = await retrieveUser();
       if (!user) {
         return notLoggedIn('creating');
@@ -62,7 +70,7 @@ export default {
           slug,
           name: input.name,
           password: input.password || null,
-          host: { id: user.id, email: userEmail ?? user.email, name: user.name },
+          host: { id: user.id, email: userEmail!, name: user.name },
         });
         annotate({ 'party.code_attempts': attempt + 1 });
         if ('conflict' in result) {
@@ -74,57 +82,38 @@ export default {
       throw new Error('Unable to generate a unique party code.');
     }),
 
-    joinParty: _(joinPartyInputSchema, 'joinParty')(async ({ party, name, password }: JoinPartyInput, context: ApolloContext) => {
-      const { env, userId, retrieveUser } = context;
-
-      if (!userId) {
-        return notLoggedIn('joining');
-      }
-
+    joinParty: _(joinPartyInputSchema, 'joinParty')(async ({ party, name, password }: JoinPartyInput, { env, userId, userEmail }: ApolloContext) => {
       const slug = partySlug(party);
       if (!slug) {
         return unknownParty;
       }
       annotate({ 'party.code': slug });
 
-      const user = await retrieveUser();
-      if (!user) {
-        return notLoggedIn('joining');
-      }
-
+      // The member comes from the session token and the name from the form: no need to read the profile.
       return toPayload(await env.PARTY.getByName(slug).join(
-        { id: user.id, email: user.email, name: user.name },
+        { id: userId!, email: userEmail!, name },
         name,
         password || null,
       ));
     }),
 
     leaveParty: _(leavePartyInputSchema, 'leaveParty')(async ({ party }: LeavePartyInput, { env, userId }: ApolloContext) => {
-      if (!userId) {
-        return notLoggedIn('leaving');
-      }
-
       const slug = partySlug(party);
       if (!slug) {
         return unknownParty;
       }
       annotate({ 'party.code': slug });
 
-      return toPayload(await env.PARTY.getByName(slug).leave(userId));
+      return toPayload(await env.PARTY.getByName(slug).leave(userId!));
     }),
 
     closeParty: _(closePartyInputSchema, 'closeParty')(async ({ party }: ClosePartyInput, { env, userId }: ApolloContext) => {
-      if (!userId) {
-        return notLoggedIn('closing');
-      }
-
       const slug = partySlug(party);
       if (!slug) {
         return unknownParty;
       }
       annotate({ 'party.code': slug });
 
-      return toPayload(await env.PARTY.getByName(slug).close(userId));
+      return toPayload(await env.PARTY.getByName(slug).close(userId!));
     }),
-  }),
 };

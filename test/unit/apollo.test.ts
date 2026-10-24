@@ -1,16 +1,13 @@
 import { env } from 'cloudflare:test';
-import { GraphQLResolveInfo } from 'graphql';
 import { describe, expect, it, vi } from 'vitest';
 import * as yup from 'yup';
 
-import { ApolloContext, makeContext } from 'src/apollo/context';
-import { authMiddleware, guardMiddleware } from 'src/apollo/middleware';
+import { ApolloContext, authenticate, makeContext, requireUser } from 'src/apollo/context';
 import mutations from 'src/apollo/mutations';
 import resolvers from 'src/apollo/resolvers';
 import { partyViewToNode } from 'src/apollo/resolvers/party';
 import { EnterRequestToken, UserToken } from 'src/apollo/types';
 import { MailMessage } from 'src/mail';
-import { getPathFromInfo } from 'src/utils/graphql';
 import resolvable from 'src/utils/graphql/resolvable';
 import { createJwtHelpers } from 'src/utils/jwt';
 import { nodeIdToStr } from 'src/utils/strings/nodeId';
@@ -28,7 +25,7 @@ function context(overrides: Partial<ApolloContext> = {}): TestContext {
   return {
     env,
     clientIp: `192.0.2.${++counter % 250}`,
-    retrieveUser: async () => { throw new Error('Unable to retrieve user'); },
+    retrieveUser: async () => null,
     sendMail: async (to, message) => { sent.push({ to, message }); },
     ...jwt,
     sent,
@@ -39,7 +36,7 @@ function context(overrides: Partial<ApolloContext> = {}): TestContext {
 async function signedIn(name = 'Person', overrides: Partial<ApolloContext> = {}) {
   const email = uniqueEmail();
   const user = await env.USER.getByName(email).ensure(email);
-  await env.USER.getByName(email).setName(name);
+  await env.USER.getByName(email).apply([{ type: 'setName', name }]);
   return context({
     userId: user.id,
     userEmail: email,
@@ -52,7 +49,7 @@ const { auth, parties } = mutations.Mutation;
 const { party, parties: listParties, user, app } = resolvers.Query;
 
 const createParty = async (ctx: ApolloContext, name = 'Party', password?: string) =>
-  await parties().createParty({ input: { name, password } }, ctx) as any;
+  await parties(null, {}, ctx).createParty({ input: { name, password } }, ctx) as any;
 
 describe('auth mutations', () => {
   it('sends a magic link for a valid email', async () => {
@@ -152,11 +149,6 @@ describe('party mutations', () => {
     expect(await createParty(host, 'Closed', 'pw')).toMatchObject({ status: 'ok', node: { isProtected: true, password: 'pw' } });
   });
 
-  it('falls back to the stored email when the session has none', async () => {
-    const host = await signedIn('Host');
-    expect(await createParty({ ...host, userEmail: undefined })).toMatchObject({ status: 'ok' });
-  });
-
   it('needs a user to create a party', async () => {
     const ctx = await signedIn('Ghost', { retrieveUser: async () => null });
     expect(await createParty(ctx)).toMatchObject({ status: 'error', userErrors: [{ fieldName: null }] });
@@ -181,35 +173,34 @@ describe('party mutations', () => {
     const guest = await signedIn('Guest');
     const { node } = await createParty(host, 'P', 'pw');
 
-    expect(await parties().joinParty({ input: { party: node.id, name: 'G', password: undefined } }, guest)).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'password' }] });
-    expect(await parties().joinParty({ input: { party: node.id, name: 'G', password: 'PW' } }, guest)).toMatchObject({ status: 'ok', node: { isJoined: true } });
-    expect(await parties().leaveParty({ input: { party: node.id } }, guest)).toMatchObject({ status: 'ok', node: { isJoined: false } });
-    await parties().joinParty({ input: { party: node.id, name: 'G', password: 'pw' } }, guest);
-    expect(await parties().closeParty({ input: { party: node.id } }, host)).toMatchObject({ status: 'ok', node: { isClosed: true, target: { name: 'G' } } });
+    expect(await parties(null, {}, guest).joinParty({ input: { party: node.id, name: 'G', password: undefined } }, guest)).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'password' }] });
+    expect(await parties(null, {}, guest).joinParty({ input: { party: node.id, name: 'G', password: 'PW' } }, guest)).toMatchObject({ status: 'ok', node: { isJoined: true } });
+    expect(await parties(null, {}, guest).leaveParty({ input: { party: node.id } }, guest)).toMatchObject({ status: 'ok', node: { isJoined: false } });
+    await parties(null, {}, guest).joinParty({ input: { party: node.id, name: 'G', password: 'pw' } }, guest);
+    expect(await parties(null, {}, host).closeParty({ input: { party: node.id } }, host)).toMatchObject({ status: 'ok', node: { isClosed: true, target: { name: 'G' } } });
   });
 
-  it('needs a session for join, leave and close', async () => {
-    const id = nodeIdToStr({ kind: 'Party', id: 'QWERT' });
-    const anonymous = context();
-    expect(await parties().joinParty({ input: { party: id, name: 'x' } }, anonymous)).toMatchObject({ status: 'error', userErrors: [{ messages: ['You must be logged in before joining the party.'] }] });
-    expect(await parties().leaveParty({ input: { party: id } }, anonymous)).toMatchObject({ status: 'error', userErrors: [{ messages: ['You must be logged in before leaving the party.'] }] });
-    expect(await parties().closeParty({ input: { party: id } }, anonymous)).toMatchObject({ status: 'error', userErrors: [{ messages: ['You must be logged in before closing the party.'] }] });
+  it('needs a session for every party mutation', async () => {
+    expect(() => parties(null, {}, context())).toThrow('UNAUTHENTICATED');
+    expect(() => parties(null, {}, context({ userId: 'a'.repeat(24) }))).toThrow('UNAUTHENTICATED');
+    expect(() => requireUser({ ...context(), userId: 'a'.repeat(24), userEmail: 'a@example.com' })).not.toThrow();
   });
 
-  it('needs a stored user to join', async () => {
-    const ghost = await signedIn('Ghost', { retrieveUser: async () => null });
+  it('joins with the session and the name from the form, without reading the profile', async () => {
     const host = await signedIn('Host');
     const { node } = await createParty(host);
-    expect(await parties().joinParty({ input: { party: node.id, name: 'x' } }, ghost)).toMatchObject({ status: 'error', userErrors: [{ fieldName: null }] });
+    const guest = await signedIn('Old name', { retrieveUser: async () => { throw new Error('profile should not be read'); } });
+    expect(await parties(null, {}, guest).joinParty({ input: { party: node.id, name: 'Form name' } }, guest)).toMatchObject({ status: 'ok', node: { isJoined: true } });
+    expect((await env.USER.getByName(guest.userEmail!).get())!.name).toBe('Form name');
   });
 
   it('rejects ids that are not parties', async () => {
     const ctx = await signedIn();
     const unknown = { status: 'error', userErrors: [{ fieldName: 'party', messages: ['Unknown input type. Must be Party.'] }] };
     for (const id of [nodeIdToStr({ kind: 'User', id: 'x' }), nodeIdToStr({ kind: 'Party', id: 'lower' }), '%%%']) {
-      expect(await parties().joinParty({ input: { party: id, name: 'x' } }, ctx)).toMatchObject(unknown);
-      expect(await parties().leaveParty({ input: { party: id } }, ctx)).toMatchObject(unknown);
-      expect(await parties().closeParty({ input: { party: id } }, ctx)).toMatchObject(unknown);
+      expect(await parties(null, {}, ctx).joinParty({ input: { party: id, name: 'x' } }, ctx)).toMatchObject(unknown);
+      expect(await parties(null, {}, ctx).leaveParty({ input: { party: id } }, ctx)).toMatchObject(unknown);
+      expect(await parties(null, {}, ctx).closeParty({ input: { party: id } }, ctx)).toMatchObject(unknown);
     }
   });
 
@@ -235,10 +226,10 @@ describe('queries', () => {
     const host = await signedIn('Host');
     await createParty(host, 'A');
     await createParty(host, 'B');
-    expect((await listParties(null, { first: 25 }, host)).map((p: any) => p.name)).toEqual(['B', 'A']);
+    expect((await listParties(null, { first: 25 }, host))!.map((p: any) => p.name)).toEqual(['B', 'A']);
     expect(await listParties(null, { first: 1000 }, host)).toHaveLength(2);
     expect(await listParties(null, { first: -5 }, host)).toEqual([]);
-    expect(await listParties(null, { first: 25 }, context())).toEqual([]);
+    expect(await listParties(null, { first: 25 }, context())).toBeNull();
   });
 
   it('returns the signed-in user, or null', async () => {
@@ -258,63 +249,26 @@ describe('queries', () => {
   });
 });
 
-const info = (path: string[], operation: 'query' | 'mutation' = 'query') => {
-  let node: any;
-  for (const key of path) {
-    node = { key, prev: node };
-  }
-  return { path: node, operation: { operation } } as unknown as GraphQLResolveInfo;
-};
-
-describe('middleware', () => {
-  it('builds the field path', () => {
-    expect(getPathFromInfo(info(['parties', 'createParty', 'node']))).toBe('parties.createParty.node');
-    expect(getPathFromInfo(info(['app']))).toBe('app');
-  });
-
-  it('lets anonymous requests reach auth mutations, app and party, and nothing else', async () => {
-    const resolve = vi.fn(async () => 'resolved');
-    const anonymous = context();
-    expect(await guardMiddleware(resolve, null, {}, anonymous, info(['auth', 'enter'], 'mutation'))).toBe('resolved');
-    expect(await guardMiddleware(resolve, null, {}, anonymous, info(['auth']))).toBe('resolved');
-    expect(await guardMiddleware(resolve, null, {}, anonymous, info(['app', 'name']))).toBe('resolved');
-    expect(await guardMiddleware(resolve, null, {}, anonymous, info(['party']))).toBe('resolved');
-    expect(await guardMiddleware(resolve, null, {}, anonymous, info(['user']))).toBeNull();
-    await expect(guardMiddleware(resolve, null, {}, anonymous, info(['parties', 'createParty'], 'mutation'))).rejects.toThrow('UNAUTHENTICATED');
-
-    const ctx = await signedIn();
-    expect(await guardMiddleware(resolve, null, {}, ctx, info(['user']))).toBe('resolved');
-  });
-
-  it('verifies the session once per request and exposes the user', async () => {
+describe('request auth', () => {
+  it('accepts a valid session token', async () => {
     const email = uniqueEmail();
     const stored = await env.USER.getByName(email).ensure(email);
     const token = await jwt.issueToken<UserToken>('UserToken', { sub: nodeIdToStr({ kind: 'User', id: stored.id }), email }, { ttl: 60 });
-    const ctx = context({ authToken: token });
-    const verify = vi.spyOn(ctx, 'jwtVerify');
-    const resolve = async (_root: unknown, _args: unknown, c: ApolloContext) => c.userId;
-
-    const results = await Promise.all([
-      authMiddleware(resolve, null, {}, ctx, info(['user'])),
-      authMiddleware(resolve, null, {}, ctx, info(['parties'])),
-    ]);
-    expect(results).toEqual([stored.id, stored.id]);
-    expect(verify).toHaveBeenCalledTimes(1);
-    expect(await ctx.retrieveUser()).toMatchObject({ id: stored.id, email });
+    expect(await authenticate(token, jwt.jwtVerify)).toEqual({ userId: stored.id, userEmail: email });
   });
 
-  it('drops invalid sessions', async () => {
+  it('treats missing and invalid tokens as anonymous', async () => {
     const email = uniqueEmail();
-    const resolve = async (_root: unknown, _args: unknown, c: ApolloContext) => [c.userId, c.authToken];
     const tokens = [
+      undefined,
       'garbage',
       await jwt.issueToken<UserToken>('UserToken', { sub: nodeIdToStr({ kind: 'Party', id: 'QWERT' }), email }, { ttl: 60 }),
       await jwt.issueToken('UserToken', { sub: nodeIdToStr({ kind: 'User', id: 'a'.repeat(24) }) }, { ttl: 60 }),
+      await jwt.issueToken<EnterRequestToken>('EnterRequest', { email }, { ttl: 60 }),
     ];
-    for (const authToken of tokens) {
-      expect(await authMiddleware(resolve, null, {}, context({ authToken }), info(['user']))).toEqual([undefined, undefined]);
+    for (const token of tokens) {
+      expect(await authenticate(token, jwt.jwtVerify)).toEqual({});
     }
-    expect(await authMiddleware(resolve, null, {}, context(), info(['user']))).toEqual([undefined, undefined]);
   });
 });
 
@@ -337,14 +291,23 @@ describe('request context', () => {
     req: { header: (name: string) => headers[name] },
   }) as any;
 
-  it('reads the client IP and bearer token', async () => {
+  it('reads the client IP, and treats an invalid bearer token as anonymous', async () => {
     const ctx = await makeContext(honoContext({ 'cf-connecting-ip': '203.0.113.1', authorization: 'Bearer abc' }));
-    expect(ctx).toMatchObject({ clientIp: '203.0.113.1', authToken: 'abc', userId: undefined });
-    await expect(ctx.retrieveUser()).rejects.toThrow('Unable to retrieve user');
+    expect(ctx).toMatchObject({ clientIp: '203.0.113.1', userId: undefined, userEmail: undefined });
+    expect(await ctx.retrieveUser()).toBeNull();
+  });
+
+  it('verifies the session once, when the request comes in', async () => {
+    const email = uniqueEmail();
+    const stored = await env.USER.getByName(email).ensure(email);
+    const token = await jwt.issueToken<UserToken>('UserToken', { sub: nodeIdToStr({ kind: 'User', id: stored.id }), email }, { ttl: 60 });
+    const ctx = await makeContext(honoContext({ authorization: `Bearer ${token}` }));
+    expect(ctx).toMatchObject({ userId: stored.id, userEmail: email });
+    expect(await ctx.retrieveUser()).toMatchObject({ id: stored.id, email });
   });
 
   it('copes with missing headers', async () => {
-    expect(await makeContext(honoContext({}))).toMatchObject({ clientIp: 'unknown', authToken: undefined });
+    expect(await makeContext(honoContext({}))).toMatchObject({ clientIp: 'unknown', userId: undefined });
   });
 
   it('sends mail through the EMAIL binding', async () => {
