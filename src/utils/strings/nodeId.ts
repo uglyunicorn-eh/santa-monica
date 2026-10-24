@@ -1,16 +1,20 @@
-import { ObjectId } from 'bson';
+export type NodeKind = 'User' | 'Party';
 
-import { atob, btoa } from '.';
-import { INodeId } from "src/utils/nodeId";
+export interface INodeId {
+  kind: string;
+  id: string;
+}
 
 export function strToNodeId(str: string): INodeId {
   const errorMsg = `String "${str}" is not a valid Node ID.`;
   try {
-    const [kind, id] = atob(str).split(':', 2);
-    if (!kind || !id) {
+    const decoded = atob(str);
+    const separator = decoded.indexOf(':');
+    const [kind, id] = [decoded.slice(0, separator), decoded.slice(separator + 1)];
+    if (separator < 1 || !id) {
       throw new Error(errorMsg);
     }
-    return { kind, id: ObjectId.createFromHexString(id) };
+    return { kind, id };
   } catch {
     throw new Error(errorMsg);
   }

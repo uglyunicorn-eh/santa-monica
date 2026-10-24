@@ -1,12 +1,38 @@
-name: Deploy to AWS
+name: Deploy
 
+# Every merge to main is tested and deployed to production (api.gnomik.me), then smoke-tested.
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
 jobs:
-  build:
-    uses: uglyunicorn-eh/prostir-github-tools/.github/workflows/node-aws-serverless-deploy.yml@main
-    secrets: inherit
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: ci
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://api.gnomik.me
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npx -y npm@11 ci
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
+      - name: Smoke test production
+        run: npm run smoke
+        env:
+          SMOKE_URL: https://api.gnomik.me

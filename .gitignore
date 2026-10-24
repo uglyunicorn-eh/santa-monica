@@ -1,11 +1,12 @@
-yarn-debug.log*
 dist
 node_modules
 .env
 .env.local
-sam-template.packaged.yaml
+.dev.vars
+.wrangler
 *.log
 *.pem
 
-# Sentry Config File
-.env.sentry-build-plugin
+# Mongo export snapshot (contains emails)
+data/
+coverage

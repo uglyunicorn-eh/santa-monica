@@ -1,26 +1,40 @@
-import { ObjectId } from 'mongodb';
 import { ApolloContext } from 'src/apollo/context';
+import { viewParty } from 'src/apollo/resolvers/party';
+import { EnterRequestToken, UserToken } from 'src/apollo/types';
+import { renderSignIn } from 'src/mail';
 import _ from 'src/utils/graphql/resolvable';
+import { nodeIdToStr } from 'src/utils/strings/nodeId';
 
 import { EnterInput, EnterRequestInput } from './types';
 import { enterInputSchema, enterRequestInputSchema } from './validation';
 
-import { PartyEntity, UserEntity } from "src/models";
-import { nodeIdToStr } from 'src/utils/strings/nodeId';
-import { EnterRequestToken, UserToken } from 'src/apollo/types';
+import { baseUrl } from 'src/config.json';
 
-import { baseUrl, sendgridTemplates } from 'src/config.json';
+const tooManyRequests = {
+  status: 'error' as const,
+  userErrors: [{
+    fieldName: 'email',
+    messages: ["Whoa, that's a lot of magic links! Please wait a minute and try again."],
+  }],
+};
 
 export default {
   auth: () => ({
 
     enterRequest: _(enterRequestInputSchema)(async (input: EnterRequestInput, context: ApolloContext) => {
-      const { db, sendMail, issueToken } = context;
+      const { env, clientIp, sendMail, issueToken } = context;
+      const email = input.email.toLowerCase();
 
-      let party: PartyEntity | undefined = undefined;
+      const [byIp, byEmail] = await Promise.all([
+        env.ENTER_RATE_LIMIT_IP.limit({ key: clientIp }),
+        env.ENTER_RATE_LIMIT_EMAIL.limit({ key: email }),
+      ]);
+      if (!byIp.success || !byEmail.success) {
+        return tooManyRequests;
+      }
 
       if (input.party) {
-        party = await db.collection('Party').findOne({ slug: input.party }) as PartyEntity;
+        const party = await viewParty(env, input.party);
         if (!party) {
           return {
             status: 'error',
@@ -33,54 +47,59 @@ export default {
       }
 
       const tokenPayload = {
-        email: input.email,
-        ...(party ? { party: party.slug } : {})
+        email,
+        jti: crypto.randomUUID(),
+        ...(input.party ? { party: input.party } : {})
       }
       const token = await issueToken<EnterRequestToken>("EnterRequest", tokenPayload, { ttl: 300 });
 
-      await sendMail(
-        sendgridTemplates.signIn,
-        {
-          to: input.email,
-          dynamicTemplateData: {
-            magicLink: `${baseUrl}/enter/${token}`,
-          },
-        },
-      );
+      try {
+        await sendMail(email, renderSignIn({ magicLink: `${baseUrl}/enter/${token}`, assetsUrl: env.PUBLIC_URL }));
+      } catch (error) {
+        console.error('Unable to send the magic link', String(error));
+        return {
+          status: 'error',
+          userErrors: [{
+            fieldName: 'email',
+            messages: ["We couldn't send the magic link right now. Please try again in a few minutes."],
+          }],
+        };
+      }
 
       return {};
     }),
 
     enter: _(enterInputSchema)(async (input: EnterInput, context: ApolloContext) => {
-      const { jwtVerify, issueToken, db } = context;
-      const User = db.collection('User');
+      const { env, jwtVerify, issueToken } = context;
 
       const { enterRequestToken } = input;
 
       try {
-        const jwtToken = await jwtVerify<EnterRequestToken>(enterRequestToken);
-
-        const email = jwtToken.email.toLowerCase();
-
-        let user = await User.findOne({ email }) as UserEntity;
-
-        if (user === null) {
-          user = {
-            _id: new ObjectId(),
-            name: "",
-            email,
-            joined: new Date(),
-          };
-          await User.insertOne(user);
+        const { email: tokenEmail, jti, exp } = await jwtVerify<EnterRequestToken>(enterRequestToken, 'EnterRequest');
+        if (!jti || !exp) {
+          throw new Error('Magic-link token without an id or expiry.');
         }
 
-        const [sub, ttl] = [nodeIdToStr({ kind: 'User', id: user._id }), 60 * 60 * 24 * 30]
-        const userToken = await issueToken<UserToken>("UserToken", { sub }, { ttl });
+        const email = tokenEmail.toLowerCase();
+
+        const user = await env.USER.getByName(email).redeemMagicLink(email, jti, exp * 1000);
+        if (!user) {
+          return {
+            status: 'error',
+            userErrors: [{
+              fieldName: 'enterRequestToken',
+              messages: ["This magic link has already been used. Please request a new one."],
+            }],
+          };
+        }
+
+        const [sub, ttl] = [nodeIdToStr({ kind: 'User', id: user.id }), 60 * 60 * 24 * 30];
+        const userToken = await issueToken<UserToken>("UserToken", { sub, email }, { ttl });
 
         return {
           userToken,
           user: {
-            id: nodeIdToStr({ kind: 'User', id: user._id }),
+            id: sub,
             name: user.name,
           },
         };

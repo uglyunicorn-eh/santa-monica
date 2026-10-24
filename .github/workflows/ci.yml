@@ -1,0 +1,30 @@
+name: CI
+
+# Reused by the Preview (pull requests) and Deploy (main) workflows, so every change is tested once before it is
+# deployed anywhere. Can also be run by hand.
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npx -y npm@11 ci
+      - run: npm run typecheck
+      - name: Unit tests (100% coverage required)
+        run: npm run test:unit
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+          if-no-files-found: ignore
+      - name: Integration tests
+        run: npm run test:integration

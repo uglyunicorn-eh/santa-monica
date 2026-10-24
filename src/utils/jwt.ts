@@ -1,4 +1,4 @@
-import * as crypto from 'crypto';
+import * as jose from 'jose';
 
 export type IssuedAt = {
   iat: number,
@@ -8,60 +8,41 @@ export type ExpiredAt = {
   exp: number,
 };
 
-export type TokenPayload = Partial<IssuedAt & ExpiredAt>;
+export type TokenPayload = Partial<IssuedAt & ExpiredAt> & Record<string, unknown>;
 export type TokenValue = string;
 
-export type EncoderOptions = {
-  domain: string,
-  privateKey: string,
+export type IssueTokenOptions = {
+  ttl?: number;
 };
 
-export type TokenValueEncoder<T extends string, P extends TokenPayload> = (token: Token<T, P>) => Promise<TokenValue>;
+export type TokenType = 'EnterRequest' | 'UserToken';
 
-export type Token<T extends string, P extends TokenPayload = TokenPayload> = {
-  header: {
-    typ: "JWT",
-    alg: "RS256",
-    _: string,
-    t: T,
-  },
-  payload: P,
-  value?: TokenValue,
+export type JwtHelpers = {
+  issueToken: <P extends TokenPayload = TokenPayload>(type: TokenType, payload: P, options?: IssueTokenOptions) => Promise<TokenValue>;
+  jwtVerify: <P extends TokenPayload = TokenPayload>(token: string, type: TokenType) => Promise<P>;
 };
 
-export const encoderFactory = <T extends string, P extends TokenPayload = TokenPayload>(options: EncoderOptions): TokenValueEncoder<T, P> => {
-  return async (token: Token<T, P>) => {
-    return await encode(
-      {
-        ...token,
-        header: {
-          ...token.header,
-          _: crypto.randomBytes(8).toString('hex'),
-        },
-        payload: {
-          ...token.payload,
-          iss: options.domain,
-          iat: Math.floor(Date.now() / 1000),
-        },
-      },
-      options.privateKey,
-    );
-  }
+export const createJwtHelpers = ({ secret, issuer }: { secret: string, issuer: string }): JwtHelpers => {
+  const key = new TextEncoder().encode(secret);
+
+  return {
+    issueToken: async (type, payload, options = {}) => {
+      const jwt = new jose.SignJWT({ ...payload })
+        .setProtectedHeader({ typ: 'JWT', alg: 'HS256', t: type })
+        .setIssuer(issuer)
+        .setIssuedAt();
+      if (options.ttl) {
+        jwt.setExpirationTime(Math.floor(Date.now() / 1000) + options.ttl);
+      }
+      return await jwt.sign(key);
+    },
+
+    jwtVerify: async <P extends TokenPayload>(token: string, type: TokenType) => {
+      const { payload, protectedHeader } = await jose.jwtVerify(token, key, { issuer, algorithms: ['HS256'] });
+      if (protectedHeader.t !== type) {
+        throw new Error(`Expected a ${type} token.`);
+      }
+      return payload as unknown as P;
+    },
+  };
 };
-
-const encode = async<T extends string, P extends TokenPayload>(token: Token<T, P>, privateKey: string): Promise<string> => {
-  const key = createPrivateKey(privateKey);
-
-  const _ = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
-
-  const data = `${_(token.header)}.${_(token.payload)}`;
-  const sig = crypto.createSign('RSA-SHA256').update(`${data}`).sign(key).toString('base64url');
-
-  return `${data}.${sig}`;
-};
-
-export const createPrivateKey = (privateKey: string): crypto.KeyObject => {
-  return crypto.createPrivateKey({
-    key: Buffer.from(privateKey),
-  });
-}
