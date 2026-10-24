@@ -12,7 +12,8 @@ import { author, name, version } from 'package.json';
 export { PartyDO } from 'src/do/PartyDO';
 export { UserDO } from 'src/do/UserDO';
 
-export const app = new Hono<{ Bindings: Env }>();
+// Not strict: the frontend calls /graph/ and Express treated /graph and /graph/ as the same route.
+export const app = new Hono<{ Bindings: Env }>({ strict: false });
 
 app.use(secureHeaders({ removePoweredBy: false }));
 app.use(cors());

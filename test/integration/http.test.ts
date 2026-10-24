@@ -48,6 +48,15 @@ describe('HTTP surface', () => {
     expect(res.status).toBe(405);
   });
 
+  it('serves GraphQL at /graph/ too, which is the path the frontend uses', async () => {
+    const res = await api('/graph/', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query: '{ app { name } }' }),
+    });
+    expect(await res.json()).toEqual({ data: { app: { name: 'santa-monica' } } });
+  });
+
   it('answers 400 for an invalid JSON body', async () => {
     const res = await api('/graph', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{' });
     expect(res.status).toBe(400);

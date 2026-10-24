@@ -15,8 +15,9 @@ const assert = (condition: unknown, message: string) => {
   }
 };
 
+// The frontend calls /graph/ (with the slash), so the smoke test does too.
 const gql = async (query: string, variables: Record<string, unknown> = {}) => {
-  const res = await fetch(new URL('/graph', base), {
+  const res = await fetch(new URL('/graph/', base), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ query, variables }),
