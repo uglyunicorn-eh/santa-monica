@@ -320,7 +320,7 @@ describe('middleware', () => {
 
 describe('resolvable', () => {
   const schema = yup.object({ name: yup.string().trim().required() });
-  const handler = resolvable(schema)(async (input: { name: string }) => ({ node: { id: input.name } }));
+  const handler = resolvable(schema, 'test')(async (input: { name: string }) => ({ node: { id: input.name } }));
 
   it('passes cast input to the handler', async () => {
     expect(await handler({ input: { name: '  x  ' } }, context())).toEqual({ status: 'ok', userErrors: null, node: { id: 'x' } });

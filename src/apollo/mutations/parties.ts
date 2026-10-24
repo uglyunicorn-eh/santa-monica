@@ -6,6 +6,7 @@ import _ from 'src/utils/graphql/resolvable';
 import { newObjectId } from 'src/utils/ids';
 import { strToNodeId } from 'src/utils/strings/nodeId';
 import { randomString } from 'src/utils/strings/random';
+import { annotate } from 'src/utils/tracing';
 
 import { ClosePartyInput, CreatePartyInput, JoinPartyInput, LeavePartyInput } from "./types";
 import { closePartyInputSchema, createPartyInputSchema, joinPartyInputSchema, leavePartyInputSchema } from "./validation";
@@ -48,7 +49,8 @@ const toPayload = (result: PartyResult) => result.ok
 export default {
   parties: () => ({
 
-    createParty: _(createPartyInputSchema)(async (input: CreatePartyInput, { env, userEmail, retrieveUser }: ApolloContext) => {
+    createParty: _(createPartyInputSchema, 'createParty')(async (input: CreatePartyInput, { env, userEmail, retrieveUser }: ApolloContext) => {
+      annotate({ 'party.protected': Boolean(input.password) });
       const user = await retrieveUser();
       if (!user) {
         return notLoggedIn('creating');
@@ -62,15 +64,17 @@ export default {
           password: input.password || null,
           host: { id: user.id, email: userEmail ?? user.email, name: user.name },
         });
+        annotate({ 'party.code_attempts': attempt + 1 });
         if ('conflict' in result) {
           continue;
         }
+        annotate({ 'party.code': slug });
         return toPayload(result);
       }
       throw new Error('Unable to generate a unique party code.');
     }),
 
-    joinParty: _(joinPartyInputSchema)(async ({ party, name, password }: JoinPartyInput, context: ApolloContext) => {
+    joinParty: _(joinPartyInputSchema, 'joinParty')(async ({ party, name, password }: JoinPartyInput, context: ApolloContext) => {
       const { env, userId, retrieveUser } = context;
 
       if (!userId) {
@@ -81,6 +85,7 @@ export default {
       if (!slug) {
         return unknownParty;
       }
+      annotate({ 'party.code': slug });
 
       const user = await retrieveUser();
       if (!user) {
@@ -94,7 +99,7 @@ export default {
       ));
     }),
 
-    leaveParty: _(leavePartyInputSchema)(async ({ party }: LeavePartyInput, { env, userId }: ApolloContext) => {
+    leaveParty: _(leavePartyInputSchema, 'leaveParty')(async ({ party }: LeavePartyInput, { env, userId }: ApolloContext) => {
       if (!userId) {
         return notLoggedIn('leaving');
       }
@@ -103,11 +108,12 @@ export default {
       if (!slug) {
         return unknownParty;
       }
+      annotate({ 'party.code': slug });
 
       return toPayload(await env.PARTY.getByName(slug).leave(userId));
     }),
 
-    closeParty: _(closePartyInputSchema)(async ({ party }: ClosePartyInput, { env, userId }: ApolloContext) => {
+    closeParty: _(closePartyInputSchema, 'closeParty')(async ({ party }: ClosePartyInput, { env, userId }: ApolloContext) => {
       if (!userId) {
         return notLoggedIn('closing');
       }
@@ -116,6 +122,7 @@ export default {
       if (!slug) {
         return unknownParty;
       }
+      annotate({ 'party.code': slug });
 
       return toPayload(await env.PARTY.getByName(slug).close(userId));
     }),

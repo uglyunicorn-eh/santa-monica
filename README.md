@@ -37,6 +37,8 @@ GitHub secrets: `CLOUDFLARE_API_TOKEN` (a Cloudflare API token from the "Edit Cl
 
 Production logs (every `console.*` call plus Cloudflare's invocation logs) and request traces are kept in Workers Logs and exported to Better Stack, source `gnomik-api`, by Cloudflare's OpenTelemetry export. No SDK is involved: the destinations `betterstack-logs` and `betterstack-traces` are defined in the Cloudflare dashboard (Workers & Pages → Observability → Telemetry) and referenced by name in `wrangler.jsonc`. Previews keep their logs in Workers Logs only.
 
+Every API action runs in its own span, `api.<action>` (for example `api.createParty`, `api.joinParty`, `api.party`), created with Workers' `tracing.enterSpan` (`src/utils/tracing.ts`). Spans record the action, the internal user id, the outcome (`api.status`, `api.user_error_fields`) and action details such as `party.code` or `auth.magic_link`, never emails or names. Durable Object calls made during an action show up as its child spans.
+
 Unexpected errors return a 500 with an `errorId`; the same id is logged with the error (`message: "Unhandled error"`), so a reported error can be looked up in Better Stack.
 
 ## Deploying by hand
