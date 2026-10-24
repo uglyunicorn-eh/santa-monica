@@ -3,6 +3,7 @@ import { Party } from "src/apollo/types";
 import { PartyView } from "src/do/types";
 import { Env } from "src/env";
 import { nodeIdToStr } from "src/utils/strings/nodeId";
+import { withSpan } from "src/utils/tracing";
 
 type PartyArgs = {
   code: string;
@@ -45,16 +46,21 @@ export async function viewParty(env: Env, code: string, userId?: string): Promis
 }
 
 export default {
-  party: async (root: any, { code }: PartyArgs, { env, userId }: ApolloContext) => {
-    return partyViewToNode(await viewParty(env, code.toUpperCase(), userId));
-  },
+  party: async (root: any, { code }: PartyArgs, { env, userId }: ApolloContext) =>
+    withSpan('api.party', { 'api.action': 'party', 'user.id': userId, 'party.code': code.toUpperCase() }, async span => {
+      const view = await viewParty(env, code.toUpperCase(), userId);
+      span.setAttributes({ 'party.found': Boolean(view), 'party.joined': view?.isJoined });
+      return partyViewToNode(view);
+    }),
 
-  parties: async (root: any, { first }: PartiesArgs, { env, userId, userEmail }: ApolloContext) => {
-    if (!userId || !userEmail) {
-      return [];
-    }
-    const userParties = await env.USER.getByName(userEmail).listParties(Math.max(0, Math.min(first, MAX_PARTIES)));
-    const views = await Promise.all(userParties.map(({ slug }) => viewParty(env, slug, userId)));
-    return views.map(partyViewToNode).filter(Boolean);
-  },
+  parties: async (root: any, { first }: PartiesArgs, { env, userId, userEmail }: ApolloContext) =>
+    withSpan('api.parties', { 'api.action': 'parties', 'user.id': userId, 'parties.first': first }, async span => {
+      if (!userId || !userEmail) {
+        return [];
+      }
+      const userParties = await env.USER.getByName(userEmail).listParties(Math.max(0, Math.min(first, MAX_PARTIES)));
+      const views = await Promise.all(userParties.map(({ slug }) => viewParty(env, slug, userId)));
+      span.setAttribute('parties.count', userParties.length);
+      return views.map(partyViewToNode).filter(Boolean);
+    }),
 };

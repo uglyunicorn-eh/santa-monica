@@ -4,6 +4,7 @@ import { EnterRequestToken, UserToken } from 'src/apollo/types';
 import { renderSignIn } from 'src/mail';
 import _ from 'src/utils/graphql/resolvable';
 import { nodeIdToStr } from 'src/utils/strings/nodeId';
+import { annotate } from 'src/utils/tracing';
 
 import { EnterInput, EnterRequestInput } from './types';
 import { enterInputSchema, enterRequestInputSchema } from './validation';
@@ -21,7 +22,7 @@ const tooManyRequests = {
 export default {
   auth: () => ({
 
-    enterRequest: _(enterRequestInputSchema)(async (input: EnterRequestInput, context: ApolloContext) => {
+    enterRequest: _(enterRequestInputSchema, 'enterRequest')(async (input: EnterRequestInput, context: ApolloContext) => {
       const { env, clientIp, sendMail, issueToken } = context;
       const email = input.email.toLowerCase();
 
@@ -29,7 +30,9 @@ export default {
         env.ENTER_RATE_LIMIT_IP.limit({ key: clientIp }),
         env.ENTER_RATE_LIMIT_EMAIL.limit({ key: email }),
       ]);
-      if (!byIp.success || !byEmail.success) {
+      const rateLimited = !byIp.success ? 'ip' : !byEmail.success ? 'email' : undefined;
+      annotate({ 'auth.rate_limited': rateLimited ?? false, 'party.code': input.party ?? undefined });
+      if (rateLimited) {
         return tooManyRequests;
       }
 
@@ -55,7 +58,9 @@ export default {
 
       try {
         await sendMail(email, renderSignIn({ magicLink: `${baseUrl}/enter/${token}`, assetsUrl: env.PUBLIC_URL }));
+        annotate({ 'mail.sent': true });
       } catch (error) {
+        annotate({ 'mail.sent': false });
         console.error('Unable to send the magic link', String(error));
         return {
           status: 'error',
@@ -69,7 +74,7 @@ export default {
       return {};
     }),
 
-    enter: _(enterInputSchema)(async (input: EnterInput, context: ApolloContext) => {
+    enter: _(enterInputSchema, 'enter')(async (input: EnterInput, context: ApolloContext) => {
       const { env, jwtVerify, issueToken } = context;
 
       const { enterRequestToken } = input;
@@ -83,6 +88,7 @@ export default {
         const email = tokenEmail.toLowerCase();
 
         const user = await env.USER.getByName(email).redeemMagicLink(email, jti, exp * 1000);
+        annotate({ 'auth.magic_link': user ? 'redeemed' : 'already_used', 'user.id': user?.id });
         if (!user) {
           return {
             status: 'error',
@@ -105,6 +111,7 @@ export default {
         };
 
       } catch (error) {
+        annotate({ 'auth.magic_link': 'invalid' });
         return {
           status: 'error',
           userErrors: [{
