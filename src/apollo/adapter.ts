@@ -34,7 +34,9 @@ export const graphqlHandler = async (c: Context<{ Bindings: Env }>) => {
     context: () => makeContext(c),
   });
 
-  // Apollo returns a chunked body only for incremental delivery (@defer / @stream), which we do not use.
+  // Apollo returns a chunked body only for incremental delivery (@defer / @stream), which needs graphql 17
+  // and is not enabled here, so this branch can't be reached.
+  /* istanbul ignore if -- @preserve */
   if (res.body.kind !== 'complete') {
     return c.json({ status: 'error', error: 'Unsupported response' }, 500);
   }

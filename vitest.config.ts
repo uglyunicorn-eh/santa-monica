@@ -23,6 +23,18 @@ export default defineConfig({
     // The mail sink's simulated delivery failures (integration tests) cross the RPC boundary and are also reported
     // as unhandled by workerd. They are expected, everything else still fails the run.
     onUnhandledError: error => !String((error as Error | undefined)?.message).includes('simulated delivery failure'),
+    // Coverage is collected for the unit project (npm run test:unit). Workers only support istanbul, not v8.
+    coverage: {
+      provider: 'istanbul',
+      include: ['src/**/*.ts'],
+      exclude: [
+        'src/env.ts',              // types only
+        'src/do/types.ts',         // types only
+        'src/mail/templates/**',   // generated template strings, no logic
+      ],
+      reporter: ['text', 'html', 'json'],
+      thresholds: { lines: 100, functions: 100, branches: 100, statements: 100 },
+    },
     projects: [
       {
         resolve,

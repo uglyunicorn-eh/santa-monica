@@ -23,7 +23,8 @@ const escapeHtml = (s: string) => s
 const fill = (s: string, vars: Record<string, string>, escape: (s: string) => string) =>
   s.replace(/\{\{([\w.]+)\}\}/g, (match, key: string) => (key in vars ? escape(vars[key]) : match));
 
-const render = (template: Template, vars: Record<string, string>): MailMessage => ({
+/** Fills `{{name}}` placeholders, HTML-escaping values in the HTML part. Unknown placeholders are left as they are. */
+export const render = (template: Template, vars: Record<string, string>): MailMessage => ({
   subject: fill(template.subject, vars, s => s),
   html: fill(template.html, vars, escapeHtml),
   text: fill(template.text, vars, s => s),

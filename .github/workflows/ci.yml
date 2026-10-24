@@ -17,7 +17,14 @@ jobs:
           cache: npm
       - run: npx -y npm@11 ci
       - run: npm run typecheck
-      - name: Unit tests
+      - name: Unit tests (100% coverage required)
         run: npm run test:unit
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+          if-no-files-found: ignore
       - name: Integration tests
         run: npm run test:integration

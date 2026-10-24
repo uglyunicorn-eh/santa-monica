@@ -9,3 +9,4 @@ node_modules
 
 # Mongo export snapshot (contains emails)
 data/
+coverage

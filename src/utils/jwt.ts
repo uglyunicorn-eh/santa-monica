@@ -8,7 +8,7 @@ export type ExpiredAt = {
   exp: number,
 };
 
-export type TokenPayload = Partial<IssuedAt & ExpiredAt>;
+export type TokenPayload = Partial<IssuedAt & ExpiredAt> & Record<string, unknown>;
 export type TokenValue = string;
 
 export type IssueTokenOptions = {

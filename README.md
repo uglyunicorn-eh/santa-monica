@@ -21,7 +21,7 @@ npm test                         # unit + integration
 
 ## Tests
 
-- `npm run test:unit` covers the Durable Objects, the draw, ids, tokens and email templates directly.
+- `npm run test:unit` tests every module directly (Durable Objects, resolvers, mutations, middleware, the HTTP layer, tokens, mail) and requires 100% coverage of lines, branches, functions and statements. The HTML report is written to `coverage/`.
 - `npm run test:integration` runs every API scenario end to end through the Worker's real entry point in a local workerd: magic-link sign-in using the actual emailed link, rate limits, tokens, creating, joining, leaving and closing parties, the draw, notification emails and retries, the HTTP surface, and the Mongo import. Email goes to a test mail sink (`test/integration/mail-sink.js`) instead of Cloudflare Email Service, so tests can read what was sent. Recipients starting with `fail+` simulate a failed delivery.
 - `npm run smoke` runs read-only checks against a deployed Worker (`SMOKE_URL=https://...`).
 
