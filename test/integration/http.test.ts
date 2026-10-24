@@ -8,7 +8,7 @@ describe('HTTP surface', () => {
     const res = await api('/');
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
-      status: 'ok', name: 'santa-monica', version: expect.any(String), author: 'Ugly Unicorn <info@uglyunicorn.ca>',
+      status: 'ok', name: 'santa-monica', version: expect.any(String),
     });
     expect(res.headers.get('X-Powered-By')).toBe('Maple syrup and magic, eh!');
     expect(res.headers.get('X-Developed-By')).toContain('Ugly Unicorn');

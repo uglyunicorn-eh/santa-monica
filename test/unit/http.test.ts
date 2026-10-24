@@ -9,7 +9,7 @@ const post = (path: string, body: string, headers: Record<string, string> = {}, 
 describe('Hono app', () => {
   it('answers / with the app info and the custom headers', async () => {
     const res = await app.request('/', {}, env);
-    expect(await res.json()).toMatchObject({ status: 'ok', name: 'santa-monica' });
+    expect(await res.json()).toEqual({ status: 'ok', name: 'santa-monica', version: expect.any(String) });
     expect(res.headers.get('X-Developed-By')).toContain('Ugly Unicorn');
   });
 
