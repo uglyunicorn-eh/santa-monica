@@ -76,13 +76,6 @@ const checks: Check[] = [
       }
     },
   },
-  {
-    name: 'import endpoint is closed',
-    run: async () => {
-      const res = await fetch(new URL('/admin/import', base), { method: 'POST', body: '{}' });
-      assert(res.status === 404, `/admin/import answered HTTP ${res.status} without the secret`);
-    },
-  },
 ];
 
 // A freshly deployed Worker (especially a new preview hostname) can answer 404 for a few seconds, so wait until it

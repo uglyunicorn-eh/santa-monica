@@ -2,7 +2,6 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { secureHeaders } from 'hono/secure-headers';
 
-import { importHandler } from 'src/admin';
 import { graphqlHandler } from 'src/apollo/adapter';
 import { Env } from 'src/env';
 
@@ -26,8 +25,6 @@ app.use(async (c, next) => {
 app.get('/', c => c.json({ status: 'ok', name, version, github: homepage }));
 
 app.all('/graph', graphqlHandler);
-
-app.post('/admin/import', importHandler);
 
 // Unexpected errors are logged with an id that is also returned to the client, so a reported error can be found in
 // the logs (Workers Logs and Better Stack).

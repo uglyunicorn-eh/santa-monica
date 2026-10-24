@@ -116,25 +116,4 @@ describe('PartyDO', () => {
     expect(await env.USER.getByName('guest6@example.com').listParties(10)).toEqual([]);
   });
 
-  it('imports a snapshot idempotently', async () => {
-    const snapshot = {
-      id: newObjectId(),
-      slug: 'MNBVC',
-      name: 'Imported',
-      password: 'secret',
-      hostId: 'a'.repeat(24),
-      isClosed: true,
-      createdAt: 1_700_000_000_000,
-      members: [
-        { id: 'a'.repeat(24), email: 'a@example.com', name: 'A', targetId: 'b'.repeat(24), targetName: 'B', joinedAt: 1 },
-        { id: 'b'.repeat(24), email: null, name: 'B', targetId: 'a'.repeat(24), targetName: 'A', joinedAt: 2 },
-      ],
-    };
-    const stub = env.PARTY.getByName('MNBVC');
-    expect(await stub.importParty(snapshot)).toEqual({ memberships: 2 });
-    expect(await stub.importParty(snapshot)).toEqual({ memberships: 2 });
-    expect(await stub.view('a'.repeat(24))).toMatchObject({
-      isHost: true, isClosed: true, password: 'secret', participantCount: 2, target: { id: 'b'.repeat(24), name: 'B' },
-    });
-  });
 });

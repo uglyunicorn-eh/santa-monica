@@ -91,22 +91,6 @@ describe('PartyDO edge cases', () => {
     expect(await stub.leave(newObjectId())).toMatchObject({ ok: true, view: { isJoined: false } });
   });
 
-  it('imports open parties and targets without a stored name', async () => {
-    const slug = code();
-    const stub = env.PARTY.getByName(slug);
-    const [a, b] = [newObjectId(), newObjectId()];
-    await stub.importParty({
-      id: newObjectId(), slug, name: 'Open', password: null, hostId: a, isClosed: false, createdAt: 1,
-      members: [{ id: a, email: null, name: 'A', targetId: b, targetName: null, joinedAt: 1 }],
-    });
-    expect(await stub.view(a)).toMatchObject({ isClosed: false, target: null });
-
-    await stub.importParty({
-      id: newObjectId(), slug, name: 'Closed', password: null, hostId: a, isClosed: true, createdAt: 1,
-      members: [{ id: a, email: null, name: 'A', targetId: b, targetName: null, joinedAt: 1 }],
-    });
-    expect(await stub.view(a)).toMatchObject({ isClosed: true, target: { id: b, name: '' } });
-  });
 
   it('reports no pending outbox and does nothing on alarm for an unknown party', async () => {
     const stub = env.PARTY.getByName(code());
@@ -201,14 +185,4 @@ describe('UserDO', () => {
     });
   });
 
-  it('imports a user, replacing what was there', async () => {
-    const email = `imported-${++counter}@example.com`;
-    const stub = env.USER.getByName(email);
-    await stub.ensure(email);
-    await stub.addParty({ slug: 'OLDER', name: 'Old', createdAt: 1 });
-    const id = newObjectId();
-    expect(await stub.importUser({ id, email, name: 'Imported', joined: 5, parties: [{ slug: 'NEWER', name: 'New', createdAt: 2 }] })).toEqual({ parties: 1 });
-    expect(await stub.get()).toEqual({ id, email, name: 'Imported', joined: 5 });
-    expect(await stub.listParties(10)).toEqual([{ slug: 'NEWER', name: 'New', createdAt: 2 }]);
-  });
 });
