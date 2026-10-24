@@ -12,14 +12,13 @@ const resolve = {
   },
 };
 
-// Throwaway RSA keys for signing tokens in tests. TEST_PUBLIC_KEY is what the frontend would hold.
-const keyPair = generateKeyPairSync('rsa', { modulusLength: 2048 });
-const otherKeyPair = generateKeyPairSync('rsa', { modulusLength: 2048 });
+// Throwaway P-256 keys for signing tokens in tests. TEST_PUBLIC_KEY is what the frontend would hold.
+const keyPair = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+const otherKeyPair = generateKeyPairSync('ec', { namedCurve: 'P-256' });
 
 const bindings = {
   JWT_PRIVATE_KEY: keyPair.privateKey.export({ type: 'pkcs8', format: 'pem' }) as string,
   TEST_PUBLIC_KEY: keyPair.publicKey.export({ type: 'spki', format: 'pem' }) as string,
-  TEST_PKCS1_PRIVATE_KEY: keyPair.privateKey.export({ type: 'pkcs1', format: 'pem' }) as string,
   TEST_OTHER_PRIVATE_KEY: otherKeyPair.privateKey.export({ type: 'pkcs8', format: 'pem' }) as string,
   ADMIN_SECRET: 'test-admin-secret',
   PUBLIC_URL: 'https://api.test',

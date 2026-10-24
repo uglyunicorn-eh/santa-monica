@@ -5,7 +5,6 @@ declare global {
     interface Env extends AppEnv {
       /** Test-only keys, generated in vitest.config.ts. */
       TEST_PUBLIC_KEY: string;
-      TEST_PKCS1_PRIVATE_KEY: string;
       TEST_OTHER_PRIVATE_KEY: string;
     }
   }

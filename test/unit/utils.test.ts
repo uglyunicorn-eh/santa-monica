@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import * as yup from 'yup';
 
 import { isPermanentMailError, render } from 'src/mail';
-import { createJwtHelpers, pkcs1ToPkcs8 } from 'src/utils/jwt';
+import { createJwtHelpers } from 'src/utils/jwt';
 import { strToNodeId } from 'src/utils/strings/nodeId';
 import { randomInt, randomString } from 'src/utils/strings/random';
 import * as YupHelpers from 'src/utils/yup';
@@ -36,36 +36,26 @@ describe('jwt', () => {
     await expect(helpers.jwtVerify(token, 'UserToken')).rejects.toThrow();
   });
 
-  it('issues RS256 tokens the frontend can verify with the public key', async () => {
+  it('issues ES256 tokens the frontend can verify with the public key', async () => {
     const frontend = createJwtHelpers({ privateKey: env.JWT_PRIVATE_KEY, issuer: 'api.gnomik.me' });
     const token = await frontend.issueToken('EnterRequest', { email: 'a@example.com' }, { ttl: 60 });
     // This is what the frontend does (src/components/hooks/useJWT.tsx in santa-barbara).
-    const publicKey = await jose.importSPKI(env.TEST_PUBLIC_KEY, 'RS256');
+    const publicKey = await jose.importSPKI(env.TEST_PUBLIC_KEY, 'ES256');
     const { payload, protectedHeader } = await jose.jwtVerify(token, publicKey, { issuer: 'api.gnomik.me' });
-    expect(protectedHeader.alg).toBe('RS256');
+    expect(protectedHeader.alg).toBe('ES256');
     expect(payload).toMatchObject({ email: 'a@example.com', iss: 'api.gnomik.me' });
   });
 
-  it('accepts PKCS#1 keys and keys with escaped line breaks, like the old Lambda secret', async () => {
-    const pkcs1 = createJwtHelpers({ privateKey: env.TEST_PKCS1_PRIVATE_KEY, issuer: 'api.test' });
-    const escaped = createJwtHelpers({ privateKey: env.TEST_PKCS1_PRIVATE_KEY.trim().split('\n').join('\\n'), issuer: 'api.test' });
-    for (const signer of [pkcs1, escaped]) {
-      const token = await signer.issueToken('UserToken', { sub: 'x' }, { ttl: 60 });
-      expect(await helpers.jwtVerify(token, 'UserToken')).toMatchObject({ sub: 'x' });
-    }
+  it('accepts a key stored on one line with escaped line breaks', async () => {
+    const escaped = createJwtHelpers({ privateKey: env.JWT_PRIVATE_KEY.trim().split('\n').join('\\n'), issuer: 'api.test' });
+    const token = await escaped.issueToken('UserToken', { sub: 'x' }, { ttl: 60 });
+    expect(await helpers.jwtVerify(token, 'UserToken')).toMatchObject({ sub: 'x' });
   });
 
   it('fails clearly on an unusable key, and does not cache the failure', async () => {
     const broken = createJwtHelpers({ privateKey: '-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----', issuer: 'api.test' });
     await expect(broken.issueToken('UserToken', {})).rejects.toThrow();
     await expect(broken.issueToken('UserToken', {})).rejects.toThrow();
-  });
-
-  it('wraps PKCS#1 keys of any size in a PKCS#8 envelope', () => {
-    const small = pkcs1ToPkcs8(new Uint8Array(3));
-    expect(Array.from(small.slice(0, 2))).toEqual([0x30, small.length - 2]);
-    const large = pkcs1ToPkcs8(new Uint8Array(300));
-    expect(Array.from(large.slice(0, 4))).toEqual([0x30, 0x82, (large.length - 4) >> 8, (large.length - 4) & 0xff]);
   });
 });
 

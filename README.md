@@ -31,7 +31,7 @@ npm test                         # unit + integration
 - **Merges to main** (`.github/workflows/deploy.yml`): CI runs, then production is deployed to `https://api.gnomik.me` and smoke-tested.
 - `.github/workflows/ci.yml` is the shared test job; it can also be run by hand.
 
-GitHub secrets: `CLOUDFLARE_API_TOKEN` (a Cloudflare API token from the "Edit Cloudflare Workers" template, with access to the account and the gnomik.me zone), `CLOUDFLARE_ACCOUNT_ID`, and `PREVIEW_JWT_PRIVATE_KEY` (an RSA private key used to sign preview tokens; previews have no frontend, so any key works).
+GitHub secrets: `CLOUDFLARE_API_TOKEN` (a Cloudflare API token from the "Edit Cloudflare Workers" template, with access to the account and the gnomik.me zone), `CLOUDFLARE_ACCOUNT_ID`, and `PREVIEW_JWT_PRIVATE_KEY` (a P-256 private key used to sign preview tokens; previews have no frontend, so any key works).
 
 ## Deploying by hand
 
@@ -44,4 +44,13 @@ Production secrets are set with `npx wrangler secret put JWT_PRIVATE_KEY` (and `
 
 ## Tokens
 
-Magic-link and session tokens are RS256 JWTs (issuer `api.gnomik.me`) signed with `JWT_PRIVATE_KEY`. The frontend ([santa-barbara](https://github.com/uglyunicorn-eh/santa-barbara)) verifies them in the browser with the matching public key, its `PUBLIC_KEY` build variable, so the two must stay a pair: rotating the private key means rebuilding the frontend with the new public key. The key can be PKCS#8 or PKCS#1 PEM, with real or escaped (`\n`) line breaks.
+Magic-link and session tokens are ES256 JWTs (issuer `api.gnomik.me`) signed with `JWT_PRIVATE_KEY`, a P-256 private key in PKCS#8 PEM (real or escaped `\n` line breaks). The frontend ([santa-barbara](https://github.com/uglyunicorn-eh/santa-barbara)) verifies them in the browser with the matching public key, `publicKey` in its `src/config.json`, so the two must stay a pair: rotating the key means updating that file too.
+
+To rotate:
+
+```bash
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out jwt.pem
+openssl pkey -in jwt.pem -pubout                     # public key for santa-barbara's src/config.json
+npx wrangler secret put JWT_PRIVATE_KEY < jwt.pem
+rm jwt.pem
+```
