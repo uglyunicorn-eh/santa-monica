@@ -1,16 +1,10 @@
 name: CI
 
+# Reused by the Preview (pull requests) and Deploy (main) workflows, so every change is tested once before it is
+# deployed anywhere. Can also be run by hand.
 on:
-  # Pull requests are tested through `pull_request` (the branch merged into main); pushes only for main itself.
-  push:
-    branches: [main]
-  pull_request:
   workflow_call:
-
-# A newer push to the same branch or PR cancels the run it supersedes.
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  workflow_dispatch:
 
 jobs:
   test:

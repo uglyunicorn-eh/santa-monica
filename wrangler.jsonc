@@ -4,10 +4,13 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
-  "workers_dev": true,
-  // The api.gnomik.me custom domain is added at cutover (see docs/MIGRATION_PLAN.md, Phase 3).
   "observability": { "enabled": true },
   "assets": { "directory": "./public", "binding": "ASSETS" },
+
+  // Production: api.gnomik.me, deployed on every merge to main.
+  "routes": [{ "pattern": "api.gnomik.me", "custom_domain": true }],
+  "workers_dev": false,
+  "preview_urls": false,
   "vars": {
     "PUBLIC_URL": "https://api.gnomik.me"
   },
@@ -26,5 +29,32 @@
   "ratelimits": [
     { "name": "ENTER_RATE_LIMIT_IP", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } },
     { "name": "ENTER_RATE_LIMIT_EMAIL", "namespace_id": "1002", "simple": { "limit": 3, "period": 60 } }
-  ]
+  ],
+
+  "env": {
+    // Pull request previews: `wrangler deploy --env preview --name gnomik-api-pr-<n>`. Each PR gets its own Worker on
+    // workers.dev with its own Durable Objects (so previews never touch production data); it is deleted when the PR
+    // closes. PUBLIC_URL is passed with --var by the workflow.
+    "preview": {
+      "routes": [],
+      "workers_dev": true,
+      "preview_urls": false,
+      "vars": {
+        "PUBLIC_URL": "https://gnomik-api-preview.uglyunicorn.workers.dev"
+      },
+      "durable_objects": {
+        "bindings": [
+          { "name": "PARTY", "class_name": "PartyDO" },
+          { "name": "USER", "class_name": "UserDO" }
+        ]
+      },
+      "send_email": [
+        { "name": "EMAIL", "allowed_sender_addresses": ["info@gnomik.me"] }
+      ],
+      "ratelimits": [
+        { "name": "ENTER_RATE_LIMIT_IP", "namespace_id": "2001", "simple": { "limit": 10, "period": 60 } },
+        { "name": "ENTER_RATE_LIMIT_EMAIL", "namespace_id": "2002", "simple": { "limit": 3, "period": 60 } }
+      ]
+    }
+  }
 }

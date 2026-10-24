@@ -25,8 +25,19 @@ npm test                         # unit + integration
 - `npm run test:integration` runs every API scenario end to end through the Worker's real entry point in a local workerd: magic-link sign-in using the actual emailed link, rate limits, tokens, creating, joining, leaving and closing parties, the draw, notification emails and retries, the HTTP surface, and the Mongo import. Email goes to a test mail sink (`test/integration/mail-sink.js`) instead of Cloudflare Email Service, so tests can read what was sent. Recipients starting with `fail+` simulate a failed delivery.
 - `npm run smoke` runs read-only checks against a deployed Worker (`SMOKE_URL=https://...`).
 
-CI (`.github/workflows/ci.yml`) runs the typecheck and both suites on every push and pull request. The deploy workflow runs CI first, deploys with Wrangler, then runs the smoke test against the deployment (set the `SMOKE_URL` repository variable to override the URL, e.g. after cutover).
+## CI/CD
 
-## Deploy
+- **Pull requests** (`.github/workflows/preview.yml`): CI runs (typecheck, unit tests with 100% coverage, integration tests), then the PR is deployed to its own Worker, `gnomik-api-pr-<number>`, at `https://gnomik-api-pr-<number>.uglyunicorn.workers.dev`, smoke-tested, and the URL is posted on the PR. Each preview has its own empty Durable Objects, never production data. The preview Worker is deleted when the PR is closed.
+- **Merges to main** (`.github/workflows/deploy.yml`): CI runs, then production is deployed to `https://api.gnomik.me` and smoke-tested.
+- `.github/workflows/ci.yml` is the shared test job; it can also be run by hand.
 
-Deploy with `npm run deploy`, or run the "Deploy to Cloudflare" workflow (needs the `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets). Production secrets are set with `npx wrangler secret put JWT_SECRET` (and `SENTRY_DSN`).
+GitHub secrets: `CLOUDFLARE_API_TOKEN` (a Cloudflare API token from the "Edit Cloudflare Workers" template, with access to the account and the gnomik.me zone), `CLOUDFLARE_ACCOUNT_ID`, and `PREVIEW_JWT_SECRET` (any random string, used to sign preview sessions).
+
+## Deploying by hand
+
+```bash
+npx wrangler deploy --env=""                                  # production (api.gnomik.me)
+npx wrangler deploy --env preview --name gnomik-api-pr-123    # a preview
+```
+
+Production secrets are set with `npx wrangler secret put JWT_SECRET` (and `SENTRY_DSN`).

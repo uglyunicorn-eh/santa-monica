@@ -1,8 +1,14 @@
-name: Deploy to Cloudflare
+name: Deploy
 
-# Manual only until cutover (docs/MIGRATION_PLAN.md, Phase 3). Add `push: branches: [main]` afterwards.
+# Every merge to main is tested and deployed to production (api.gnomik.me), then smoke-tested.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
 
 jobs:
   ci:
@@ -11,6 +17,9 @@ jobs:
   deploy:
     needs: ci
     runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://api.gnomik.me
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -18,12 +27,12 @@ jobs:
           node-version: 22
           cache: npm
       - run: npx -y npm@11 ci
-      - id: deploy
-        uses: cloudflare/wrangler-action@v3
+      - uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      - name: Smoke test the deployment
+          command: deploy
+      - name: Smoke test production
         run: npm run smoke
         env:
-          SMOKE_URL: ${{ vars.SMOKE_URL || steps.deploy.outputs.deployment-url }}
+          SMOKE_URL: https://api.gnomik.me
