@@ -46,4 +46,5 @@ export interface EnterRequestToken extends TokenPayload {
 
 export interface UserToken extends TokenPayload {
   sub: string;
+  email: string;
 }

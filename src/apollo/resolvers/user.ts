@@ -10,9 +10,9 @@ export default {
     }
 
     return {
-      id: nodeIdToStr({ kind: 'User', id: user._id }),
+      id: nodeIdToStr({ kind: 'User', id: user.id }),
       name: user.name,
-      joined: user.joined,
+      joined: new Date(user.joined),
     }
   },
 };

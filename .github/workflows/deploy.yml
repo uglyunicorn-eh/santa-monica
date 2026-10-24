@@ -1,12 +1,22 @@
-name: Deploy to AWS
+name: Deploy to Cloudflare
 
+# Manual only until cutover (docs/MIGRATION_PLAN.md, Phase 3). Add `push: branches: [main]` afterwards.
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 jobs:
-  build:
-    uses: uglyunicorn-eh/prostir-github-tools/.github/workflows/node-aws-serverless-deploy.yml@main
-    secrets: inherit
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npx -y npm@11 ci
+      - run: npm run typecheck
+      - run: npm test
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

@@ -1,27 +1,23 @@
 {
   "compilerOptions": {
-    "target": "esnext",
-    "module": "commonjs",
-    "moduleResolution": "node",
+    "target": "es2022",
+    "module": "es2022",
+    "moduleResolution": "bundler",
+    "lib": ["es2023"],
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-plugin/types"],
     "resolveJsonModule": true,
-    "inlineSourceMap": true,
-    "inlineSources": true,
-    "sourceRoot": "/",
-    "allowJs": false,
-    "outDir": "dist",
-    "removeComments": true,
     "isolatedModules": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "strict": true,
     "noImplicitAny": true,
     "skipLibCheck": true,
-    "baseUrl": "",
+    "noEmit": true,
+    "baseUrl": ".",
     "paths": {
-      "package.json": ["package.json"],
-    },
+      "src/*": ["src/*"],
+      "package.json": ["package.json"]
+    }
   },
-  "ts-node": {
-    "files": true,
-  },
+  "include": ["src", "test"]
 }

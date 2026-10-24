@@ -1,85 +1,43 @@
-import { expressMiddleware } from '@apollo/server/express4';
-import * as Sentry from '@sentry/node';
-import cors from "cors";
-import dotenv from "dotenv";
-import express, { Express, Request, Response } from "express";
-import helmet from "helmet";
-import { MongoClient } from 'mongodb';
-import morgan from "morgan";
+import * as Sentry from '@sentry/cloudflare';
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import { secureHeaders } from 'hono/secure-headers';
 
-import { createServer } from 'src/apollo';
-import { makeContext } from 'src/apollo/context';
-import { commonContext, commonHeaders, commonHelpers } from "src/utils/express";
+import { importHandler } from 'src/admin';
+import { graphqlHandler } from 'src/apollo/adapter';
+import { Env } from 'src/env';
 
 import { author, name, version } from 'package.json';
 
-dotenv.config();
+export { PartyDO } from 'src/do/PartyDO';
+export { UserDO } from 'src/do/UserDO';
 
-const SENTRY_DSN = process.env.SENTRY_DSN;
-const MONGODB_URI = process.env.MONGODB_URI!;
-const PORT = process.env.PORT;
+export const app = new Hono<{ Bindings: Env }>();
 
-const privateKey = process.env.RSA_PRIVATE_KEY!.split('\\n').join('\n');
-const sendgridApiKey = process.env.SENDGRID_API_KEY!;
+app.use(secureHeaders({ removePoweredBy: false }));
+app.use(cors());
 
-const mongoClient = new MongoClient(MONGODB_URI);
+app.use(async (c, next) => {
+  await next();
+  c.res.headers.set('X-Developed-By', 'Made with love in Canada by Ugly Unicorn (https://uglyunicorn.ca)');
+  c.res.headers.set('X-Powered-By', 'Maple syrup and magic, eh!');
+});
 
-export const app: Express = express();
+app.get('/', c => c.json({ status: 'ok', name, version, author }));
 
-(async function main() {
+app.all('/graph', graphqlHandler);
 
-  if (SENTRY_DSN) {
-    Sentry.init({
-      dsn: SENTRY_DSN,
-      release: `${name}@${version}`,
-      environment: process.env.NODE_ENV,
-      integrations: [
-        new Sentry.Integrations.Http({ tracing: true }),
-        new Sentry.Integrations.Express({ app }),
-      ],
-      tracesSampleRate: 1.0,
-    });
-    app.use(Sentry.Handlers.requestHandler());
-    app.use(Sentry.Handlers.tracingHandler());
-  }
+app.post('/admin/import', importHandler);
 
-  app.use(morgan("dev"));
-  app.use(helmet());
-  app.use(cors());
-  app.use(express.json());
+app.onError((err, c) => {
+  const errorId = Sentry.captureException(err);
+  console.error(err);
+  return c.json({ status: 'error', error: 'Ugly Unicorn just puked a little bit :(', errorId }, 500);
+});
 
-  app.use(commonHeaders());
-  app.use(commonHelpers());
-
-  try {
-    app.use(commonContext({ mongoClient, sendgridApiKey, privateKey }));
-  }
-  catch (error) {
-    Sentry.captureException(error);
-  }
-
-  app.get(
-    "/",
-    (_: Request, res: Response) => res.ok({ name, version, author }),
-  );
-
-  app.all(
-    "/graph",
-    expressMiddleware(await createServer(), { context: makeContext }),
-  );
-
-  if (SENTRY_DSN) {
-    app.use(Sentry.Handlers.errorHandler());
-  }
-
-  app.use((_err: any, req: any, res: any, _next: any) => {
-    res.die({ error: 'Ugly Unicorn just puked a little bit :(', errorId: req.sentry }, 500);
-  });
-
-  if (PORT) {
-    app.listen(PORT, () => {
-      console.log(`[server]: Server is running at http://localhost:${PORT}`);
-    });
-  }
-
-})();
+export default Sentry.withSentry(
+  (env: Env) => env.SENTRY_DSN
+    ? { dsn: env.SENTRY_DSN, release: `${name}@${version}`, tracesSampleRate: 1.0 }
+    : undefined,
+  { fetch: app.fetch } satisfies ExportedHandler<Env>,
+);

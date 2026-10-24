@@ -1,0 +1,57 @@
+import { Env } from 'src/env';
+
+import * as partyNotification from './templates/partyNotification';
+import * as signIn from './templates/signIn';
+
+import { from } from 'src/config.json';
+
+export type MailMessage = {
+  subject: string;
+  html: string;
+  text: string;
+};
+
+type Template = { subject: string; html: string; text: string };
+
+const escapeHtml = (s: string) => s
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;');
+
+const fill = (s: string, vars: Record<string, string>, escape: (s: string) => string) =>
+  s.replace(/\{\{([\w.]+)\}\}/g, (match, key: string) => (key in vars ? escape(vars[key]) : match));
+
+const render = (template: Template, vars: Record<string, string>): MailMessage => ({
+  subject: fill(template.subject, vars, s => s),
+  html: fill(template.html, vars, escapeHtml),
+  text: fill(template.text, vars, s => s),
+});
+
+export const renderSignIn = ({ magicLink, assetsUrl }: { magicLink: string; assetsUrl: string }) =>
+  render(signIn, { magicLink, assetsUrl });
+
+export const renderPartyNotification = ({ party, assetsUrl }: { party: { name: string; url: string }; assetsUrl: string }) =>
+  render(partyNotification, { 'party.name': party.name, 'party.url': party.url, assetsUrl });
+
+export const sendMail = async (env: Env, to: string, message: MailMessage) => {
+  await env.EMAIL.send({
+    to,
+    from: { email: from.email, name: from.name },
+    subject: message.subject,
+    html: message.html,
+    text: message.text,
+  });
+};
+
+/**
+ * Errors that will not go away by retrying the same message. Sender and domain setup errors are not here:
+ * they are fixed in the account, after which the retries go through.
+ */
+export const isPermanentMailError = (error: unknown) => {
+  const code = (error as { code?: string } | null)?.code;
+  return code === 'E_RECIPIENT_SUPPRESSED'
+    || code === 'E_VALIDATION_ERROR'
+    || code === 'E_FIELD_MISSING';
+};
