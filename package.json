@@ -38,10 +38,10 @@
     "@cloudflare/vitest-plugin": "^1.4.7",
     "@cloudflare/workers-types": "^5.20261024.1",
     "@types/node": "^22.19.0",
-    "@vitest/coverage-istanbul": "^4.1.12",
-    "typescript": "^5.9.3",
-    "vite": "^7.3.0",
-    "vitest": "^4.1.12",
+    "@vitest/coverage-istanbul": "^5.0.5",
+    "typescript": "^7.0.2",
+    "vite": "^7.3.7",
+    "vitest": "^5.0.5",
     "wrangler": "^4.152.0"
   },
   "allowScripts": {

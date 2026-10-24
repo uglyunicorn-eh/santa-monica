@@ -1,9 +1,14 @@
-import { ObjectSchema, ValidationError } from "yup";
 
 import { ApolloContext } from "src/apollo/context";
 import { MutationInput, Node, NodeMutationPayload } from 'src/apollo/types';
 
-export default function resolvable(schema: ObjectSchema<any>) {
+/** What resolvable needs from a yup object schema. */
+type InputSchema = {
+  validate(value: unknown): Promise<unknown>;
+  cast(value: unknown): unknown;
+};
+
+export default function resolvable(schema: InputSchema) {
   return <I, T extends Node>(
     ƒ: (input: I, context: ApolloContext) => Promise<Partial<NodeMutationPayload<T>>>,
   ) => {

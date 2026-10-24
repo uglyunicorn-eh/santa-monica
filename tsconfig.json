@@ -13,10 +13,9 @@
     "noImplicitAny": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "baseUrl": ".",
     "paths": {
-      "src/*": ["src/*"],
-      "package.json": ["package.json"]
+      "src/*": ["./src/*"],
+      "package.json": ["./package.json"]
     }
   },
   "include": ["src", "test"]
