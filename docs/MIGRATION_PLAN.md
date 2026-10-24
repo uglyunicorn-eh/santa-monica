@@ -227,7 +227,7 @@ Right after cutover:
 Done on `cf-migration`:
 - Worker (Hono + Apollo adapter), `PartyDO` and `UserDO` with the outbox, JWT on `jose`, Cloudflare Email Service templates, rate limiting, Sentry on the fetch handler, temporary import endpoint.
 - `scripts/export-mongo.ts` exported the real data (86 users, 4 legacy users, 36 parties, 179 memberships) and `scripts/import.ts` imported it into a local `wrangler dev`. Counts match, re-runs are idempotent, and all 165 members of closed parties who have an email see their correct target and party list through the API.
-- 21 tests (vitest with `@cloudflare/vitest-plugin`), `npm run typecheck` clean.
+- Tests (vitest with `@cloudflare/vitest-plugin`): 14 unit tests and 61 integration scenarios that run end to end through the Worker in local workerd, with a mail sink standing in for Email Service. CI runs the typecheck and both suites on every push and PR; the deploy workflow runs CI, deploys, then smoke-tests the deployment (`scripts/smoke.ts`).
 - Email images are served by the Worker from `public/email/` at `PUBLIC_URL`.
 
 Differences from the plan:

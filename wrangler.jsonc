@@ -7,7 +7,7 @@
   "workers_dev": true,
   // The api.gnomik.me custom domain is added at cutover (see docs/MIGRATION_PLAN.md, Phase 3).
   "observability": { "enabled": true },
-  "assets": { "directory": "./public" },
+  "assets": { "directory": "./public", "binding": "ASSETS" },
   "vars": {
     "PUBLIC_URL": "https://api.gnomik.me"
   },

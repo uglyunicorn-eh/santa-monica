@@ -1,7 +1,6 @@
 import { env, runDurableObjectAlarm } from 'cloudflare:test';
 
 import { UserToken } from 'src/apollo/types';
-import { app } from 'src/index';
 import { createJwtHelpers } from 'src/utils/jwt';
 import { nodeIdToStr } from 'src/utils/strings/nodeId';
 
@@ -31,16 +30,4 @@ export async function drainOutbox(slug: string) {
     await new Promise(resolve => setTimeout(resolve, 20));
   }
   throw new Error(`Outbox of ${slug} did not drain`);
-}
-
-export async function gql<T = any>(query: string, variables: Record<string, unknown> = {}, token?: string): Promise<{ data: T; errors?: any[] }> {
-  const res = await app.request('/graph', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-    },
-    body: JSON.stringify({ query, variables }),
-  }, env);
-  return await res.json();
 }

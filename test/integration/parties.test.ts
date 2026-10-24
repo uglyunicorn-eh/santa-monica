@@ -1,0 +1,250 @@
+import { describe, expect, it } from 'vitest';
+
+import { nodeIdToStr } from 'src/utils/strings/nodeId';
+
+import {
+  CLOSE_PARTY, CREATE_PARTY, JOIN_PARTY, LEAVE_PARTY, PARTIES, PARTY, createParty, gql, joinParty,
+  signInWithMagicLink, uniqueEmail,
+} from './support';
+
+const person = (label: string) => signInWithMagicLink(uniqueEmail(label));
+
+describe('creating a party', () => {
+  it('needs a session', async () => {
+    const res = await gql(CREATE_PARTY, { name: 'Nope' });
+    expect(res.errors?.[0]?.message).toBe('UNAUTHENTICATED');
+  });
+
+  it('validates the name', async () => {
+    const host = await person('host');
+    const empty = await gql(CREATE_PARTY, { name: '   ' }, { token: host.token });
+    expect(empty.data.parties.createParty).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'name' }] });
+
+    const long = await gql(CREATE_PARTY, { name: 'x'.repeat(101) }, { token: host.token });
+    expect(long.data.parties.createParty).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'name' }] });
+  });
+
+  it('makes the creator the host and first participant', async () => {
+    const host = await person('host');
+    const res = await gql(CREATE_PARTY, { name: '  Office   party ', password: 'Jingle Bells' }, { token: host.token });
+    const party = res.data.parties.createParty.node;
+    expect(party).toMatchObject({
+      name: 'Office party', isHost: true, isJoined: true, isClosed: false, isProtected: true,
+      password: 'Jingle Bells', participantCount: 1, participants: [''], target: null,
+    });
+    expect(party.code).toMatch(/^[QWERTYUIPASDFGHJKLZXCVBNMO]{5}$/);
+    expect(party.id).toBe(nodeIdToStr({ kind: 'Party', id: party.code }));
+  });
+
+  it('gives every party its own code', async () => {
+    const host = await person('host');
+    const codes = new Set<string>();
+    for (let i = 0; i < 10; i++) {
+      codes.add((await createParty(host, `Party ${i}`)).code);
+    }
+    expect(codes.size).toBe(10);
+  });
+});
+
+describe('looking up a party', () => {
+  it('shows a limited view to anyone with the code, in any case', async () => {
+    const host = await person('host');
+    const party = await createParty(host, 'Secret party', 'xyz');
+    const anonymous = await gql(PARTY, { code: party.code.toLowerCase() });
+    expect(anonymous.data.party).toEqual({
+      id: party.id, name: 'Secret party', code: party.code, password: null, isJoined: false, isHost: false,
+      isProtected: true, isClosed: false, participantCount: null, participants: null, target: null,
+    });
+  });
+
+  it('returns null for unknown or malformed codes', async () => {
+    for (const code of ['QQQQQ', 'abc', '12345', '']) {
+      expect((await gql(PARTY, { code })).data.party).toBeNull();
+    }
+  });
+
+  it('shows a non-member the same limited view as an anonymous visitor', async () => {
+    const host = await person('host');
+    const stranger = await person('stranger');
+    const party = await createParty(host);
+    const view = (await gql(PARTY, { code: party.code }, { token: stranger.token })).data.party;
+    expect(view).toMatchObject({ isJoined: false, isHost: false, participantCount: null, participants: null, password: null });
+  });
+});
+
+describe('joining a party', () => {
+  it('needs a session', async () => {
+    const host = await person('host');
+    const party = await createParty(host);
+    const res = await gql(JOIN_PARTY, { party: party.id, name: 'Anon' });
+    expect(res.errors?.[0]?.message).toBe('UNAUTHENTICATED');
+  });
+
+  it('checks the secret phrase, ignoring case', async () => {
+    const host = await person('host');
+    const guest = await person('guest');
+    const party = await createParty(host, 'Protected', 'Mistletoe');
+
+    const missing = await joinParty(guest, party, 'Guest');
+    expect(missing).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'password' }] });
+    const wrong = await joinParty(guest, party, 'Guest', 'holly');
+    expect(wrong).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'password' }] });
+
+    const right = await joinParty(guest, party, 'Guest', 'mistletoe');
+    expect(right).toMatchObject({ status: 'ok', node: { isJoined: true, isHost: false, participantCount: 2, password: null } });
+  });
+
+  it('sets the person\'s name from the name they joined with', async () => {
+    const host = await person('host');
+    const guest = await person('guest');
+    const party = await createParty(host);
+    await joinParty(guest, party, 'Santa\'s Helper');
+    expect((await gql('{ user { name } }', {}, { token: guest.token })).data.user.name).toBe('Santa\'s Helper');
+  });
+
+  it('is idempotent: joining twice keeps one membership', async () => {
+    const host = await person('host');
+    const guest = await person('guest');
+    const party = await createParty(host);
+    await joinParty(guest, party, 'Guest');
+    const again = await joinParty(guest, party, 'Guest again');
+    expect(again).toMatchObject({ status: 'ok', node: { participantCount: 2 } });
+  });
+
+  it('rejects ids that are not parties and parties that do not exist', async () => {
+    const guest = await person('guest');
+    const notAParty = await joinParty(guest, { id: guest.id }, 'Guest');
+    expect(notAParty).toEqual({ status: 'error', userErrors: [{ fieldName: 'party', messages: ['Unknown input type. Must be Party.'] }], node: null });
+
+    const garbage = await joinParty(guest, { id: 'not-a-node-id' }, 'Guest');
+    expect(garbage).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
+
+    const missing = await joinParty(guest, { id: nodeIdToStr({ kind: 'Party', id: 'QQQQQ' }) }, 'Guest');
+    expect(missing).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party', messages: ['Party does not exist.'] }] });
+  });
+
+  it('validates the name', async () => {
+    const host = await person('host');
+    const guest = await person('guest');
+    const party = await createParty(host);
+    const res = await gql(JOIN_PARTY, { party: party.id, name: '' }, { token: guest.token });
+    expect(res.data.parties.joinParty).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'name' }] });
+  });
+});
+
+describe('participants', () => {
+  it('shows the host everyone, sorted, and others up to three people besides themselves', async () => {
+    const host = await person('host');
+    const party = await createParty(host);
+    await joinParty(host, party, 'Zed');
+    const guests = [];
+    for (const name of ['Dasher', 'Comet', 'Blitzen', 'Vixen']) {
+      const guest = await person('guest');
+      await joinParty(guest, party, name);
+      guests.push(guest);
+    }
+
+    const hostView = (await gql(PARTY, { code: party.code }, { token: host.token })).data.party;
+    expect(hostView.participantCount).toBe(5);
+    expect(hostView.participants).toEqual(['', 'Blitzen', 'Comet', 'Dasher', 'Vixen']);
+
+    const guestView = (await gql(PARTY, { code: party.code }, { token: guests[0].token })).data.party;
+    expect(guestView.participantCount).toBe(5);
+    expect(guestView.participants).toHaveLength(3);
+    expect(guestView.participants).not.toContain('Dasher');
+  });
+});
+
+describe('my parties', () => {
+  it('lists parties I host or joined, newest first, right after each change', async () => {
+    const me = await person('me');
+    const friend = await person('friend');
+    const first = await createParty(me, 'First');
+    const theirs = await createParty(friend, 'Theirs');
+    await joinParty(me, theirs, 'Me');
+    const last = await createParty(me, 'Last');
+
+    const listed = (await gql(PARTIES, {}, { token: me.token })).data.parties;
+    expect(listed).toEqual([
+      { code: last.code, name: 'Last', isHost: true, isJoined: true },
+      { code: theirs.code, name: 'Theirs', isHost: false, isJoined: true },
+      { code: first.code, name: 'First', isHost: true, isJoined: true },
+    ]);
+
+    expect((await gql(PARTIES, { first: 2 }, { token: me.token })).data.parties.map((p: any) => p.code)).toEqual([last.code, theirs.code]);
+    expect((await gql(PARTIES, { first: -1 }, { token: me.token })).data.parties).toEqual([]);
+  });
+
+  it('drops a party after leaving it', async () => {
+    const host = await person('host');
+    const guest = await person('guest');
+    const party = await createParty(host);
+    await joinParty(guest, party, 'Guest');
+    await gql(LEAVE_PARTY, { party: party.id }, { token: guest.token });
+    expect((await gql(PARTIES, {}, { token: guest.token })).data.parties).toEqual([]);
+  });
+
+  it('is empty without a session', async () => {
+    expect((await gql(PARTIES)).data.parties).toBeNull();
+  });
+});
+
+describe('leaving a party', () => {
+  it('removes the membership and frees the spot', async () => {
+    const host = await person('host');
+    const guest = await person('guest');
+    const party = await createParty(host);
+    await joinParty(guest, party, 'Guest');
+
+    const left = (await gql(LEAVE_PARTY, { party: party.id }, { token: guest.token })).data.parties.leaveParty;
+    expect(left).toMatchObject({ status: 'ok', node: { isJoined: false, participantCount: null } });
+    expect((await gql(PARTY, { code: party.code }, { token: host.token })).data.party.participantCount).toBe(1);
+  });
+
+  it('is a no-op for someone who is not a member', async () => {
+    const host = await person('host');
+    const stranger = await person('stranger');
+    const party = await createParty(host);
+    const res = (await gql(LEAVE_PARTY, { party: party.id }, { token: stranger.token })).data.parties.leaveParty;
+    expect(res).toMatchObject({ status: 'ok', node: { isJoined: false } });
+  });
+
+  it('needs a session', async () => {
+    const host = await person('host');
+    const party = await createParty(host);
+    expect((await gql(LEAVE_PARTY, { party: party.id })).errors?.[0]?.message).toBe('UNAUTHENTICATED');
+  });
+
+  it('lets the host leave while staying the host', async () => {
+    const host = await person('host');
+    const guest = await person('guest');
+    const party = await createParty(host);
+    await joinParty(guest, party, 'Guest');
+    const left = (await gql(LEAVE_PARTY, { party: party.id }, { token: host.token })).data.parties.leaveParty;
+    expect(left).toMatchObject({ status: 'ok', node: { isHost: true, isJoined: false } });
+  });
+});
+
+describe('closing a party', () => {
+  it('needs a session', async () => {
+    const host = await person('host');
+    const party = await createParty(host);
+    expect((await gql(CLOSE_PARTY, { party: party.id })).errors?.[0]?.message).toBe('UNAUTHENTICATED');
+  });
+
+  it('can only be done by the host', async () => {
+    const host = await person('host');
+    const guest = await person('guest');
+    const party = await createParty(host);
+    await joinParty(guest, party, 'Guest');
+    const res = (await gql(CLOSE_PARTY, { party: party.id }, { token: guest.token })).data.parties.closeParty;
+    expect(res).toEqual({ status: 'error', userErrors: [{ fieldName: 'party', messages: ['You must be the host to close the party.'] }], node: null });
+  });
+
+  it('needs at least two participants', async () => {
+    const host = await person('host');
+    const party = await createParty(host);
+    const res = (await gql(CLOSE_PARTY, { party: party.id }, { token: host.token })).data.parties.closeParty;
+    expect(res).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
+  });
+});
