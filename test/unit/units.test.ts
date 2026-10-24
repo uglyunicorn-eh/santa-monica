@@ -40,7 +40,7 @@ describe('mail templates', () => {
     const mail = renderSignIn({ magicLink: 'https://gnomik.me/enter/abc.def', assetsUrl: 'https://api.test' });
     expect(mail.subject).toBe('Sign in to Anonymous Ded Morozes');
     expect(mail.html).toContain('href="https://gnomik.me/enter/abc.def"');
-    expect(mail.html).toContain('https://api.test/email/gnomik.png');
+    expect(mail.html).toContain('https://api.test/email/gnomik.png?v=4.0.0');
     expect(mail.html).toContain('href="https://gnomik.me/terms/"');
     expect(mail.text).toContain('https://gnomik.me/enter/abc.def');
     expect(mail.html + mail.text).not.toMatch(/\{\{|sendgrid|sing in/);

@@ -4,6 +4,10 @@ import * as partyNotification from './templates/partyNotification';
 import * as signIn from './templates/signIn';
 
 import { from } from 'src/config.json';
+import { version } from 'package.json';
+
+// Image URLs carry the version, so a mail client or image proxy never shows a stale (or earlier failed) fetch.
+const assetsVersion = version;
 
 export type MailMessage = {
   subject: string;
@@ -31,10 +35,10 @@ export const render = (template: Template, vars: Record<string, string>): MailMe
 });
 
 export const renderSignIn = ({ magicLink, assetsUrl }: { magicLink: string; assetsUrl: string }) =>
-  render(signIn, { magicLink, assetsUrl });
+  render(signIn, { magicLink, assetsUrl, assetsVersion });
 
 export const renderPartyNotification = ({ party, assetsUrl }: { party: { name: string; url: string }; assetsUrl: string }) =>
-  render(partyNotification, { 'party.name': party.name, 'party.url': party.url, assetsUrl });
+  render(partyNotification, { 'party.name': party.name, 'party.url': party.url, assetsUrl, assetsVersion });
 
 export const sendMail = async (env: Env, to: string, message: MailMessage) => {
   await env.EMAIL.send({
