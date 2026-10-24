@@ -7,12 +7,13 @@ import { importHandler } from 'src/admin';
 import { graphqlHandler } from 'src/apollo/adapter';
 import { Env } from 'src/env';
 
-import { author, name, version } from 'package.json';
+import { homepage, name, version } from 'package.json';
 
 export { PartyDO } from 'src/do/PartyDO';
 export { UserDO } from 'src/do/UserDO';
 
-export const app = new Hono<{ Bindings: Env }>();
+// Not strict: the frontend calls /graph/ and Express treated /graph and /graph/ as the same route.
+export const app = new Hono<{ Bindings: Env }>({ strict: false });
 
 app.use(secureHeaders({ removePoweredBy: false }));
 app.use(cors());
@@ -23,7 +24,7 @@ app.use(async (c, next) => {
   c.res.headers.set('X-Powered-By', 'Maple syrup and magic, eh!');
 });
 
-app.get('/', c => c.json({ status: 'ok', name, version, author }));
+app.get('/', c => c.json({ status: 'ok', name, version, github: homepage }));
 
 app.all('/graph', graphqlHandler);
 

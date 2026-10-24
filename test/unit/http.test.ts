@@ -9,7 +9,7 @@ const post = (path: string, body: string, headers: Record<string, string> = {}, 
 describe('Hono app', () => {
   it('answers / with the app info and the custom headers', async () => {
     const res = await app.request('/', {}, env);
-    expect(await res.json()).toMatchObject({ status: 'ok', name: 'santa-monica' });
+    expect(await res.json()).toEqual({ status: 'ok', name: 'santa-monica', version: '4.0.0', github: 'https://github.com/uglyunicorn-eh/santa-monica' });
     expect(res.headers.get('X-Developed-By')).toContain('Ugly Unicorn');
   });
 
@@ -20,6 +20,13 @@ describe('Hono app', () => {
 
     const viaGet = await app.request(`/graph?query=${encodeURIComponent('{ app { name } }')}`, { headers: { 'apollo-require-preflight': '1' } }, env);
     expect(await viaGet.json()).toEqual({ data: { app: { name: 'santa-monica' } } });
+  });
+
+  it('serves GraphQL with and without a trailing slash, as the frontend calls /graph/', async () => {
+    for (const path of ['/graph', '/graph/']) {
+      const res = await post(path, JSON.stringify({ query: '{ app { name } }' }));
+      expect(await res.json()).toEqual({ data: { app: { name: 'santa-monica' } } });
+    }
   });
 
   it('passes through the status Apollo picks for invalid queries', async () => {

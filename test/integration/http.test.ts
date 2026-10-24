@@ -8,7 +8,7 @@ describe('HTTP surface', () => {
     const res = await api('/');
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
-      status: 'ok', name: 'santa-monica', version: expect.any(String), author: 'Ugly Unicorn <info@uglyunicorn.ca>',
+      status: 'ok', name: 'santa-monica', version: '4.0.0', github: 'https://github.com/uglyunicorn-eh/santa-monica',
     });
     expect(res.headers.get('X-Powered-By')).toBe('Maple syrup and magic, eh!');
     expect(res.headers.get('X-Developed-By')).toContain('Ugly Unicorn');
@@ -46,6 +46,15 @@ describe('HTTP surface', () => {
       headers: { 'apollo-require-preflight': 'true' },
     });
     expect(res.status).toBe(405);
+  });
+
+  it('serves GraphQL at /graph/ too, which is the path the frontend uses', async () => {
+    const res = await api('/graph/', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ query: '{ app { name } }' }),
+    });
+    expect(await res.json()).toEqual({ data: { app: { name: 'santa-monica' } } });
   });
 
   it('answers 400 for an invalid JSON body', async () => {
