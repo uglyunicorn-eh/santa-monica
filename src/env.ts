@@ -10,5 +10,4 @@ export interface Env {
   PUBLIC_URL: string;
   JWT_SECRET: string;
   ADMIN_SECRET?: string;
-  SENTRY_DSN?: string;
 }

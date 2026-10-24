@@ -25,7 +25,7 @@ export const uniqueEmail = (label = 'user') => `${label}-${Date.now().toString(3
 
 const uniqueIp = () => `10.${(counter >> 16) & 255}.${(counter >> 8) & 255}.${++counter & 255}`;
 
-/** Sends a request through the Worker's real entry point (Sentry wrapper, Hono app, Durable Objects). */
+/** Sends a request through the Worker's real entry point (Hono app, Apollo, Durable Objects). */
 export async function api(path: string, init: RequestInit = {}): Promise<Response> {
   return await (exports as any).default.fetch(new Request(new URL(path, ORIGIN), init));
 }
