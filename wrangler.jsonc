@@ -4,7 +4,12 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
-  "observability": { "enabled": true },
+  // Logs and traces: kept in Workers Logs and exported to Better Stack (source "gnomik-api") through the
+  // betterstack-logs / betterstack-traces OpenTelemetry destinations set up in the Cloudflare dashboard.
+  "observability": {
+    "logs": { "enabled": true, "invocation_logs": true, "persist": true, "head_sampling_rate": 1, "destinations": ["betterstack-logs"] },
+    "traces": { "enabled": true, "persist": true, "head_sampling_rate": 1, "destinations": ["betterstack-traces"] }
+  },
   "assets": { "directory": "./public", "binding": "ASSETS" },
 
   // Production: api.gnomik.me, deployed on every merge to main.
@@ -36,6 +41,11 @@
     // workers.dev with its own Durable Objects (so previews never touch production data); it is deleted when the PR
     // closes. PUBLIC_URL is passed with --var by the workflow.
     "preview": {
+      // Previews keep their logs in Workers Logs only, so test traffic stays out of Better Stack.
+      "observability": {
+        "logs": { "enabled": true, "invocation_logs": true, "persist": true },
+        "traces": { "enabled": false }
+      },
       "routes": [],
       "workers_dev": true,
       "preview_urls": false,

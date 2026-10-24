@@ -30,7 +30,6 @@
   "dependencies": {
     "@apollo/server": "^5.5.1",
     "@graphql-tools/schema": "^11.0.6",
-    "@sentry/cloudflare": "^11.9.0",
     "graphql": "^16.14.2",
     "graphql-middleware": "^6.1.35",
     "hono": "^4.13.13",

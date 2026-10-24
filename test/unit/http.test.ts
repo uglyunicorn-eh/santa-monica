@@ -41,11 +41,14 @@ describe('Hono app', () => {
     expect(await res.json()).toEqual({ status: 'error', error: 'Invalid JSON body' });
   });
 
-  it('turns unexpected errors into a 500 with an error id', async () => {
+  it('turns unexpected errors into a 500 and logs them with the same error id', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const res = await post('/admin/import', 'not json', { 'x-admin-secret': env.ADMIN_SECRET! });
     expect(res.status).toBe(500);
-    expect(await res.json()).toMatchObject({ status: 'error', error: 'Ugly Unicorn just puked a little bit :(' });
+    const body = await res.json() as { status: string; error: string; errorId: string };
+    expect(body).toMatchObject({ status: 'error', error: 'Ugly Unicorn just puked a little bit :(' });
+    expect(body.errorId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(error).toHaveBeenCalledWith(expect.objectContaining({ message: 'Unhandled error', errorId: body.errorId, path: '/admin/import' }));
     error.mockRestore();
   });
 });
@@ -102,12 +105,9 @@ describe('Worker entry point', () => {
     return res;
   };
 
-  it('serves requests without Sentry when no DSN is set', async () => {
-    expect((await fetchVia({ ...env, SENTRY_DSN: undefined })).status).toBe(200);
-  });
-
-  it('serves requests with Sentry enabled', async () => {
-    const res = await fetchVia({ ...env, SENTRY_DSN: 'https://public@127.0.0.1:9/1' });
+  it('serves requests through the Hono app', async () => {
+    const res = await fetchVia(env);
     expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ status: 'ok', name: 'santa-monica' });
   });
 });
