@@ -12,7 +12,7 @@ export const jwt = () => createJwtHelpers({ privateKey: env.JWT_PRIVATE_KEY, iss
 export async function signIn(email: string, name = '') {
   const user = await env.USER.getByName(email).ensure(email);
   if (name) {
-    await env.USER.getByName(email).setName(name);
+    await env.USER.getByName(email).apply([{ type: 'setName', name }]);
   }
   const sub = nodeIdToStr({ kind: 'User', id: user.id });
   const token = await jwt().issueToken<UserToken>('UserToken', { sub, email }, { ttl: 3600 });

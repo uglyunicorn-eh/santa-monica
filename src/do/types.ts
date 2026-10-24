@@ -5,11 +5,28 @@ export type UserRecord = {
   joined: number;
 };
 
+/** A user's copy of a party summary, enough to list their parties without asking each party. */
 export type UserPartyRecord = {
   slug: string;
   name: string;
   createdAt: number;
+  isHost: boolean;
+  isProtected: boolean;
+  isClosed: boolean;
 };
+
+/** A row of the user's party list. Rows stored before summaries existed have null flags until they are refreshed. */
+export type UserPartyListItem = Omit<UserPartyRecord, 'isHost' | 'isProtected' | 'isClosed'> & {
+  isHost: boolean | null;
+  isProtected: boolean | null;
+  isClosed: boolean | null;
+};
+
+/** Changes PartyDO sends to a UserDO. Each one is idempotent, so a batch can be retried as a whole. */
+export type UserUpdate =
+  | { type: 'addParty'; party: UserPartyRecord }
+  | { type: 'removeParty'; slug: string }
+  | { type: 'setName'; name: string };
 
 
 export type Member = {

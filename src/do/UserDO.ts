@@ -3,15 +3,24 @@ import { DurableObject } from 'cloudflare:workers';
 import { Env } from 'src/env';
 import { newObjectId } from 'src/utils/ids';
 
-import { UserPartyRecord, UserRecord } from './types';
+import { UserPartyListItem, UserRecord, UserUpdate } from './types';
 
 type UserRow = { id: string; email: string; name: string; joined: number };
-type PartyRow = { slug: string; name: string; created_at: number };
+type PartyRow = {
+  slug: string;
+  name: string;
+  created_at: number;
+  is_host: number | null;
+  is_protected: number | null;
+  is_closed: number | null;
+};
+
+const flag = (value: number | null) => (value === null ? null : Boolean(value));
 
 /**
  * One instance per user, addressed by the lowercased email (`env.USER.getByName(email)`).
- * Holds the profile and the user's party list. The party list is a copy kept up to date by `PartyDO`'s outbox,
- * so every method that `PartyDO` calls is idempotent.
+ * Holds the profile and the user's party list. The list carries a summary of each party (name, host, protected,
+ * closed), kept up to date by `PartyDO`'s outbox through `apply`, so listing parties needs no call to any party.
  */
 export class UserDO extends DurableObject<Env> {
   private sql: SqlStorage;
@@ -30,13 +39,23 @@ export class UserDO extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS parties (
           slug TEXT PRIMARY KEY,
           name TEXT NOT NULL,
-          created_at INTEGER NOT NULL
+          created_at INTEGER NOT NULL,
+          is_host INTEGER,
+          is_protected INTEGER,
+          is_closed INTEGER
         );
         CREATE TABLE IF NOT EXISTS used_magic_links (
           jti TEXT PRIMARY KEY,
           expires_at INTEGER NOT NULL
         );
       `);
+      // Lists created before party summaries existed get the columns added; their rows stay null until refreshed.
+      const columns = new Set(this.sql.exec<{ name: string }>('PRAGMA table_info(parties)').toArray().map(c => c.name));
+      for (const column of ['is_host', 'is_protected', 'is_closed']) {
+        if (!columns.has(column)) {
+          this.sql.exec(`ALTER TABLE parties ADD COLUMN ${column} INTEGER`);
+        }
+      }
     });
   }
 
@@ -72,26 +91,43 @@ export class UserDO extends DurableObject<Env> {
     return this.row();
   }
 
-  setName(name: string): void {
-    this.sql.exec('UPDATE user SET name = ?', name);
+  /** Applies a batch of changes from a party, in order, in one transaction. Safe to retry. */
+  apply(updates: UserUpdate[]): void {
+    this.ctx.storage.transactionSync(() => {
+      for (const update of updates) {
+        switch (update.type) {
+          case 'addParty': {
+            const { slug, name, createdAt, isHost, isProtected, isClosed } = update.party;
+            this.sql.exec(
+              'INSERT OR REPLACE INTO parties (slug, name, created_at, is_host, is_protected, is_closed) VALUES (?, ?, ?, ?, ?, ?)',
+              slug, name, createdAt, Number(isHost), Number(isProtected), Number(isClosed),
+            );
+            break;
+          }
+          case 'removeParty':
+            this.sql.exec('DELETE FROM parties WHERE slug = ?', update.slug);
+            break;
+          case 'setName':
+            this.sql.exec('UPDATE user SET name = ?', update.name);
+            break;
+        }
+      }
+    });
   }
 
-  addParty(party: UserPartyRecord): void {
-    this.sql.exec(
-      'INSERT OR REPLACE INTO parties (slug, name, created_at) VALUES (?, ?, ?)',
-      party.slug, party.name, party.createdAt,
-    );
-  }
-
-  removeParty(slug: string): void {
-    this.sql.exec('DELETE FROM parties WHERE slug = ?', slug);
-  }
-
-  listParties(first: number): UserPartyRecord[] {
+  listParties(first: number): UserPartyListItem[] {
     return this.sql
-      .exec<PartyRow>('SELECT slug, name, created_at FROM parties ORDER BY created_at DESC LIMIT ?', first)
+      .exec<PartyRow>(
+        'SELECT slug, name, created_at, is_host, is_protected, is_closed FROM parties ORDER BY created_at DESC LIMIT ?', first,
+      )
       .toArray()
-      .map(({ slug, name, created_at }) => ({ slug, name, createdAt: created_at }));
+      .map(row => ({
+        slug: row.slug,
+        name: row.name,
+        createdAt: row.created_at,
+        isHost: flag(row.is_host),
+        isProtected: flag(row.is_protected),
+        isClosed: flag(row.is_closed),
+      }));
   }
-
 }

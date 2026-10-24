@@ -29,7 +29,6 @@
     "@apollo/server": "^5.5.1",
     "@graphql-tools/schema": "^11.0.6",
     "graphql": "^16.14.2",
-    "graphql-middleware": "^6.1.35",
     "hono": "^4.13.13",
     "jose": "^6.2.13",
     "yup": "^1.7.1"
