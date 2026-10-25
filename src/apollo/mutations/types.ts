@@ -21,6 +21,10 @@ export type CancelPartyInput = {
   party: string;
 }
 
+export type UpdateNameInput = {
+  name: string;
+}
+
 export type EnterRequestInput = {
   email: string;
   party: string;

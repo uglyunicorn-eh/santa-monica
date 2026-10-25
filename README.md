@@ -18,6 +18,8 @@ Keeping Durable Object calls low:
 - Each `UserDO` keeps a summary of the user's parties (name, host, protected, closed), so "my parties" is one call. Fields the summary doesn't have (participants, target, password) are loaded from the party only when a query asks for them, at most once per party per request.
 - A party updates its members' summaries through its outbox. All of a user's queued changes go out in one `UserDO.apply` call, built from the party's current state when it's sent.
 - The session token is checked once per request. Joining uses the session's email and doesn't read the profile.
+- Party history (`partyHistory`) is paged from the same summaries: one call per page.
+- Revoked sessions (deleted accounts, see below) are not checked against the `UserDO` on every request, only where a call to it happens anyway: reading the profile (`user`), `createParty` (in `UserDO.startHosting`), `updateName`, and joining, where the party sends the session along with its update to the user, before storing the membership.
 - `test/unit/efficiency.test.ts` counts the calls each operation makes.
 
 ```bash
@@ -60,6 +62,8 @@ npx wrangler deploy --env preview --name gnomik-api-pr-123    # a preview
 Production secrets are set with `npx wrangler secret put JWT_PRIVATE_KEY`.
 
 ## Tokens
+
+Session tokens carry the user's token version (`ver`). `UserDO.tombstone()` deletes an account: its record reads as missing, late updates from parties are ignored, and its version goes up, so every token issued before is refused where sessions are checked. Tokens without `ver` (issued before versions existed) count as version 0. The next sign-in with that email starts a new account.
 
 Magic-link and session tokens are ES256 JWTs (issuer `api.gnomik.me`) signed with `JWT_PRIVATE_KEY`, a P-256 private key in PKCS#8 PEM (real or escaped `\n` line breaks). The frontend ([santa-barbara](https://github.com/uglyunicorn-eh/santa-barbara)) verifies them in the browser with the matching public key, `publicKey` in its `src/config.json`, so the two must stay a pair: rotating the key means updating that file too.
 

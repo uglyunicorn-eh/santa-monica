@@ -67,10 +67,11 @@ export default {
 
 const partyMutations = {
 
-    createParty: _(createPartyInputSchema, 'createParty')(async (input: CreatePartyInput, { env, userEmail }: ApolloContext) => {
+    createParty: _(createPartyInputSchema, 'createParty')(async (input: CreatePartyInput, { env, userId, userEmail, tokenVersion }: ApolloContext) => {
       annotate({ 'party.protected': Boolean(input.password) });
       // One UserDO call reads the host's display name, checks the open-party limit and holds a slot for this party.
-      const user = await env.USER.getByName(userEmail!).startHosting(MAX_OPEN_HOSTED_PARTIES);
+      // It also checks the session is still valid.
+      const user = await env.USER.getByName(userEmail!).startHosting(MAX_OPEN_HOSTED_PARTIES, { userId: userId!, tokenVersion });
       if (!user) {
         return notLoggedIn('creating');
       }
@@ -98,18 +99,20 @@ const partyMutations = {
       throw new Error('Unable to generate a unique party code.');
     }),
 
-    joinParty: _(joinPartyInputSchema, 'joinParty')(async ({ party, name, password }: JoinPartyInput, { env, userId, userEmail }: ApolloContext) => {
+    joinParty: _(joinPartyInputSchema, 'joinParty')(async ({ party, name, password }: JoinPartyInput, { env, userId, userEmail, tokenVersion }: ApolloContext) => {
       const slug = partySlug(party);
       if (!slug) {
         return unknownParty;
       }
       annotate({ 'party.code': slug });
 
-      // The member comes from the session token and the name from the form: no need to read the profile.
+      // The member comes from the session token and the name from the form: no need to read the profile. The party
+      // checks the session against the user through the update it sends them anyway.
       return toPayload(await env.PARTY.getByName(slug).join(
         { id: userId!, email: userEmail!, name },
         name,
         password || null,
+        { tokenVersion },
       ));
     }),
 

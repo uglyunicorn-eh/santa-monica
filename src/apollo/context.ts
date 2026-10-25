@@ -7,6 +7,7 @@ import { UserRecord } from 'src/do/types';
 import { Env } from 'src/env';
 import { MailMessage, sendMail } from 'src/mail';
 import { JwtHelpers, createJwtHelpers } from 'src/utils/jwt';
+import { sessionMatches } from 'src/utils/session';
 import { strToNodeId } from 'src/utils/strings/nodeId';
 
 import { domain } from 'src/config.json';
@@ -17,7 +18,13 @@ export interface ApolloContext extends BaseContext, JwtHelpers {
   /** Set when the request carries a valid session token. */
   userId?: string;
   userEmail?: string;
-  /** Reads the signed-in user's profile (one UserDO call), or null without a session. */
+  /** The version the session token was issued with; undefined for tokens issued before versions existed. */
+  tokenVersion?: number;
+  /**
+   * Reads the signed-in user's profile (one UserDO call). Null without a session, or when the session no longer
+   * belongs to the user (deleted account, revoked token). The token itself is not checked against the UserDO on every
+   * request, only where the profile is read anyway and in the mutations that need it (see README).
+   */
   retrieveUser: () => Promise<UserRecord | null>;
   sendMail: (to: string, message: MailMessage) => Promise<void>;
   /** Party views loaded during this request, so each party is asked at most once. */
@@ -30,9 +37,12 @@ export async function authenticate(token: string | undefined, jwtVerify: JwtHelp
     return {};
   }
   try {
-    const { sub, email } = await jwtVerify<UserToken>(token, 'UserToken');
+    const { sub, email, ver } = await jwtVerify<UserToken>(token, 'UserToken');
     const { kind, id } = strToNodeId(sub);
-    return kind === 'User' && email ? { userId: id, userEmail: email } : {};
+    if (kind !== 'User' || !email) {
+      return {};
+    }
+    return typeof ver === 'number' ? { userId: id, userEmail: email, tokenVersion: ver } : { userId: id, userEmail: email };
   } catch {
     return {};
   }
@@ -41,13 +51,20 @@ export async function authenticate(token: string | undefined, jwtVerify: JwtHelp
 export const makeContext = async (c: Context<{ Bindings: Env }>): Promise<ApolloContext> => {
   const env = c.env;
   const jwt = createJwtHelpers({ privateKey: env.JWT_PRIVATE_KEY, issuer: domain });
-  const { userId, userEmail } = await authenticate(c.req.header('authorization')?.split(' ')[1], jwt.jwtVerify);
+  const { userId, userEmail, tokenVersion } = await authenticate(c.req.header('authorization')?.split(' ')[1], jwt.jwtVerify);
   return {
     env,
     clientIp: c.req.header('cf-connecting-ip') ?? 'unknown',
     userId,
     userEmail,
-    retrieveUser: async () => (userEmail ? await env.USER.getByName(userEmail).get() : null),
+    tokenVersion,
+    retrieveUser: async () => {
+      if (!userId || !userEmail) {
+        return null;
+      }
+      const user = await env.USER.getByName(userEmail).get();
+      return sessionMatches(user, { userId, tokenVersion }) ? user : null;
+    },
     sendMail: (to, message) => sendMail(env, to, message),
     ...jwt,
   };

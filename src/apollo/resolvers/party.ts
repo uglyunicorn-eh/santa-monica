@@ -1,6 +1,8 @@
+import { GraphQLError } from "graphql";
+
 import { ApolloContext } from "src/apollo/context";
 import { Party } from "src/apollo/types";
-import { PartyView, UserPartyListItem, UserPartyRecord } from "src/do/types";
+import { PartyListCursor, PartyView, UserPartyListItem, UserPartyRecord } from "src/do/types";
 import { Env } from "src/env";
 import { nodeIdToStr } from "src/utils/strings/nodeId";
 import { withSpan } from "src/utils/tracing";
@@ -13,9 +15,32 @@ type PartiesArgs = {
   first: number;
 }
 
+type PartyHistoryArgs = {
+  first: number;
+  after?: string | null;
+}
+
 export const PARTY_CODE_RE = /^[QWERTYUIPASDFGHJKLZXCVBNMO]{5}$/;
 
 const MAX_PARTIES = 100;
+
+const clampPageSize = (first: number, min = 0) => Math.max(min, Math.min(first, MAX_PARTIES));
+
+/** Cursors are opaque to clients: the last row's creation time and slug, base64-encoded. */
+export const encodeCursor = ({ createdAt, slug }: PartyListCursor) => btoa(`${createdAt}:${slug}`);
+
+export function decodeCursor(cursor: string): PartyListCursor {
+  let match: RegExpExecArray | null = null;
+  try {
+    match = /^(\d+):([A-Z]+)$/.exec(atob(cursor));
+  } catch {
+    // Not base64: reported below.
+  }
+  if (!match) {
+    throw new GraphQLError('Invalid cursor.', { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  return { createdAt: Number(match[1]), slug: match[2] };
+}
 
 export function partyViewToNode(view: PartyView | null): Party | null {
   if (!view) {
@@ -84,6 +109,39 @@ export const partyFields = {
   target: lazy('target'),
 };
 
+/**
+ * Reads a page of the signed-in user's parties: one UserDO call. Rows saved before summaries existed are filled in
+ * from their parties once and stored for next time; parties that no longer exist are left out.
+ * Asks for one row more than `first` to tell whether there is another page.
+ */
+async function listParties(context: ApolloContext, userEmail: string, first: number, after?: PartyListCursor) {
+  const user = context.env.USER.getByName(userEmail);
+  const rows = await user.listParties(first + 1, after);
+  const hasMore = rows.length > first;
+  const items = rows.slice(0, first);
+
+  const stale = items.filter(item => !isComplete(item));
+  const refreshed = new Map<string, Party | null>();
+  if (stale.length) {
+    const nodes = await Promise.all(stale.map(item => loadPartyNode(context, item.slug)));
+    stale.forEach((item, i) => refreshed.set(item.slug, nodes[i]));
+    await user.apply(nodes.filter((node): node is Party => Boolean(node)).map(node => ({
+      type: 'addParty' as const,
+      party: {
+        slug: node.code, name: node.name, isHost: node.isHost, isProtected: node.isProtected, isClosed: node.isClosed,
+        createdAt: stale.find(item => item.slug === node.code)!.createdAt,
+      },
+    })));
+  }
+
+  const nodes = items
+    .map(item => (isComplete(item) ? summaryToNode(item) : refreshed.get(item.slug)))
+    .filter(Boolean);
+  // The cursor comes from the last row, not the last node, so a party that was left out doesn't restart the page.
+  const last = items.at(-1);
+  return { nodes, hasMore, endCursor: last ? encodeCursor(last) : null, count: items.length, refreshed: stale.length };
+}
+
 export default {
   party: async (root: any, { code }: PartyArgs, context: ApolloContext) =>
     withSpan('api.party', { 'api.action': 'party', 'user.id': context.userId, 'party.code': code.toUpperCase() }, async span => {
@@ -94,31 +152,24 @@ export default {
 
   parties: async (root: any, { first }: PartiesArgs, context: ApolloContext) =>
     withSpan('api.parties', { 'api.action': 'parties', 'user.id': context.userId, 'parties.first': first }, async span => {
-      const { env, userId, userEmail } = context;
+      const { userId, userEmail } = context;
       if (!userId || !userEmail) {
         return null;
       }
-      const user = env.USER.getByName(userEmail);
-      const items = await user.listParties(Math.max(0, Math.min(first, MAX_PARTIES)));
+      const page = await listParties(context, userEmail, clampPageSize(first));
+      span.setAttributes({ 'parties.count': page.count, 'parties.refreshed': page.refreshed });
+      return page.nodes;
+    }),
 
-      // Rows saved before summaries existed: fill them in from their parties once, and store them for next time.
-      const stale = items.filter(item => !isComplete(item));
-      const refreshed = new Map<string, Party | null>();
-      if (stale.length) {
-        const nodes = await Promise.all(stale.map(item => loadPartyNode(context, item.slug)));
-        stale.forEach((item, i) => refreshed.set(item.slug, nodes[i]));
-        await user.apply(nodes.filter((node): node is Party => Boolean(node)).map(node => ({
-          type: 'addParty' as const,
-          party: {
-            slug: node.code, name: node.name, isHost: node.isHost, isProtected: node.isProtected, isClosed: node.isClosed,
-            createdAt: stale.find(item => item.slug === node.code)!.createdAt,
-          },
-        })));
+  partyHistory: async (root: any, { first, after }: PartyHistoryArgs, context: ApolloContext) =>
+    withSpan('api.partyHistory', { 'api.action': 'partyHistory', 'user.id': context.userId, 'parties.first': first }, async span => {
+      const { userId, userEmail } = context;
+      if (!userId || !userEmail) {
+        return null;
       }
-
-      span.setAttributes({ 'parties.count': items.length, 'parties.refreshed': stale.length });
-      return items
-        .map(item => (isComplete(item) ? summaryToNode(item) : refreshed.get(item.slug)))
-        .filter(Boolean);
+      // At least one party per page, so a page that says there are more always carries the cursor to them.
+      const page = await listParties(context, userEmail, clampPageSize(first, 1), after ? decodeCursor(after) : undefined);
+      span.setAttributes({ 'parties.count': page.count, 'parties.refreshed': page.refreshed, 'parties.has_more': page.hasMore });
+      return { items: page.nodes, hasMore: page.hasMore, endCursor: page.endCursor };
     }),
 };

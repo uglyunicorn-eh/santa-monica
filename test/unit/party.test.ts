@@ -72,7 +72,7 @@ describe('PartyDO', () => {
     expect(await env.PARTY.getByName('POIUY').close(host.id)).toMatchObject({ ok: false, error: { fieldName: 'party' } });
   });
 
-  it('delivers the outbox to the users: party lists and names', async () => {
+  it('delivers the outbox to the users: party lists, and names only for empty profiles', async () => {
     const host = await signIn('host5@example.com', 'Host');
     const guest = await signIn('guest5@example.com', 'Old name');
     const stub = env.PARTY.getByName('LKJHG');
@@ -83,7 +83,7 @@ describe('PartyDO', () => {
     expect(await stub.pendingOutbox()).toBe(0);
     expect((await env.USER.getByName('host5@example.com').listParties(10)).map((p: { slug: string }) => p.slug)).toEqual(['LKJHG']);
     expect((await env.USER.getByName('guest5@example.com').listParties(10)).map((p: { slug: string }) => p.slug)).toEqual(['LKJHG']);
-    expect((await env.USER.getByName('guest5@example.com').get())!.name).toBe('New name');
+    expect((await env.USER.getByName('guest5@example.com').get())!.name).toBe('Old name');
 
     await stub.leave(guest.id);
     expect(await env.USER.getByName('guest5@example.com').listParties(10)).toEqual([]);
@@ -96,7 +96,8 @@ describe('PartyDO', () => {
     await createParty('HGFDS', host.member);
     await stub.join(guest.member, 'Guest', null);
 
-    // Simulate an earlier message for the guest that failed and is waiting for its retry.
+    // Simulate an earlier message for the guest that failed and is waiting for its retry. It is the older user.setName
+    // form, queued before joining stopped overwriting names: it is delivered as setNameIfEmpty.
     await runInDurableObject(stub, async (_instance, state) => {
       state.storage.sql.exec(
         'INSERT INTO outbox (payload, attempts, next_attempt_at) VALUES (?, 1, ?)',
@@ -112,7 +113,7 @@ describe('PartyDO', () => {
       state.storage.sql.exec('UPDATE outbox SET next_attempt_at = 0');
     });
     await drainOutbox('HGFDS');
-    expect((await env.USER.getByName('guest6@example.com').get())!.name).toBe('Retried');
+    expect((await env.USER.getByName('guest6@example.com').get())!.name).toBe('Guest');
     expect(await env.USER.getByName('guest6@example.com').listParties(10)).toEqual([]);
   });
 

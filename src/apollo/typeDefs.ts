@@ -9,11 +9,14 @@ export const typeDefs = `#graphql
     user: User
     party(code: String!): Party
     parties(first: Int = 25): [Party!]
+    "The signed-in user's parties, newest first, a page at a time (first: 1 to 100). Null without a session."
+    partyHistory(first: Int = 10, after: String): PartyPage
   }
 
   type Mutation {
     parties: PartiesOpts!
     auth: AuthOpts!
+    profile: ProfileOpts!
   }
 
   type App {
@@ -25,6 +28,16 @@ export const typeDefs = `#graphql
   type User implements Node {
     id: ID!
     name: String!
+    "Only for the signed-in user; null for anyone else (such as a party target)."
+    email: String
+  }
+
+  type PartyPage {
+    items: [Party!]!
+    "Whether there are more parties after this page."
+    hasMore: Boolean!
+    "Pass as the after argument to get the next page. Null when the page is empty."
+    endCursor: String
   }
 
   type Party implements Node {
@@ -115,6 +128,20 @@ export const typeDefs = `#graphql
   type CancelPartyPayload implements MutationPayload {
     status: MutationStatus!
     userErrors: [UserError!]
+  }
+
+  type ProfileOpts {
+    updateName(input: UpdateNameInput!): UpdateNamePayload!
+  }
+
+  input UpdateNameInput {
+    name: String!
+  }
+
+  type UpdateNamePayload implements MutationPayload {
+    status: MutationStatus!
+    userErrors: [UserError!]
+    user: User
   }
 
   type AuthOpts {

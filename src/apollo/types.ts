@@ -19,6 +19,8 @@ export type Party = Node & {
 
 export type User = Node & {
   name: string;
+  /** Only for the signed-in user. */
+  email?: string | null;
 };
 
 export type UserError = {
@@ -49,4 +51,6 @@ export interface EnterRequestToken extends TokenPayload {
 export interface UserToken extends TokenPayload {
   sub: string;
   email: string;
+  /** The user's token version when this token was issued. Tokens issued before versions existed have none. */
+  ver?: number;
 }

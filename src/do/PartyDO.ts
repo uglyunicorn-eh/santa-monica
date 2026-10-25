@@ -3,8 +3,9 @@ import { DurableObject } from 'cloudflare:workers';
 import { Env } from 'src/env';
 import { isPermanentMailError, renderPartyNotification, sendMail } from 'src/mail';
 import santaShuffle from 'src/utils/santaShuffle';
+import { Session, sessionMatches } from 'src/utils/session';
 
-import { CancelResult, CreatePartyInput, Member, PartyResult, PartyView, UserUpdate } from './types';
+import { CancelResult, CreatePartyInput, Member, PartyResult, PartyView, UserPartyRecord, UserRecord, UserUpdate } from './types';
 
 import { baseUrl } from 'src/config.json';
 
@@ -30,10 +31,12 @@ type MembershipRow = {
 // user.sync sends the member's current view of this party (added, closed, or removed if they left). It is computed at
 // delivery time, so it is always current and safe to repeat. user.addParty / user.removeParty are older forms of it.
 // A sync from creating a party carries the host's slot reservation (see UserDO.startHosting), released on delivery.
+// user.setNameIfEmpty gives a new member's profile the name they joined with, unless they already have one.
+// user.setName is its older form, queued before joining stopped overwriting profile names; it is delivered the same way.
 type OutboxMessage =
   | { kind: 'user.sync'; email: string; reservation?: string }
   | { kind: 'user.addParty' | 'user.removeParty'; email: string }
-  | { kind: 'user.setName'; email: string; name: string }
+  | { kind: 'user.setNameIfEmpty' | 'user.setName'; email: string; name: string; memberId?: string }
   // Sent when the party is cancelled: the party row is gone, so the slug travels with the message.
   | { kind: 'user.partyCancelled'; email: string; slug: string }
   | { kind: 'mail.partyNotification'; email: string; partyName: string; slug: string };
@@ -42,10 +45,15 @@ type OutboxRow = { id: number; payload: string; attempts: number; next_attempt_a
 
 type OutboxBatch = { key: string; rows: OutboxRow[]; messages: OutboxMessage[] };
 
+/** The joining session's token version, checked against the user's record (see `Session`). */
+export type JoinCheck = Pick<Session, 'tokenVersion'>;
+
 const MAX_ATTEMPTS = 15;
 const MAX_BACKOFF_MS = 60 * 60 * 1000;
 
 const fail = (fieldName: string | null, message: string) => ({ ok: false as const, error: { fieldName, message } });
+
+const closedToNewMembers = fail('party', 'Party is already packed. Sorry, we cannot accept a new participant...');
 
 /**
  * One instance per party, addressed by the party slug (`env.PARTY.getByName(slug)`).
@@ -133,6 +141,25 @@ export class PartyDO extends DurableObject<Env> {
     await this.runOutbox(message => message.kind.startsWith('user.'));
   }
 
+  /** Whether the outbox still holds changes for this user (waiting for a retry, or being delivered). */
+  private hasQueuedUserUpdates(email: string): boolean {
+    return this.sql.exec(
+      "SELECT 1 FROM outbox WHERE json_extract(payload, '$.kind') LIKE 'user.%' AND json_extract(payload, '$.email') = ? LIMIT 1", email,
+    ).toArray().length > 0;
+  }
+
+  /** The party's summary in a member's list. */
+  private summary(party: PartyRow, memberId: string): UserPartyRecord {
+    return {
+      slug: party.slug,
+      name: party.name,
+      createdAt: party.created_at,
+      isHost: memberId === party.host_id,
+      isProtected: Boolean(party.password),
+      isClosed: Boolean(party.is_closed),
+    };
+  }
+
   /** The party as a member sees it in their list, or its removal if they are no longer a member. */
   private memberUpdate(email: string): UserUpdate {
     const party = this.party()!;
@@ -142,17 +169,7 @@ export class PartyDO extends DurableObject<Env> {
     if (!membership) {
       return { type: 'removeParty', slug: party.slug };
     }
-    return {
-      type: 'addParty',
-      party: {
-        slug: party.slug,
-        name: party.name,
-        createdAt: party.created_at,
-        isHost: membership.member_id === party.host_id,
-        isProtected: Boolean(party.password),
-        isClosed: Boolean(party.is_closed),
-      },
-    };
+    return { type: 'addParty', party: this.summary(party, membership.member_id) };
   }
 
   private buildView(party: PartyRow, userId?: string): PartyView {
@@ -229,7 +246,14 @@ export class PartyDO extends DurableObject<Env> {
     return { ok: true, view: this.buildView(party, input.host.id) };
   }
 
-  async join(member: Member, name: string, password: string | null): Promise<PartyResult> {
+  /**
+   * Adds a member. With `check`, the joining session is verified in the call that updates the member's UserDO anyway
+   * (no extra call), before the membership is stored: the UserDO gets the party summary and the name together with the
+   * session, and writes nothing if the account was deleted or the token revoked. Then the join fails and nothing was
+   * stored anywhere. If the user can't be reached, or older changes for them are still queued (sending this one first
+   * would reorder them), the join goes through the outbox unchecked, as joins without `check` do.
+   */
+  async join(member: Member, name: string, password: string | null, check?: JoinCheck): Promise<PartyResult> {
     const party = this.party();
     if (!party) {
       return fail('party', 'Party does not exist.');
@@ -238,7 +262,7 @@ export class PartyDO extends DurableObject<Env> {
       return { ok: true, view: this.buildView(party, member.id) };
     }
     if (party.is_closed) {
-      return fail('party', 'Party is already packed. Sorry, we cannot accept a new participant...');
+      return closedToNewMembers;
     }
     if ((party.password || '').toUpperCase() !== (password || '').toUpperCase()) {
       return fail('password', "Hmm... Seems you've got a wrong secret phrase. Please try a different one or ask your friend for a hint.");
@@ -248,6 +272,13 @@ export class PartyDO extends DurableObject<Env> {
       return fail('name', 'We were unable to get your name.');
     }
 
+    if (check && member.email && !this.hasQueuedUserUpdates(member.email)) {
+      const checked = await this.checkedJoin(party, { ...member, email: member.email }, displayName, check);
+      if (checked) {
+        return checked;
+      }
+    }
+
     this.ctx.storage.transactionSync(() => {
       this.sql.exec(
         'INSERT INTO memberships (member_id, member_email, name, joined_at) VALUES (?, ?, ?, ?)',
@@ -255,11 +286,53 @@ export class PartyDO extends DurableObject<Env> {
       );
       if (member.email) {
         this.enqueue({ kind: 'user.sync', email: member.email });
-        this.enqueue({ kind: 'user.setName', email: member.email, name: displayName });
+        this.enqueue({ kind: 'user.setNameIfEmpty', email: member.email, name: displayName, memberId: member.id });
       }
     });
     await this.deliverUserUpdates();
     return { ok: true, view: this.buildView(party, member.id) };
+  }
+
+  /**
+   * Updates the member's UserDO with the session check first, then stores the membership. Returns undefined when the
+   * user couldn't be reached, so the caller falls back to the outbox.
+   */
+  private async checkedJoin(party: PartyRow, member: Member & { email: string }, displayName: string, check: JoinCheck): Promise<PartyResult | undefined> {
+    const session = { userId: member.id, tokenVersion: check.tokenVersion };
+    let user: UserRecord | null;
+    try {
+      user = await this.env.USER.getByName(member.email).apply([
+        { type: 'addParty', party: this.summary(party, member.id) },
+        { type: 'setNameIfEmpty', name: displayName, userId: member.id },
+      ], session);
+    } catch (error) {
+      console.warn('Unable to update the joining user, joining through the outbox', { error: String(error) });
+      return undefined;
+    }
+    if (!sessionMatches(user, session)) {
+      return fail(null, 'You must be logged in before joining the party.');
+    }
+
+    // Other requests may have reached the party while the user was being updated. The host may even have cancelled it.
+    const current = this.party();
+    if (!current) {
+      this.enqueue({ kind: 'user.partyCancelled', email: member.email, slug: party.slug });
+      await this.deliverUserUpdates();
+      return fail('party', 'Party does not exist.');
+    }
+    if (!this.membership(member.id)) {
+      if (current.is_closed) {
+        // Too late: take the party back off the user's list.
+        this.enqueue({ kind: 'user.sync', email: member.email });
+        await this.deliverUserUpdates();
+        return closedToNewMembers;
+      }
+      this.sql.exec(
+        'INSERT INTO memberships (member_id, member_email, name, joined_at) VALUES (?, ?, ?, ?)',
+        member.id, member.email, displayName, Date.now(),
+      );
+    }
+    return { ok: true, view: this.buildView(current, member.id) };
   }
 
   async leave(userId: string): Promise<PartyResult> {
@@ -385,8 +458,8 @@ export class PartyDO extends DurableObject<Env> {
     const updates: UserUpdate[] = [];
     let synced = false;
     for (const message of messages) {
-      if (message.kind === 'user.setName') {
-        updates.push({ type: 'setName', name: message.name });
+      if (message.kind === 'user.setNameIfEmpty' || message.kind === 'user.setName') {
+        updates.push({ type: 'setNameIfEmpty', name: message.name, userId: message.memberId });
       } else if (message.kind === 'user.partyCancelled') {
         synced = true;
         updates.push({ type: 'removeParty', slug: message.slug });
