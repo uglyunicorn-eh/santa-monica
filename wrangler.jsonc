@@ -44,18 +44,16 @@
   ],
 
   "env": {
-    // Pull request previews: `wrangler deploy --env preview --name gnomik-api-pr-<n>`. Each PR gets its own Worker on
-    // workers.dev with its own Durable Objects (so previews never touch production data); it is deleted when the PR
-    // closes. PUBLIC_URL is passed with --var by the workflow.
+    // Pull request previews run as Worker Previews of one fixed Worker, gnomik-api-preview:
+    // `wrangler preview --env preview --name pr-<n>`, deleted when the PR closes. Each Preview gets its own empty
+    // Durable Objects (never production data) and its own URL. Previews don't inherit settings, so everything they
+    // need is in the `previews` block below. PUBLIC_URL is passed with --var by the workflow.
     "preview": {
-      // Previews keep their logs in Workers Logs only, so test traffic stays out of Better Stack.
-      "observability": {
-        "logs": { "enabled": true, "invocation_logs": true, "persist": true },
-        "traces": { "enabled": false }
-      },
+      // The fixed Worker itself serves nothing: it is only the home of the Previews, deployed once so a Cloudflare
+      // API token can be scoped to it. Previews keep their own URLs.
       "routes": [],
-      "workers_dev": true,
-      "preview_urls": false,
+      "workers_dev": false,
+      "preview_urls": true,
       "vars": {
         "PUBLIC_URL": "https://gnomik-api-preview.uglyunicorn.workers.dev",
         "FRONTEND_URL": "http://localhost:4321",
@@ -76,7 +74,39 @@
         { "name": "PARTY_LOOKUP_RATE_LIMIT_IP", "namespace_id": "2003", "simple": { "limit": 60, "period": 60 } },
         { "name": "LEGACY_CODE_LOOKUP_RATE_LIMIT_IP", "namespace_id": "2005", "simple": { "limit": 10, "period": 60 } },
         { "name": "JOIN_RATE_LIMIT_USER", "namespace_id": "2004", "simple": { "limit": 10, "period": 60 } }
-      ]
+      ],
+      // Logs stay in Workers Logs only, so test traffic stays out of Better Stack.
+      "observability": {
+        "logs": { "enabled": true, "invocation_logs": true, "persist": true },
+        "traces": { "enabled": false }
+      },
+      "previews": {
+        "vars": {
+          "FRONTEND_URL": "http://localhost:4321",
+          "ALLOWED_ORIGINS": "https://gnomik.me,https://*.gnomik-me.pages.dev,http://localhost:4321,http://localhost:4322,http://localhost:4323"
+        },
+        // The code reads these from env, so Previews need them declared (each Preview still gets its own storage).
+        "durable_objects": {
+          "bindings": [
+            { "name": "PARTY", "class_name": "PartyDO" },
+            { "name": "USER", "class_name": "UserDO" }
+          ]
+        },
+        "send_email": [
+          { "name": "EMAIL", "allowed_sender_addresses": ["info@gnomik.me"] }
+        ],
+        "ratelimits": [
+          { "name": "ENTER_RATE_LIMIT_IP", "namespace_id": "2001", "simple": { "limit": 10, "period": 60 } },
+          { "name": "ENTER_RATE_LIMIT_EMAIL", "namespace_id": "2002", "simple": { "limit": 3, "period": 60 } },
+          { "name": "PARTY_LOOKUP_RATE_LIMIT_IP", "namespace_id": "2003", "simple": { "limit": 60, "period": 60 } },
+          { "name": "LEGACY_CODE_LOOKUP_RATE_LIMIT_IP", "namespace_id": "2005", "simple": { "limit": 10, "period": 60 } },
+          { "name": "JOIN_RATE_LIMIT_USER", "namespace_id": "2004", "simple": { "limit": 10, "period": 60 } }
+        ],
+        "observability": {
+          "logs": { "enabled": true, "invocation_logs": true, "persist": true },
+          "traces": { "enabled": false }
+        }
+      }
     }
   }
 }

@@ -1,6 +1,7 @@
 name: Deploy
 
-# Every merge to main is tested and deployed to production (api.gnomik.me), then smoke-tested.
+# Every merge to main is tested and deployed to production (api.gnomik.me), then smoke-tested. CLOUDFLARE_API_TOKEN is a
+# secret of the `production` environment, which only main can deploy to, and can edit the gnomik-api Worker only.
 on:
   push:
     branches: [main]
