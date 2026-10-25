@@ -485,7 +485,7 @@ describe('schemas', () => {
   it('clean request bodies: trimmed, spaces collapsed, emails lowercased, codes uppercased, phrases only trimmed, null as absent', () => {
     expect(v.parse(bodies.createParty, { name: '  Office \n  party  !  ', password: '  Jingle   Bells ' })).toEqual({ name: 'Office party!', password: 'Jingle   Bells' });
     expect(v.parse(bodies.createParty, { name: 'x', password: null })).toEqual({ name: 'x', password: undefined });
-    expect(v.parse(bodies.magicLink, { email: ' Someone@Example.COM ', party: 'qwertyui' })).toEqual({ email: 'someone@example.com', party: 'QWERTYUI' });
+    expect(v.parse(bodies.magicLink, { email: ' Someone@Example.COM ', party: 'qwertyui' })).toEqual({ email: 'someone@example.com', typed: 'someone@example.com', party: 'QWERTYUI' });
     expect(v.parse(bodies.empty, {})).toEqual({});
   });
 

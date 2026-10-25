@@ -2,7 +2,10 @@ import { TokenPayload } from 'src/utils/jwt';
 
 /** Emailed to sign in. Single-use (`jti`). */
 export interface EnterRequestToken extends TokenPayload {
+  /** The normalized address (`canonicalEmail`). */
   email: string;
+  /** The address as typed, when it differs: an account made before addresses were normalized may be kept under it. */
+  typed?: string;
   party?: string;
   /** Random id that makes the magic link single-use. */
   jti?: string;

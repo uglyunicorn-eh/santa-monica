@@ -36,8 +36,14 @@ Plain JSON routes under `/v1` (`src/api/`). A signed-in request sends `Authoriza
 
 - **CORS**: only the origins in `ALLOWED_ORIGINS` (`wrangler.jsonc`) may call the API from a browser. Production allows `https://gnomik.me` and the Cloudflare Pages previews (`https://*.gnomik-me.pages.dev`; a `*` matches exactly one label); previews also allow `http://localhost:4321`–`4323`. Other origins get no CORS headers, so browsers keep the answers from them.
 - **Errors** always answer `{ "error": { "code", "message", "field" } }` with a matching status: 400 `invalid` (with the `field`), 400 `invalid_link`, 401 `unauthenticated`, 403 `forbidden`, 404 `not_found`, 409 `conflict` / `link_used` / `account_busy`, 429 `rate_limited`, 503 `unavailable` / `not_finished`, and 500 `internal` with an `errorId` (the error itself is only logged). **401 only ever means the session is missing, invalid or revoked**: the frontend signs out on it, so a bad emailed link never does that.
-- **Every input and output is a [valibot](https://valibot.dev) schema** (`src/api/schemas.ts`). Request bodies are strict objects of text fields, each trimmed and length-limited (names and phrases 100, emails 128 and lowercased, tokens 2048, party codes uppercased and checked); unknown fields, non-text values and anything over a limit are refused by name. Query strings (`first`, `after`), path params (`:code`), the `Idempotency-Key` and `Authorization` headers, and the payload of every token the API verifies have schemas too. The body as a whole is capped at 16 KB (`src/api/limits.ts`, the same numbers as santa-barbara's `src/limits.ts`). Responses are shaped from stored records by output schemas, which also check them on the way out: anything that doesn't fit, or isn't part of the answer, never leaves the Worker.
+- **Every input and output is a [valibot](https://valibot.dev) schema** (`src/api/schemas.ts`). Request bodies are strict objects of text fields, each trimmed and length-limited (names and phrases 100, emails 128 and normalized (see Email addresses below), tokens 2048, party codes uppercased and checked); unknown fields, non-text values and anything over a limit are refused by name. Query strings (`first`, `after`), path params (`:code`), the `Idempotency-Key` and `Authorization` headers, and the payload of every token the API verifies have schemas too. The body as a whole is capped at 16 KB (`src/api/limits.ts`, the same numbers as santa-barbara's `src/limits.ts`). Responses are shaped from stored records by output schemas, which also check them on the way out: anything that doesn't fit, or isn't part of the answer, never leaves the Worker.
 - **Every signed-in route checks the session's token version**, so tokens revoked by an email change or an account deletion stop working everywhere. The token's signature is checked once per request with no DO call; then either the route's own DO call checks the session (`updateName`, `startHosting`, `listParties`, the party's join, `beginMailRequest`), or `session.verify()` reads the user once (party view, leave, draw, delete). A revoked token looking up a party sees what anyone sees. `test/integration/revocation.test.ts` calls every route with a revoked token, and fails if a route is added without a row there.
+
+### Email addresses
+
+Accounts are keyed by the normalized address (`canonicalEmail` in `src/utils/email.ts`): trimmed and lowercased, and for Gmail also without dots or a `+tag` before the `@`, with `googlemail.com` read as `gmail.com`. Gmail delivers every such spelling to the same mailbox, so `John.Doe+santa@googlemail.com` and `johndoe@gmail.com` are one account, share one per-address rate limit, and get their mail at `johndoe@gmail.com`. Other providers' addresses are only lowercased.
+
+Accounts made before this are kept under the address as typed (lowercased), and the `UserDO`s can't be listed to move them up front. So they move on their owner's next sign-in: when the normalized address has no account and the typed one does, the account moves over the same way an email change moves it (`adoptTypedAccount` in `src/api/account.ts`), parties and all, and older session tokens stop working. Asking to change to an address whose account is still kept under the typed spelling answers that the address is taken.
 
 ### Idempotency
 
@@ -69,7 +75,7 @@ The host can delete a party until its dice are rolled: it leaves every member's 
 |---|---|---|
 | `POST /v1/auth/magic-link` | 0, or 2 with an `Idempotency-Key` | 0, or 1 with a party code |
 | `POST /v1/auth/session`, `GET /v1/me`, `PATCH /v1/me`, `GET /v1/me/parties`, `POST /v1/me/deletion` | 1 | 0 |
-| `POST /v1/me/email-change` | 2 | 0 |
+| `POST /v1/me/email-change` | 2, or 3 for a Gmail address typed differently from its normalized form | 0 |
 | `POST /v1/me/deletion/confirm` | 2 | 1 per party |
 | `POST /v1/me/email-change/confirm` | 4 | 1 per party |
 | `GET /v1/parties/:code` | 0 anonymous, 1 signed in (in parallel) | 1 |
@@ -78,6 +84,7 @@ The host can delete a party until its dice are rolled: it leaves every member's 
 | `leave`, `draw`, `DELETE` | 1 | 1 |
 | `restore` | 1 | 2 |
 
+- Signing in with a Gmail address typed differently from its normalized form costs 2 more `UserDO` calls, to look for an account kept under the typed address; moving one, once, costs what an email change does.
 - Each `UserDO` keeps a summary of the user's parties, so "my parties" is one call for any page size. Rows saved before summaries existed are filled in from their parties once.
 - A party updates its members' summaries through its outbox. All of a user's queued changes go out in one `UserDO.apply` call, built from the party's current state when it's sent.
 

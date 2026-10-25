@@ -11,6 +11,7 @@ import {
 } from 'src/api/limits';
 import { RESTORE_WINDOW_MS } from 'src/do/PartyDO';
 import type { PartyListCursor } from 'src/do/types';
+import { canonicalEmail } from 'src/utils/email';
 import { nodeIdToStr, strToNodeId } from 'src/utils/strings/nodeId';
 
 export const PARTY_CODE_ALPHABET = 'QWERTYUIPASDFGHJKLZXCVBNMO';
@@ -40,14 +41,15 @@ const phrase = v.pipe(
   v.maxLength(MAX_PHRASE_LENGTH, `Secret phrase must be at most ${MAX_PHRASE_LENGTH} characters.`),
 );
 
-/** An email address, lowercased (accounts are keyed by it). */
-const email = v.pipe(
+/** An email address as typed, lowercased. */
+const typedEmail = v.pipe(
   v.string(NOT_TEXT),
   v.trim(),
   v.nonEmpty('Email is required.'),
   v.maxLength(MAX_EMAIL_LENGTH, `Email must be at most ${MAX_EMAIL_LENGTH} characters.`),
   v.email('Must be a valid email'),
   v.toLowerCase(),
+  v.check(address => canonicalEmail(address).indexOf('@') > 0, 'Must be a valid email'),
 );
 
 /** A signed token pasted from a link: length-limited before anything verifies it. */
@@ -72,15 +74,21 @@ const optional = <S extends v.GenericSchema<string, unknown>>(schema: S) =>
 const body = <E extends v.ObjectEntries>(entries: E) =>
   v.strictObject(entries, issue => `Unknown field: ${String(v.getDotPath(issue)).slice(0, 50)}.`);
 
+/**
+ * Gives a body's `email` back as the address accounts are keyed by (`canonicalEmail`), and as `typed`: the address as
+ * typed, lowercased, which older accounts may still be kept under.
+ */
+const normalizeEmail = <T extends { email: string }>(input: T) => ({ ...input, email: canonicalEmail(input.email), typed: input.email });
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Request bodies
 
 export const bodies = {
-  magicLink: body({ email: required(email), party: optional(partyCode) }),
+  magicLink: v.pipe(body({ email: required(typedEmail), party: optional(partyCode) }), v.transform(normalizeEmail)),
   session: body({ token: required(token) }),
   link: body({ token: required(token) }),
   profile: body({ name: required(words('Name', MAX_NAME_LENGTH)) }),
-  emailChange: body({ email: required(email) }),
+  emailChange: v.pipe(body({ email: required(typedEmail) }), v.transform(normalizeEmail)),
   createParty: body({ name: required(words('Party name', MAX_NAME_LENGTH)), password: optional(phrase) }),
   joinParty: body({ name: required(words('Name', MAX_NAME_LENGTH)), password: optional(phrase) }),
   empty: body({}),
@@ -175,7 +183,7 @@ const linkId = v.pipe(v.string(), v.nonEmpty());
 
 export const tokens = {
   user: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), ver: v.optional(v.number()) }),
-  enterRequest: v.object({ email: v.pipe(v.string(), v.nonEmpty(), v.toLowerCase()), jti: linkId, exp: v.number(), party: v.optional(v.string()) }),
+  enterRequest: v.object({ email: v.pipe(v.string(), v.nonEmpty(), v.toLowerCase()), typed: v.optional(v.string()), jti: linkId, exp: v.number(), party: v.optional(v.string()) }),
   accountDeletion: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number() }),
   emailChange: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), newEmail: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number() }),
 };
