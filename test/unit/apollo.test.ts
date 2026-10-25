@@ -322,8 +322,9 @@ describe('party history', () => {
 });
 
 describe('profile mutations', () => {
-  it('needs a session', async () => {
+  it('needs a session, checked before the input', async () => {
     await expect(updateName(context(), 'Nope')).rejects.toThrow('UNAUTHENTICATED');
+    await expect(updateName(context(), '')).rejects.toThrow('UNAUTHENTICATED');
   });
 
   it('sets the profile name and returns the user', async () => {

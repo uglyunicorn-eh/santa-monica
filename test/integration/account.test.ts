@@ -108,6 +108,22 @@ describe('deleting an account', () => {
     expect((await gql(USER, {}, { token: other.token })).data.user).toMatchObject({ email: other.email });
   });
 
+  it('holds the account while a change runs: no joining, no new parties, no second change', async () => {
+    const host = await person('host');
+    const me = await person('me');
+    const open = await createParty(host, 'Open');
+    await env.USER.getByName(me.email).startAccountChange(rawId(me), crypto.randomUUID(), Date.now() + 60_000);
+
+    expect((await gql(JOIN_PARTY, { party: open.id, name: 'Me' }, { token: me.token })).data.parties.joinParty).toMatchObject({ status: 'error', userErrors: [{ fieldName: null }] });
+    expect((await gql(`mutation { parties { createParty(input: { name: "Nope" }) { status } } }`, {}, { token: me.token })).data.parties.createParty.status).toBe('error');
+    expect((await gql(REQUEST_DELETION, {}, { token: me.token })).data.profile.requestAccountDeletion).toMatchObject({ status: 'error', userErrors: [{ fieldName: null }] });
+    const token = await jwt().issueToken('AccountDeletion', { sub: me.id, email: me.email, jti: crypto.randomUUID() }, { ttl: 60 });
+    expect((await gql(CONFIRM_DELETION, { token })).data.profile.confirmAccountDeletion).toMatchObject({
+      status: 'error', userErrors: [{ fieldName: 'token', messages: ['Another change to this account is in progress. Please try again in a minute.'] }],
+    });
+    expect((await gql(PARTY, { code: open.code }, { token: host.token })).data.party.participantCount).toBe(1);
+  });
+
   it('lets the email sign up again as a new account', async () => {
     const me = await person('me');
     await gql(REQUEST_DELETION, {}, { token: me.token });

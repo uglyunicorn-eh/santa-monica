@@ -1,4 +1,4 @@
-import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
+import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
 
 import { ApolloContext } from 'src/apollo/context';
@@ -109,6 +109,23 @@ describe('UserDO account changes', () => {
     const started = await stub.startAccountChange(user.id, 'j1', later);
     expect(started).toMatchObject({ ok: true, user: { id: user.id } });
     expect((started as any).parties.sort()).toEqual(['QQQEA', 'QQQEB']);
+    // Held while the change runs: no second change, no profile, no checked writes.
+    expect(await stub.startAccountChange(user.id, 'j2', later)).toEqual({ ok: false, reason: 'busy' });
+    expect(await stub.get()).toBeNull();
+    expect(await stub.updateName('X', { userId: user.id })).toBeNull();
+    expect(await stub.apply([{ type: 'setNameIfEmpty', name: 'Joiner', userId: user.id }], { userId: user.id })).toBeNull();
+    expect(await stub.apply([{ type: 'removeParty', slug: 'QQQEB' }])).toMatchObject({ id: user.id });
+
+    // Aborting releases the account and the link, which can be used again.
+    await stub.abortAccountChange('j1');
+    expect(await stub.get()).toMatchObject({ id: user.id, name: '' });
+    expect(await stub.startAccountChange(user.id, 'j1', later)).toMatchObject({ ok: true, parties: ['QQQEA'] });
+
+    // A hold that outlived its request runs out after a minute; a used link stays used.
+    await runInDurableObject(stub, async (_i, state) => {
+      state.storage.sql.exec('UPDATE user SET changing_until = ?', Date.now() - 1);
+    });
+    expect(await stub.get()).toMatchObject({ id: user.id });
     expect(await stub.startAccountChange(user.id, 'j1', later)).toEqual({ ok: false, reason: 'used' });
 
     await stub.tombstone();
@@ -199,6 +216,7 @@ describe('PartyDO.forgetMember', () => {
       state.storage.sql.exec('CREATE TABLE party (id TEXT PRIMARY KEY, slug TEXT NOT NULL, name TEXT NOT NULL, password TEXT, host_id TEXT NOT NULL, is_closed INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)');
       state.storage.sql.exec('INSERT INTO party VALUES (?, ?, ?, ?, ?, ?, ?)', row.id, row.slug, row.name, row.password, row.host_id, row.is_closed, row.created_at);
     });
+    await evictDurableObject(stub);
     expect(await stub.view(host.userId)).toMatchObject({ isHost: true });
     expect(await stub.forgetMember(host.userId!, host.userEmail!)).toBe('deleted');
     expect(await stub.view(host.userId)).toBeNull();
@@ -324,12 +342,40 @@ describe('account deletion mutations', () => {
     expect(await confirmDeletion(token)).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'token', messages: ['This account no longer exists.'] }] });
   });
 
-  it('refuses a link used twice before the account is gone', async () => {
+  it('refuses a link while another change runs, and once used', async () => {
     const me = await signedIn('Me');
     const token = await jwt.issueToken<AccountDeletionToken>('AccountDeletion', { sub: nodeIdToStr({ kind: 'User', id: me.userId! }), email: me.userEmail!, jti: 'same' }, { ttl: 60 });
-    await env.USER.getByName(me.userEmail!).startAccountChange(me.userId!, 'same', Date.now() + 60_000);
+    const stub = env.USER.getByName(me.userEmail!);
+    await stub.startAccountChange(me.userId!, 'same', Date.now() + 60_000);
+    expect(await confirmDeletion(token)).toMatchObject({ userErrors: [{ messages: ['Another change to this account is in progress. Please try again in a minute.'] }] });
+    await runInDurableObject(stub, async (_i, state) => {
+      state.storage.sql.exec('UPDATE user SET changing_until = NULL');
+    });
     expect(await confirmDeletion(token)).toMatchObject({ userErrors: [{ messages: ['This link has already been used. Please request a new one.'] }] });
-    expect(await env.USER.getByName(me.userEmail!).get()).not.toBeNull();
+    expect(await stub.get()).not.toBeNull();
+  });
+
+  it('keeps the account when a party can\'t be reached, and finishes when the link is opened again', async () => {
+    const me = await signedIn('Me');
+    const friend = await signedIn('Friend');
+    const theirs = await partyOf(friend, [me]);
+    const mine = await partyOf(me, [friend]);
+    await requestDeletion(me);
+    const token = linkToken(me.sent, 'delete');
+
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const broken = { ...env, PARTY: { getByName: (slug: string) => (slug === mine.slug ? { forgetMember: async () => { throw new Error('down'); } } : env.PARTY.getByName(slug)) } } as unknown as typeof env;
+    expect(await confirmDeletion(token, context({ env: broken }))).toEqual({
+      status: 'error', userErrors: [{ fieldName: 'token', messages: ["We couldn't finish this right now. Please open the link again in a few minutes."] }],
+    });
+    expect(error).toHaveBeenCalledWith('Unable to remove a deleted account from a party', 'Error: down');
+    error.mockRestore();
+    expect(await env.USER.getByName(me.userEmail!).get()).toMatchObject({ id: me.userId });
+    expect(await theirs.stub.view(friend.userId)).toMatchObject({ participantCount: 1 });
+
+    expect(await confirmDeletion(token)).toEqual({ status: 'ok', userErrors: null });
+    expect(await env.USER.getByName(me.userEmail!).get()).toBeNull();
+    expect(await mine.stub.view(friend.userId)).toBeNull();
   });
 
   it('rejects links that are expired, of another kind, or missing what identifies the user', async () => {
@@ -438,7 +484,55 @@ describe('email change mutations', () => {
       expect(state.storage.sql.exec('SELECT member_email FROM memberships WHERE member_id = ?', me.userId).one()).toEqual({ member_email: me.userEmail });
     });
 
-    expect(await confirmChange(token)).toMatchObject({ userErrors: [{ fieldName: 'token', messages: ['This email is already used by another account.'] }] });
+    expect(await confirmChange(token)).toMatchObject({ userErrors: [{ fieldName: 'token', messages: ['This account no longer exists.'] }] });
+  });
+
+  it('puts the parties back when one can\'t be reached, and finishes when the link is opened again', async () => {
+    const me = await signedIn('Me');
+    const friend = await signedIn('Friend');
+    const a = await partyOf(friend, [me]);
+    const b = await partyOf(friend, [me]);
+    const newEmail = uniqueEmail('retry');
+    await requestChange(me, newEmail);
+    const token = /profile\/email\/(\S+)/.exec(me.sent[0].message.text)![1];
+
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    let backCalls = 0;
+    const broken = {
+      ...env,
+      PARTY: {
+        getByName: (slug: string) => (slug !== b.slug ? env.PARTY.getByName(slug) : {
+          changeMemberEmail: async () => { throw new Error('down'); },
+        }),
+      },
+    } as unknown as typeof env;
+    const wrapped = {
+      ...broken,
+      PARTY: {
+        getByName: (slug: string) => {
+          const stub = broken.PARTY.getByName(slug);
+          return slug !== a.slug ? stub : {
+            changeMemberEmail: async (...args: [string, string, string]) => {
+              if (args[1] === newEmail) backCalls++;
+              return await stub.changeMemberEmail(...args);
+            },
+          };
+        },
+      },
+    } as unknown as typeof env;
+    expect(await confirmChange(token, context({ env: wrapped }))).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'token', messages: ["We couldn't finish this right now. Please open the link again in a few minutes."] }] });
+    error.mockRestore();
+    expect(backCalls).toBe(1);
+    for (const party of [a, b]) {
+      await runInDurableObject(party.stub, async (_i, state) => {
+        expect(state.storage.sql.exec('SELECT member_email FROM memberships WHERE member_id = ?', me.userId).one()).toEqual({ member_email: me.userEmail });
+      });
+    }
+    expect(await env.USER.getByName(me.userEmail!).get()).toMatchObject({ id: me.userId });
+    expect(await env.USER.getByName(newEmail).get()).toBeNull();
+
+    expect(await confirmChange(token)).toMatchObject({ status: 'ok', user: { email: newEmail } });
+    expect(await slugsOf(newEmail)).toEqual([a.slug, b.slug].sort());
   });
 
   it('refuses links that are invalid, used, for a gone account, or for a taken address', async () => {
@@ -450,9 +544,10 @@ describe('email change mutations', () => {
       expect(await confirmChange(token)).toMatchObject({ userErrors: [{ fieldName: 'token', messages: ['This link is invalid or has expired. Please request a new one.'] }] });
     }
 
-    const used = await jwt.issueToken<EmailChangeToken>('EmailChange', { sub, email, newEmail: uniqueEmail(), jti: 'used' }, { ttl: 60 });
-    await env.USER.getByName(email).startAccountChange(me.userId!, 'used', Date.now() + 60_000);
-    expect(await confirmChange(used)).toMatchObject({ userErrors: [{ messages: ['This link has already been used. Please request a new one.'] }] });
+    const busy = await jwt.issueToken<EmailChangeToken>('EmailChange', { sub, email, newEmail: uniqueEmail(), jti: 'busy' }, { ttl: 60 });
+    await env.USER.getByName(email).startAccountChange(me.userId!, 'other', Date.now() + 60_000);
+    expect(await confirmChange(busy)).toMatchObject({ userErrors: [{ messages: ['Another change to this account is in progress. Please try again in a minute.'] }] });
+    await env.USER.getByName(email).abortAccountChange('other');
 
     const otherAccount = await jwt.issueToken<EmailChangeToken>('EmailChange', { sub: nodeIdToStr({ kind: 'User', id: newObjectId() }), email, newEmail: uniqueEmail(), jti: 'gone' }, { ttl: 60 });
     expect(await confirmChange(otherAccount)).toMatchObject({ userErrors: [{ messages: ['This account no longer exists.'] }] });

@@ -20,7 +20,7 @@ type PartyRow = {
   is_closed: number;
   created_at: number;
   /** Set when the host deleted their account: the party reads as gone and is wiped once its outbox is delivered. */
-  deleted_at?: number | null;
+  deleted_at: number | null;
 };
 
 type MembershipRow = {
@@ -47,6 +47,11 @@ type OutboxBatch = { key: string; rows: OutboxRow[]; messages: OutboxMessage[] }
 
 /** The joining session's token version, checked against the user's record (see `Session`). */
 export type JoinCheck = Pick<Session, 'tokenVersion'>;
+
+// Columns added after the first release, by table. Parties created before them get the columns on their next start.
+const ADDED_COLUMNS: Record<string, Record<string, string>> = {
+  party: { deleted_at: 'INTEGER' },
+};
 
 const MAX_ATTEMPTS = 15;
 const MAX_BACKOFF_MS = 60 * 60 * 1000;
@@ -75,12 +80,26 @@ export class PartyDO extends DurableObject<Env> {
 
   // The schema is created on the first write only, so looking up an unknown code does not store anything.
   private hasSchema(): boolean {
-    this.schemaReady ||= this.sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'party'").toArray().length > 0;
+    if (!this.schemaReady && this.sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'party'").toArray().length) {
+      this.schemaReady = true;
+      this.migrate();
+    }
     return this.schemaReady;
   }
 
+  /** Adds columns introduced after a party was created. Runs once per start, when the party is first read. */
+  private migrate() {
+    for (const [table, added] of Object.entries(ADDED_COLUMNS)) {
+      const columns = new Set(this.sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray().map(c => c.name));
+      for (const [column, definition] of Object.entries(added)) {
+        if (!columns.has(column)) {
+          this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+        }
+      }
+    }
+  }
+
   private ensureSchema() {
-    this.schemaReady = true;
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS party (
         id TEXT PRIMARY KEY,
@@ -107,6 +126,8 @@ export class PartyDO extends DurableObject<Env> {
         next_attempt_at INTEGER NOT NULL
       );
     `);
+    // Also migrates a party that existed before (its tables were left as they were).
+    this.hasSchema();
   }
 
   /** The party row, deleted or not. */
@@ -240,6 +261,7 @@ export class PartyDO extends DurableObject<Env> {
       host_id: input.host.id,
       is_closed: 0,
       created_at: now,
+      deleted_at: null,
     };
     this.ctx.storage.transactionSync(() => {
       this.sql.exec(
@@ -325,8 +347,13 @@ export class PartyDO extends DurableObject<Env> {
       return fail(null, 'You must be logged in before joining the party.');
     }
 
-    // Other requests may have reached the party while the user was being updated.
-    const current = this.party()!;
+    // Other requests may have reached the party while the user was being updated. The host may even have deleted
+    // their account, and with it the party.
+    const current = this.party();
+    if (!current) {
+      await this.takeBackSummary(member.email, party.slug);
+      return fail('party', 'Party does not exist.');
+    }
     if (!this.membership(member.id)) {
       if (current.is_closed) {
         // Too late: take the party back off the user's list.
@@ -340,6 +367,21 @@ export class PartyDO extends DurableObject<Env> {
       );
     }
     return { ok: true, view: this.buildView(current, member.id) };
+  }
+
+  /** Removes this party from a user's list after it was added by a join that didn't go through. */
+  private async takeBackSummary(email: string, slug: string) {
+    if (this.hasSchema()) {
+      // Deleted but not wiped yet: the outbox sends the removal, with retries.
+      this.enqueue({ kind: 'user.sync', email });
+      await this.deliverUserUpdates();
+      return;
+    }
+    try {
+      await this.env.USER.getByName(email).apply([{ type: 'removeParty', slug }]);
+    } catch (error) {
+      console.warn('Unable to take a wiped party off a user\'s list', { error: String(error) });
+    }
   }
 
   async leave(userId: string): Promise<PartyResult> {
@@ -423,7 +465,7 @@ export class PartyDO extends DurableObject<Env> {
         return 'none';
       }
       if (!party.is_closed && party.host_id === userId) {
-        this.markDeleted();
+        this.sql.exec('UPDATE party SET deleted_at = ?', Date.now());
         this.sql.exec('DELETE FROM memberships WHERE member_id = ?', userId);
         const members = this.sql.exec<{ member_email: string }>('SELECT member_email FROM memberships WHERE member_email IS NOT NULL').toArray();
         for (const { member_email } of members) {
@@ -448,15 +490,6 @@ export class PartyDO extends DurableObject<Env> {
       await this.deliverSoon();
     }
     return result;
-  }
-
-  private markDeleted() {
-    // Parties created before deletion existed don't have the column yet.
-    const columns = this.sql.exec<{ name: string }>('PRAGMA table_info(party)').toArray().map(c => c.name);
-    if (!columns.includes('deleted_at')) {
-      this.sql.exec('ALTER TABLE party ADD COLUMN deleted_at INTEGER');
-    }
-    this.sql.exec('UPDATE party SET deleted_at = ?', Date.now());
   }
 
   /**

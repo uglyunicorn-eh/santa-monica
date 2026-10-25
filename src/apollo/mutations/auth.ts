@@ -1,12 +1,12 @@
 import { ApolloContext } from 'src/apollo/context';
 import { viewParty } from 'src/apollo/resolvers/party';
-import { userToNode } from 'src/apollo/resolvers/user';
-import { EnterRequestToken, UserToken } from 'src/apollo/types';
+import { EnterRequestToken } from 'src/apollo/types';
 import { renderSignIn } from 'src/mail';
 import _ from 'src/utils/graphql/resolvable';
 import { annotate } from 'src/utils/tracing';
 
 import { emailRateLimit } from './rateLimit';
+import { issueSession } from './session';
 import { EnterInput, EnterRequestInput } from './types';
 import { enterInputSchema, enterRequestInputSchema } from './validation';
 
@@ -96,10 +96,7 @@ export default {
           };
         }
 
-        const node = userToNode(user);
-        const userToken = await issueToken<UserToken>("UserToken", { sub: node.id, email, ver: user.tokenVersion }, { ttl: 60 * 60 * 24 * 30 });
-
-        return { userToken, user: node };
+        return await issueSession(issueToken, user);
 
       } catch (error) {
         annotate({ 'auth.magic_link': 'invalid' });

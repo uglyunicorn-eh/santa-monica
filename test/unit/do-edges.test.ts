@@ -425,6 +425,59 @@ describe('PartyDO join session check', () => {
     expect(await env.USER.getByName(guest.email).listParties(10)).toEqual([]);
   });
 
+  it('refuses a join when the host deleted their account meanwhile, and takes the party off the user\'s list', async () => {
+    const host = await signedUp('host');
+    const { stub, slug } = await party(host);
+    // A message waiting for a retry keeps the deleted party from being wiped during the test.
+    await insertOutbox(stub, { kind: 'mail.partyNotification', email: 'later@example.com', partyName: 'P', slug }, 1, Date.now() + 60_000);
+    const guest = await signedUp('racer');
+    await duringUserCall(stub, instance => instance.forgetMember(host.id, host.email));
+    expect(await stub.join(guest, 'Racer', null, {})).toEqual({ ok: false, error: { fieldName: 'party', message: 'Party does not exist.' } });
+    expect(await env.USER.getByName(guest.email).listParties(10)).toEqual([]);
+  });
+
+  it('takes a wiped party off the user\'s list directly', async () => {
+    const host = await signedUp('host');
+    const { stub, slug } = await party(host);
+    const guest = await signedUp('late');
+    await duringUserCall(stub, async instance => {
+      await instance.forgetMember(host.id, host.email);
+      await instance.alarm();
+    });
+    expect(await stub.join(guest, 'Late', null, {})).toMatchObject({ ok: false, error: { message: 'Party does not exist.' } });
+    expect(await env.USER.getByName(guest.email).listParties(10)).toEqual([]);
+    expect(await stub.view()).toBeNull();
+    expect(slug).toHaveLength(5);
+  });
+
+  it('gives up quietly when a wiped party can\'t be taken off the user\'s list', async () => {
+    const host = await signedUp('host');
+    const { stub } = await party(host);
+    const guest = await signedUp('unlucky');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await runInDurableObject(stub, async (instance: PartyDO) => {
+      const self = instance as unknown as { env: typeof env };
+      const users = self.env.USER;
+      let calls = 0;
+      self.env = {
+        ...self.env,
+        USER: {
+          getByName: (email: string) => ({
+            apply: async (...args: Parameters<UserDO['apply']>) => {
+              if (++calls > 1) throw new Error('unreachable');
+              await instance.forgetMember(host.id, host.email);
+              await instance.alarm();
+              return await users.getByName(email).apply(...args);
+            },
+          }),
+        },
+      } as unknown as typeof env;
+    });
+    expect(await stub.join(guest, 'Unlucky', null, {})).toMatchObject({ ok: false, error: { fieldName: 'party' } });
+    expect(warn).toHaveBeenCalledWith("Unable to take a wiped party off a user's list", expect.anything());
+    warn.mockRestore();
+  });
+
   it('keeps one membership when the same person joined while the user was being updated', async () => {
     const { stub } = await party();
     const guest = await signedUp('twice');

@@ -6,7 +6,21 @@ import { Session, sessionMatches } from 'src/utils/session';
 
 import { PartyListCursor, UserPartyListItem, UserPartyRecord, UserRecord, UserUpdate } from './types';
 
-type UserRow = { id: string; email: string; name: string; joined: number; token_version: number; deleted_at: number | null };
+type UserRow = {
+  id: string;
+  email: string;
+  name: string;
+  joined: number;
+  token_version: number;
+  deleted_at: number | null;
+  /** Set while the account is being deleted or moved to another email (see `startAccountChange`). */
+  changing_until?: number | null;
+};
+
+/** How long an account change holds the account at most, in case the request running it never finishes. */
+const ACCOUNT_CHANGE_MS = 60 * 1000;
+
+const isChanging = (row: UserRow) => Boolean(row.changing_until && row.changing_until > Date.now());
 type PartyRow = {
   slug: string;
   name: string;
@@ -26,6 +40,7 @@ const ADDED_COLUMNS: Record<string, Record<string, string>> = {
   user: {
     token_version: 'INTEGER NOT NULL DEFAULT 0',
     deleted_at: 'INTEGER',
+    changing_until: 'INTEGER',
   },
   parties: {
     is_host: 'INTEGER',
@@ -57,7 +72,8 @@ export class UserDO extends DurableObject<Env> {
           name TEXT NOT NULL DEFAULT '',
           joined INTEGER NOT NULL,
           token_version INTEGER NOT NULL DEFAULT 0,
-          deleted_at INTEGER
+          deleted_at INTEGER,
+          changing_until INTEGER
         );
         CREATE TABLE IF NOT EXISTS parties (
           slug TEXT PRIMARY KEY,
@@ -85,7 +101,7 @@ export class UserDO extends DurableObject<Env> {
   }
 
   private row(): UserRow | null {
-    return this.sql.exec<UserRow>('SELECT id, email, name, joined, token_version, deleted_at FROM user LIMIT 1').toArray()[0] ?? null;
+    return this.sql.exec<UserRow>('SELECT id, email, name, joined, token_version, deleted_at, changing_until FROM user LIMIT 1').toArray()[0] ?? null;
   }
 
   /** Returns the user, creating it on the first sign-in, or starting a new account after a deleted one. */
@@ -127,19 +143,33 @@ export class UserDO extends DurableObject<Env> {
   /**
    * Starts deleting the account or moving it to another email, from an emailed link: checks the link is for this
    * account (`userId`) and not used yet, marks it used, and returns the user with the slugs of all their parties.
-   * Nothing else changes here, so if the rest fails, a new link can start over.
+   * Until the change finishes (the account is tombstoned), is aborted, or a minute passes, the account is held: it
+   * reads as missing, refuses joins and profile changes, and no other change can start, so the party list can't
+   * change under the one running.
    */
   startAccountChange(userId: string, jti: string, expiresAt: number):
-    { ok: true; user: UserRecord; parties: string[] } | { ok: false; reason: 'gone' | 'used' } {
-    const user = this.get();
-    if (!user || user.id !== userId) {
+    { ok: true; user: UserRecord; parties: string[] } | { ok: false; reason: 'gone' | 'used' | 'busy' } {
+    const row = this.row();
+    if (!row || row.deleted_at !== null || row.id !== userId) {
       return { ok: false, reason: 'gone' };
+    }
+    if (isChanging(row)) {
+      return { ok: false, reason: 'busy' };
     }
     if (!this.useLink(jti, expiresAt)) {
       return { ok: false, reason: 'used' };
     }
-    const parties = this.sql.exec<{ slug: string }>('SELECT slug FROM parties').toArray().map(row => row.slug);
-    return { ok: true, user, parties };
+    this.sql.exec('UPDATE user SET changing_until = ?', Date.now() + ACCOUNT_CHANGE_MS);
+    const parties = this.sql.exec<{ slug: string }>('SELECT slug FROM parties').toArray().map(r => r.slug);
+    return { ok: true, user: toRecord(row), parties };
+  }
+
+  /** Releases an account change that could not finish, and the link that started it, so the link can be tried again. */
+  abortAccountChange(jti: string): void {
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec('UPDATE user SET changing_until = NULL');
+      this.sql.exec('DELETE FROM used_magic_links WHERE jti = ?', jti);
+    });
   }
 
   /**
@@ -174,10 +204,10 @@ export class UserDO extends DurableObject<Env> {
     );
   }
 
-  /** The user, or null when there is none or the account was deleted. */
+  /** The user, or null when there is none, the account was deleted, or it is being deleted or moved right now. */
   get(): UserRecord | null {
     const row = this.row();
-    return row && row.deleted_at === null ? toRecord(row) : null;
+    return row && row.deleted_at === null && !isChanging(row) ? toRecord(row) : null;
   }
 
   /**
@@ -211,8 +241,8 @@ export class UserDO extends DurableObject<Env> {
 
   /**
    * Applies a batch of changes from a party, in order, in one transaction. Safe to retry.
-   * Writes nothing to a deleted account, and nothing when `session` is given and no longer belongs to this user, so a
-   * party can verify a joining session in the call it makes anyway. Returns the user as it is afterwards (null if
+   * Writes nothing to a deleted account, and nothing when `session` is given and no longer belongs to this user (or
+   * the account is held by an account change), so a party can verify a joining session in the call it makes anyway. Returns the user as it is afterwards (null if
    * there is none or it was deleted).
    */
   apply(updates: UserUpdate[], session?: Session): UserRecord | null {
@@ -223,6 +253,10 @@ export class UserDO extends DurableObject<Env> {
     const user = row && toRecord(row);
     if (session && !sessionMatches(user, session)) {
       return user;
+    }
+    if (session && isChanging(row!)) {
+      // Held by an account change: a join now would be missed by it.
+      return null;
     }
     let name = user?.name;
     this.ctx.storage.transactionSync(() => {
