@@ -139,12 +139,17 @@ export class UserDO extends DurableObject<Env> {
 
   /** Marks an emailed link as used. False when it already was. Used links are kept only until they expire. */
   private useLink(jti: string, expiresAt: number): boolean {
-    this.sql.exec('DELETE FROM used_magic_links WHERE expires_at < ?', Date.now());
-    if (this.sql.exec('SELECT 1 FROM used_magic_links WHERE jti = ?', jti).toArray().length) {
+    if (this.linkUsed(jti)) {
       return false;
     }
     this.sql.exec('INSERT INTO used_magic_links (jti, expires_at) VALUES (?, ?)', jti, expiresAt);
     return true;
+  }
+
+  /** Whether an emailed link was already used (forgetting used links that have expired). */
+  private linkUsed(jti: string): boolean {
+    this.sql.exec('DELETE FROM used_magic_links WHERE expires_at < ?', Date.now());
+    return this.sql.exec('SELECT 1 FROM used_magic_links WHERE jti = ?', jti).toArray().length > 0;
   }
 
   /**
@@ -156,6 +161,10 @@ export class UserDO extends DurableObject<Env> {
    */
   startAccountChange(userId: string, jti: string, expiresAt: number):
     { ok: true; user: UserRecord; parties: string[] } | { ok: false; reason: 'gone' | 'used' | 'busy' } {
+    // A used link is reported as used even when the change it made left this account a tombstone.
+    if (this.linkUsed(jti)) {
+      return { ok: false, reason: 'used' };
+    }
     const row = this.row();
     if (!row || row.deleted_at !== null || row.id !== userId) {
       return { ok: false, reason: 'gone' };
@@ -163,9 +172,7 @@ export class UserDO extends DurableObject<Env> {
     if (isChanging(row)) {
       return { ok: false, reason: 'busy' };
     }
-    if (!this.useLink(jti, expiresAt)) {
-      return { ok: false, reason: 'used' };
-    }
+    this.sql.exec('INSERT INTO used_magic_links (jti, expires_at) VALUES (?, ?)', jti, expiresAt);
     this.sql.exec('UPDATE user SET changing_until = ?', Date.now() + ACCOUNT_CHANGE_MS);
     const parties = this.sql.exec<{ slug: string }>('SELECT slug FROM parties').toArray().map(r => r.slug);
     return { ok: true, user: toRecord(row), parties };

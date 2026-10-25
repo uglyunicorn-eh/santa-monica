@@ -129,7 +129,9 @@ describe('UserDO account changes', () => {
     expect(await stub.startAccountChange(user.id, 'j1', later)).toEqual({ ok: false, reason: 'used' });
 
     await stub.tombstone();
-    expect(await stub.startAccountChange(user.id, 'j2', later)).toEqual({ ok: false, reason: 'gone' });
+    expect(await stub.startAccountChange(user.id, 'j3', later)).toEqual({ ok: false, reason: 'gone' });
+    // A link that was used reads as used, even on the tombstone its change left behind.
+    expect(await stub.startAccountChange(user.id, 'j1', later)).toEqual({ ok: false, reason: 'used' });
   });
 
   it('receives a moved account, refusing an address a live account uses', async () => {
@@ -313,17 +315,18 @@ describe('account deletion mutations', () => {
     await drain(mine.slug);
     expect(await slugsOf(friend.userEmail!)).toEqual([theirs.slug, drawn.slug].sort());
 
-    expect(await confirmDeletion(token)).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'token', messages: ['This account no longer exists.'] }] });
+    expect(await confirmDeletion(token)).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'token', messages: ['This link has already been used. Please request a new one.'] }] });
   });
 
   it('refuses a link while another change runs, and once used', async () => {
     const me = await signedIn('Me');
     const token = await jwt.issueToken<AccountDeletionToken>('AccountDeletion', { sub: nodeIdToStr({ kind: 'User', id: me.userId! }), email: me.userEmail!, jti: 'same' }, { ttl: 60 });
     const stub = env.USER.getByName(me.userEmail!);
-    await stub.startAccountChange(me.userId!, 'same', Date.now() + 60_000);
+    await stub.startAccountChange(me.userId!, 'other', Date.now() + 60_000);
     expect(await confirmDeletion(token)).toMatchObject({ userErrors: [{ messages: ['Another change to this account is in progress. Please try again in a minute.'] }] });
     await runInDurableObject(stub, async (_i, state) => {
       state.storage.sql.exec('UPDATE user SET changing_until = NULL');
+      state.storage.sql.exec("INSERT INTO used_magic_links (jti, expires_at) VALUES ('same', ?)", Date.now() + 60_000);
     });
     expect(await confirmDeletion(token)).toMatchObject({ userErrors: [{ messages: ['This link has already been used. Please request a new one.'] }] });
     expect(await stub.get()).not.toBeNull();
@@ -458,7 +461,7 @@ describe('email change mutations', () => {
       expect(state.storage.sql.exec('SELECT member_email FROM memberships WHERE member_id = ?', me.userId).one()).toEqual({ member_email: me.userEmail });
     });
 
-    expect(await confirmChange(token)).toMatchObject({ userErrors: [{ fieldName: 'token', messages: ['This account no longer exists.'] }] });
+    expect(await confirmChange(token)).toMatchObject({ userErrors: [{ fieldName: 'token', messages: ['This link has already been used. Please request a new one.'] }] });
   });
 
   it('puts the parties back when one can\'t be reached, and finishes when the link is opened again', async () => {

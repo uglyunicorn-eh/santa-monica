@@ -98,7 +98,10 @@ describe('deleting an account', () => {
     await gql(REQUEST_DELETION, {}, { token: me.token });
     const token = await linkFrom(me.email, 'delete');
     await gql(CONFIRM_DELETION, { token });
-    expect((await gql(CONFIRM_DELETION, { token })).data.profile.confirmAccountDeletion).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'token' }] });
+    // Says the link was used, though the account it deleted is gone by now.
+    expect((await gql(CONFIRM_DELETION, { token })).data.profile.confirmAccountDeletion).toEqual({
+      status: 'error', userErrors: [{ fieldName: 'token', messages: ['This link has already been used. Please request a new one.'] }],
+    });
 
     const other = await person('other');
     const expired = await jwt().issueToken('AccountDeletion', { sub: other.id, email: other.email, jti: crypto.randomUUID() }, { ttl: -60 });
@@ -122,6 +125,23 @@ describe('deleting an account', () => {
       status: 'error', userErrors: [{ fieldName: 'token', messages: ['Another change to this account is in progress. Please try again in a minute.'] }],
     });
     expect((await gql(PARTY, { code: open.code }, { token: host.token })).data.party.participantCount).toBe(1);
+  });
+
+  it('says the account no longer exists for an unused link to a deleted account', async () => {
+    const me = await person('me');
+    await gql(REQUEST_DELETION, {}, { token: me.token });
+    const first = await linkFrom(me.email, 'delete');
+    await gql(REQUEST_DELETION, {}, { token: me.token });
+    const second = await linkFrom(me.email, 'delete');
+    expect(second).not.toBe(first);
+    const never = uniqueEmail('never');
+    await gql(REQUEST_CHANGE, { email: never }, { token: me.token });
+    const change = await linkFrom(never, 'email');
+
+    expect((await gql(CONFIRM_DELETION, { token: first })).data.profile.confirmAccountDeletion.status).toBe('ok');
+    const gone = { status: 'error', userErrors: [{ fieldName: 'token', messages: ['This account no longer exists.'] }] };
+    expect((await gql(CONFIRM_DELETION, { token: second })).data.profile.confirmAccountDeletion).toEqual(gone);
+    expect((await gql(CONFIRM_CHANGE, { token: change })).data.profile.confirmEmailChange).toMatchObject(gone);
   });
 
   it('lets the email sign up again as a new account', async () => {
@@ -238,7 +258,10 @@ describe('changing the email', () => {
     await gql(REQUEST_CHANGE, { email: newEmail }, { token: me.token });
     const token = await linkFrom(newEmail, 'email');
     expect((await gql(CONFIRM_CHANGE, { token })).data.profile.confirmEmailChange.status).toBe('ok');
-    expect((await gql(CONFIRM_CHANGE, { token })).data.profile.confirmEmailChange).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'token' }] });
+    // Says the link was used, though the old account is a tombstone by now.
+    expect((await gql(CONFIRM_CHANGE, { token })).data.profile.confirmEmailChange).toEqual({
+      status: 'error', userErrors: [{ fieldName: 'token', messages: ['This link has already been used. Please request a new one.'] }], userToken: null, user: null,
+    });
 
     const other = await person('other');
     const expired = await jwt().issueToken('EmailChange', { sub: other.id, email: other.email, newEmail: uniqueEmail(), jti: crypto.randomUUID() }, { ttl: -60 });
