@@ -28,8 +28,10 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+    # One environment for every pull request: each deploy still records its own URL. A name per pull request made
+    # GitHub keep an environment for each one, and the workflow's token can't delete them.
     environment:
-      name: preview-pr-${{ github.event.pull_request.number }}
+      name: preview
       url: ${{ env.PREVIEW_URL }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
