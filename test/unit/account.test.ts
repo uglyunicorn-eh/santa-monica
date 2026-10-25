@@ -87,9 +87,12 @@ const linkToken = (sent: Sent, path: 'delete' | 'email') => {
   return match![1];
 };
 
-const requestDeletion = async (ctx: ApolloContext) => await profile().requestAccountDeletion({ input: undefined as never }, ctx) as any;
+const requestDeletion = async (ctx: ApolloContext, requestId?: string) => await profile().requestAccountDeletion({ input: (requestId ? { requestId } : undefined) as never }, ctx) as any;
 const confirmDeletion = async (token: string, ctx: ApolloContext = context()) => await profile().confirmAccountDeletion({ input: { token } }, ctx) as any;
-const requestChange = async (ctx: ApolloContext, email: string) => await profile().requestEmailChange({ input: { email } }, ctx) as any;
+const requestChange = async (ctx: ApolloContext, email: string, requestId?: string) => await profile().requestEmailChange({ input: { email, requestId } }, ctx) as any;
+const ok = { status: 'ok', userErrors: null };
+const denied = { limit: async () => ({ success: false }) } as unknown as RateLimit;
+const rateLimited = (ctx: TestContext): TestContext => ({ ...ctx, env: { ...ctx.env, ENTER_RATE_LIMIT_IP: denied, ENTER_RATE_LIMIT_EMAIL: denied } });
 const confirmChange = async (token: string, ctx: ApolloContext = context()) => await profile().confirmEmailChange({ input: { token } }, ctx) as any;
 
 const slugsOf = async (email: string) => (await env.USER.getByName(email).listParties(50)).map(p => p.slug).sort();
@@ -387,6 +390,66 @@ describe('account deletion mutations', () => {
     const me = await signedIn('Me', { sendMail: async () => { throw new Error('down'); } });
     expect(await requestDeletion(me)).toMatchObject({ status: 'error', userErrors: [{ fieldName: null, messages: ["We couldn't send the email right now. Please try again in a few minutes."] }] });
     error.mockRestore();
+  });
+});
+
+describe('account email requests with a request id', () => {
+  it('sends a deletion link once per id, and a repeat costs no rate limit', async () => {
+    const me = await signedIn('Me');
+    expect(await requestDeletion(me, 'one')).toEqual(ok);
+    expect(await requestDeletion(rateLimited(me), 'one')).toEqual(ok);
+    expect(me.sent).toHaveLength(1);
+    expect(await requestDeletion(me, 'two')).toEqual(ok);
+    expect(await requestDeletion(me)).toEqual(ok);
+    expect(me.sent).toHaveLength(3);
+  });
+
+  it('sends an email change once per id and address', async () => {
+    const me = await signedIn('Me');
+    const first = uniqueEmail('first');
+    const second = uniqueEmail('second');
+    expect(await requestChange(me, first, 'one')).toEqual(ok);
+    expect(await requestChange(rateLimited(me), first.toUpperCase(), 'one')).toEqual(ok);
+    expect(me.sent.map(s => s.to)).toEqual([first, me.userEmail]);
+    expect(await requestChange(me, second, 'one')).toEqual(ok);
+    expect(me.sent.map(s => s.to)).toEqual([first, me.userEmail, second, me.userEmail]);
+  });
+
+  it('frees the id when the request fails, so retrying it sends the email', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    let down = true;
+    const me = await signedIn('Me');
+    const flaky = { ...me, sendMail: async (to: string, message: MailMessage) => { if (down) throw new Error('down'); me.sent.push({ to, message }); } };
+    const newEmail = uniqueEmail('new');
+
+    expect(await requestDeletion(rateLimited(me), 'del')).toMatchObject({ status: 'error' });
+    expect(await requestDeletion(flaky, 'del')).toMatchObject({ status: 'error' });
+    expect(await requestChange(rateLimited(me), newEmail, 'chg')).toMatchObject({ status: 'error' });
+    expect(await requestChange(flaky, newEmail, 'chg')).toMatchObject({ status: 'error' });
+    expect(await requestChange(me, me.userEmail!, 'own')).toMatchObject({ status: 'error' });
+    down = false;
+    expect(await requestDeletion(flaky, 'del')).toEqual(ok);
+    expect(await requestChange(flaky, newEmail, 'chg')).toEqual(ok);
+    expect(me.sent.map(s => s.to)).toEqual([me.userEmail, newEmail, me.userEmail]);
+    error.mockRestore();
+  });
+
+  it('frees the id when the request throws, so retrying it sends the email', async () => {
+    const me = await signedIn('Me');
+    const broken = { ...me, retrieveUser: async () => { throw new Error('down'); } };
+    await expect(requestDeletion(broken, 'boom')).rejects.toThrow('down');
+    expect(await requestDeletion(me, 'boom')).toEqual(ok);
+    expect(me.sent).toHaveLength(1);
+  });
+
+  it('forgets an id after ten minutes', async () => {
+    const me = await signedIn('Me');
+    expect(await requestDeletion(me, 'old')).toEqual(ok);
+    await runInDurableObject(env.USER.getByName(me.userEmail!), async (_i, state) => {
+      state.storage.sql.exec('UPDATE mail_requests SET expires_at = ?', Date.now() - 1);
+    });
+    expect(await requestDeletion(me, 'old')).toEqual(ok);
+    expect(me.sent).toHaveLength(2);
   });
 });
 

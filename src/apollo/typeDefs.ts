@@ -156,13 +156,18 @@ export const typeDefs = `#graphql
   type ProfileOpts {
     updateName(input: UpdateNameInput!): UpdateNamePayload!
     "Emails a link to <baseUrl>/profile/delete/<token> to the account's address."
-    requestAccountDeletion: RequestAccountDeletionPayload!
+    requestAccountDeletion(input: RequestAccountDeletionInput): RequestAccountDeletionPayload!
     "Deletes the account. On status ok the account is gone: clear the stored session token."
     confirmAccountDeletion(input: ConfirmAccountDeletionInput!): ConfirmAccountDeletionPayload!
     "Emails a link to <baseUrl>/profile/email/<token> to the new address, and a notice to the current one."
     requestEmailChange(input: RequestEmailChangeInput!): RequestEmailChangePayload!
     "Moves the account to the new address. Returns a new session token for it; tokens issued before stop working."
     confirmEmailChange(input: ConfirmEmailChangeInput!): ConfirmEmailChangePayload!
+  }
+
+  input RequestAccountDeletionInput {
+    "Makes retries safe: repeating the request with the same id (for ten minutes) sends no second email."
+    requestId: String
   }
 
   type RequestAccountDeletionPayload implements MutationPayload {
@@ -181,6 +186,8 @@ export const typeDefs = `#graphql
 
   input RequestEmailChangeInput {
     email: String!
+    "Makes retries safe: repeating the request with the same id and address (for ten minutes) sends no second email."
+    requestId: String
   }
 
   type RequestEmailChangePayload implements MutationPayload {

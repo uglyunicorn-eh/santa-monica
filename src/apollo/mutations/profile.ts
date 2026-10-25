@@ -8,8 +8,8 @@ import { annotate } from 'src/utils/tracing';
 
 import { emailRateLimit } from './rateLimit';
 import { issueSession } from './session';
-import { ConfirmTokenInput, RequestEmailChangeInput, UpdateNameInput } from './types';
-import { confirmTokenInputSchema, noInputSchema, requestEmailChangeInputSchema, updateNameInputSchema } from './validation';
+import { ConfirmTokenInput, RequestAccountDeletionInput, RequestEmailChangeInput, UpdateNameInput } from './types';
+import { confirmTokenInputSchema, requestAccountDeletionInputSchema, requestEmailChangeInputSchema, updateNameInputSchema } from './validation';
 
 import { baseUrl } from 'src/config.json';
 
@@ -68,6 +68,38 @@ async function sendAccountMail(context: ApolloContext, to: string, message: Para
   }
 }
 
+type ErrorPayload = ReturnType<typeof error>;
+
+/**
+ * Runs an account email request at most once per request id (when it has one). A repeat of a request that went
+ * through, or is still going, answers ok without emailing again or counting against the rate limit. A request that
+ * failed frees its id, so retrying it sends the email.
+ */
+async function once(
+  { env, userEmail }: ApolloContext, key: string | undefined, detail: string, run: () => Promise<ErrorPayload | {}>,
+): Promise<ErrorPayload | {}> {
+  if (!key) {
+    return await run();
+  }
+  const userDO = env.USER.getByName(userEmail!);
+  const fresh = await userDO.claimMailRequest(key, detail);
+  annotate({ 'mail.request_repeated': !fresh });
+  if (!fresh) {
+    return {};
+  }
+  let result: ErrorPayload | {};
+  try {
+    result = await run();
+  } catch (e) {
+    await userDO.releaseMailRequest(key, detail);
+    throw e;
+  }
+  if ('status' in result) {
+    await userDO.releaseMailRequest(key, detail);
+  }
+  return result;
+}
+
 /**
  * Settles every call. Returns the values of those that went through, which of them did (by position), and how many
  * failed; the failures are logged.
@@ -103,8 +135,8 @@ const profileMutations = {
     return user ? { status: 'ok' as const, user: userToNode(user) } : sessionExpired;
   })),
 
-  /** Emails a link that deletes the account (see `confirmAccountDeletion`). */
-  requestAccountDeletion: withSession(_(noInputSchema, 'requestAccountDeletion')(async (input: unknown, context: ApolloContext) => {
+  /** Emails a link that deletes the account (see `confirmAccountDeletion`). Repeats of one request id email once. */
+  requestAccountDeletion: withSession(_(requestAccountDeletionInputSchema, 'requestAccountDeletion')(async (input: RequestAccountDeletionInput | undefined, context: ApolloContext) => once(context, input?.requestId && `deletion:${input.requestId}`, '', async () => {
     const { env, clientIp, userEmail, retrieveUser, issueToken } = context;
     const [rateLimited, user] = await Promise.all([emailRateLimit(env, clientIp, userEmail!), retrieveUser()]);
     annotate({ 'auth.rate_limited': rateLimited ?? false });
@@ -119,7 +151,7 @@ const profileMutations = {
     }, { ttl: LINK_TTL });
     const message = renderAccountDeletion({ url: `${baseUrl}/profile/delete/${token}`, assetsUrl: env.PUBLIC_URL });
     return await sendAccountMail(context, user.email, message, null) ?? {};
-  })),
+  }))),
 
   /**
    * Deletes the account from the emailed link. Open parties the user hosts are deleted, open parties they joined are
@@ -160,8 +192,11 @@ const profileMutations = {
     return {};
   }),
 
-  /** Emails a link to the new address that moves the account there, and a notice to the current one. */
-  requestEmailChange: withSession(_(requestEmailChangeInputSchema, 'requestEmailChange')(async (input: RequestEmailChangeInput, context: ApolloContext) => {
+  /**
+   * Emails a link to the new address that moves the account there, and a notice to the current one. Repeats of one
+   * request id for the same address email once.
+   */
+  requestEmailChange: withSession(_(requestEmailChangeInputSchema, 'requestEmailChange')(async (input: RequestEmailChangeInput, context: ApolloContext) => once(context, input.requestId && `email:${input.requestId}`, input.email.toLowerCase(), async () => {
     const { env, clientIp, retrieveUser, issueToken } = context;
     const newEmail = input.email.toLowerCase();
     const [rateLimited, user, taken] = await Promise.all([
@@ -191,7 +226,7 @@ const profileMutations = {
     // The notice is a courtesy: the change can't happen without the link, so a failed notice doesn't fail the request.
     await sendAccountMail(context, user.email, renderEmailChangeNotice({ oldEmail: user.email, newEmail, assetsUrl: env.PUBLIC_URL }), null);
     return {};
-  })),
+  }))),
 
   /**
    * Moves the account to the new email from the emailed link: the parties not drawn yet move the membership and their
