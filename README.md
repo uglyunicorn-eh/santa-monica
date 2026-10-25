@@ -17,6 +17,7 @@ Keeping Durable Object calls low:
 - A party updates its members' summaries through its outbox. All of a user's queued changes go out in one `UserDO.apply` call, built from the party's current state when it's sent.
 - The session token is checked once per request. Joining uses the session's email and doesn't read the profile.
 - Party history (`partyHistory`) is paged from the same summaries: one call per page.
+- Deleting an account or changing its email makes one call to each of the user's parties, plus two (deletion) or four (email change) to the user's `UserDO`s.
 - Revoked sessions (deleted accounts, see below) are not checked against the `UserDO` on every request, only where a call to it happens anyway: reading the profile (`user`, `createParty`), `updateName`, and joining, where the party sends the session along with its update to the user, before storing the membership.
 - `test/unit/efficiency.test.ts` counts the calls each operation makes.
 
@@ -62,6 +63,11 @@ Production secrets are set with `npx wrangler secret put JWT_PRIVATE_KEY`.
 ## Tokens
 
 Session tokens carry the user's token version (`ver`). `UserDO.tombstone()` deletes an account: its record reads as missing, late updates from parties are ignored, and its version goes up, so every token issued before is refused where sessions are checked. Tokens without `ver` (issued before versions existed) count as version 0. The next sign-in with that email starts a new account.
+
+Deleting an account and changing its email go through a link mailed to the user (`AccountDeletion` and `EmailChange` tokens, single-use, one hour):
+
+- **Deleting** (`profile.requestAccountDeletion` → `<baseUrl>/profile/delete/<token>` → `profile.confirmAccountDeletion`): every party on the user's list is told once (`PartyDO.forgetMember`). An open party they host is deleted: it reads as gone at once, its members' lists are updated through the outbox, and the party's storage is wiped once that is delivered. Open parties they joined are left. In drawn parties their membership is anonymized (new id, no email; the names stay so the draw still works). Then the `UserDO` is tombstoned.
+- **Changing the email** (`profile.requestEmailChange` → `<baseUrl>/profile/email/<token>` to the new address, plus a notice to the old one → `profile.confirmEmailChange`): open parties move the membership and their queued updates to the new email (`PartyDO.changeMemberEmail`). Then the account is copied to the new address's `UserDO` (same id, token version + 1) and the old one is tombstoned. Drawn parties keep the old email; the user still sees them, since membership goes by user id. The confirm returns a session token for the new address.
 
 Magic-link and session tokens are ES256 JWTs (issuer `api.gnomik.me`) signed with `JWT_PRIVATE_KEY`, a P-256 private key in PKCS#8 PEM (real or escaped `\n` line breaks). The frontend ([santa-barbara](https://github.com/uglyunicorn-eh/santa-barbara)) verifies them in the browser with the matching public key, `publicKey` in its `src/config.json`, so the two must stay a pair: rotating the key means updating that file too.
 

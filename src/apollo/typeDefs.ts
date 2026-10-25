@@ -119,8 +119,51 @@ export const typeDefs = `#graphql
     node: Party
   }
 
+  "updateName, requestAccountDeletion and requestEmailChange need a session; the confirm mutations work from the emailed link alone."
   type ProfileOpts {
     updateName(input: UpdateNameInput!): UpdateNamePayload!
+    "Emails a link to <baseUrl>/profile/delete/<token> to the account's address."
+    requestAccountDeletion: RequestAccountDeletionPayload!
+    "Deletes the account. On status ok the account is gone: clear the stored session token."
+    confirmAccountDeletion(input: ConfirmAccountDeletionInput!): ConfirmAccountDeletionPayload!
+    "Emails a link to <baseUrl>/profile/email/<token> to the new address, and a notice to the current one."
+    requestEmailChange(input: RequestEmailChangeInput!): RequestEmailChangePayload!
+    "Moves the account to the new address. Returns a new session token for it; tokens issued before stop working."
+    confirmEmailChange(input: ConfirmEmailChangeInput!): ConfirmEmailChangePayload!
+  }
+
+  type RequestAccountDeletionPayload implements MutationPayload {
+    status: MutationStatus!
+    userErrors: [UserError!]
+  }
+
+  input ConfirmAccountDeletionInput {
+    token: String!
+  }
+
+  type ConfirmAccountDeletionPayload implements MutationPayload {
+    status: MutationStatus!
+    userErrors: [UserError!]
+  }
+
+  input RequestEmailChangeInput {
+    email: String!
+  }
+
+  type RequestEmailChangePayload implements MutationPayload {
+    status: MutationStatus!
+    userErrors: [UserError!]
+  }
+
+  input ConfirmEmailChangeInput {
+    token: String!
+  }
+
+  type ConfirmEmailChangePayload implements MutationPayload {
+    status: MutationStatus!
+    userErrors: [UserError!]
+    userToken: String
+    user: User
   }
 
   input UpdateNameInput {

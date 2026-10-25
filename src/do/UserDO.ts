@@ -4,7 +4,7 @@ import { Env } from 'src/env';
 import { newObjectId } from 'src/utils/ids';
 import { Session, sessionMatches } from 'src/utils/session';
 
-import { PartyListCursor, UserPartyListItem, UserRecord, UserUpdate } from './types';
+import { PartyListCursor, UserPartyListItem, UserPartyRecord, UserRecord, UserUpdate } from './types';
 
 type UserRow = { id: string; email: string; name: string; joined: number; token_version: number; deleted_at: number | null };
 type PartyRow = {
@@ -111,12 +111,67 @@ export class UserDO extends DurableObject<Env> {
    * was already used. Used links are kept only until they expire.
    */
   redeemMagicLink(email: string, jti: string, expiresAt: number): UserRecord | null {
+    return this.useLink(jti, expiresAt) ? this.ensure(email) : null;
+  }
+
+  /** Marks an emailed link as used. False when it already was. Used links are kept only until they expire. */
+  private useLink(jti: string, expiresAt: number): boolean {
     this.sql.exec('DELETE FROM used_magic_links WHERE expires_at < ?', Date.now());
     if (this.sql.exec('SELECT 1 FROM used_magic_links WHERE jti = ?', jti).toArray().length) {
-      return null;
+      return false;
     }
     this.sql.exec('INSERT INTO used_magic_links (jti, expires_at) VALUES (?, ?)', jti, expiresAt);
-    return this.ensure(email);
+    return true;
+  }
+
+  /**
+   * Starts deleting the account or moving it to another email, from an emailed link: checks the link is for this
+   * account (`userId`) and not used yet, marks it used, and returns the user with the slugs of all their parties.
+   * Nothing else changes here, so if the rest fails, a new link can start over.
+   */
+  startAccountChange(userId: string, jti: string, expiresAt: number):
+    { ok: true; user: UserRecord; parties: string[] } | { ok: false; reason: 'gone' | 'used' } {
+    const user = this.get();
+    if (!user || user.id !== userId) {
+      return { ok: false, reason: 'gone' };
+    }
+    if (!this.useLink(jti, expiresAt)) {
+      return { ok: false, reason: 'used' };
+    }
+    const parties = this.sql.exec<{ slug: string }>('SELECT slug FROM parties').toArray().map(row => row.slug);
+    return { ok: true, user, parties };
+  }
+
+  /**
+   * Receives an account moved here from another email: the same user (id, name, joined, token version) and their
+   * party list. Refused (null) when a live account already uses this email. Party rows already here are newer (the
+   * parties have been sending to this email since they were moved), so they are kept.
+   */
+  receive(user: UserRecord, parties: UserPartyRecord[]): UserRecord | null {
+    const existing = this.row();
+    if (existing && existing.deleted_at === null) {
+      return null;
+    }
+    // Never go below a version this email's object already handed out.
+    const row: UserRow = { ...user, token_version: Math.max(user.tokenVersion, existing?.token_version ?? 0), deleted_at: null };
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec('DELETE FROM user');
+      this.sql.exec(
+        'INSERT INTO user (id, email, name, joined, token_version) VALUES (?, ?, ?, ?, ?)',
+        row.id, row.email, row.name, row.joined, row.token_version,
+      );
+      for (const party of parties) {
+        this.putParty(party, 'INSERT OR IGNORE');
+      }
+    });
+    return toRecord(row);
+  }
+
+  private putParty({ slug, name, createdAt, isHost, isProtected, isClosed }: UserPartyRecord, insert: 'INSERT OR REPLACE' | 'INSERT OR IGNORE') {
+    this.sql.exec(
+      `${insert} INTO parties (slug, name, created_at, is_host, is_protected, is_closed) VALUES (?, ?, ?, ?, ?, ?)`,
+      slug, name, createdAt, Number(isHost), Number(isProtected), Number(isClosed),
+    );
   }
 
   /** The user, or null when there is none or the account was deleted. */
@@ -173,14 +228,9 @@ export class UserDO extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       for (const update of updates) {
         switch (update.type) {
-          case 'addParty': {
-            const { slug, name, createdAt, isHost, isProtected, isClosed } = update.party;
-            this.sql.exec(
-              'INSERT OR REPLACE INTO parties (slug, name, created_at, is_host, is_protected, is_closed) VALUES (?, ?, ?, ?, ?, ?)',
-              slug, name, createdAt, Number(isHost), Number(isProtected), Number(isClosed),
-            );
+          case 'addParty':
+            this.putParty(update.party, 'INSERT OR REPLACE');
             break;
-          }
           case 'removeParty':
             this.sql.exec('DELETE FROM parties WHERE slug = ?', update.slug);
             break;

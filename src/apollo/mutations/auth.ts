@@ -6,6 +6,7 @@ import { renderSignIn } from 'src/mail';
 import _ from 'src/utils/graphql/resolvable';
 import { annotate } from 'src/utils/tracing';
 
+import { emailRateLimit } from './rateLimit';
 import { EnterInput, EnterRequestInput } from './types';
 import { enterInputSchema, enterRequestInputSchema } from './validation';
 
@@ -26,11 +27,7 @@ export default {
       const { env, clientIp, sendMail, issueToken } = context;
       const email = input.email.toLowerCase();
 
-      const [byIp, byEmail] = await Promise.all([
-        env.ENTER_RATE_LIMIT_IP.limit({ key: clientIp }),
-        env.ENTER_RATE_LIMIT_EMAIL.limit({ key: email }),
-      ]);
-      const rateLimited = !byIp.success ? 'ip' : !byEmail.success ? 'email' : undefined;
+      const rateLimited = await emailRateLimit(env, clientIp, email);
       annotate({ 'auth.rate_limited': rateLimited ?? false, 'party.code': input.party ?? undefined });
       if (rateLimited) {
         return tooManyRequests;

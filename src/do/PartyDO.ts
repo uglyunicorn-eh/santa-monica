@@ -5,7 +5,9 @@ import { isPermanentMailError, renderPartyNotification, sendMail } from 'src/mai
 import santaShuffle from 'src/utils/santaShuffle';
 import { Session, sessionMatches } from 'src/utils/session';
 
-import { CreatePartyInput, Member, PartyResult, PartyView, UserPartyRecord, UserRecord, UserUpdate } from './types';
+import { newObjectId } from 'src/utils/ids';
+
+import { CreatePartyInput, ForgetMemberResult, Member, PartyResult, PartyView, UserPartyRecord, UserRecord, UserUpdate } from './types';
 
 import { baseUrl } from 'src/config.json';
 
@@ -17,6 +19,8 @@ type PartyRow = {
   host_id: string;
   is_closed: number;
   created_at: number;
+  /** Set when the host deleted their account: the party reads as gone and is wiped once its outbox is delivered. */
+  deleted_at?: number | null;
 };
 
 type MembershipRow = {
@@ -85,7 +89,8 @@ export class PartyDO extends DurableObject<Env> {
         password TEXT,
         host_id TEXT NOT NULL,
         is_closed INTEGER NOT NULL DEFAULT 0,
-        created_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL,
+        deleted_at INTEGER
       );
       CREATE TABLE IF NOT EXISTS memberships (
         member_id TEXT PRIMARY KEY,
@@ -104,11 +109,23 @@ export class PartyDO extends DurableObject<Env> {
     `);
   }
 
-  private party(): PartyRow | null {
+  /** The party row, deleted or not. */
+  private partyRow(): PartyRow | null {
     if (!this.hasSchema()) {
       return null;
     }
     return this.sql.exec<PartyRow>('SELECT * FROM party LIMIT 1').toArray()[0] ?? null;
+  }
+
+  /** The party, or null when there is none or it was deleted. */
+  private party(): PartyRow | null {
+    const party = this.partyRow();
+    return party && !party.deleted_at ? party : null;
+  }
+
+  /** Drops queued messages (user updates and mail) addressed to this email. */
+  private dropQueued(email: string) {
+    this.sql.exec("DELETE FROM outbox WHERE json_extract(payload, '$.email') = ?", email);
   }
 
   private membership(userId: string): MembershipRow | null {
@@ -153,7 +170,10 @@ export class PartyDO extends DurableObject<Env> {
 
   /** The party as a member sees it in their list, or its removal if they are no longer a member. */
   private memberUpdate(email: string): UserUpdate {
-    const party = this.party()!;
+    const party = this.partyRow()!;
+    if (party.deleted_at) {
+      return { type: 'removeParty', slug: party.slug };
+    }
     const membership = this.sql
       .exec<{ member_id: string }>('SELECT member_id FROM memberships WHERE member_email = ?', email)
       .toArray()[0];
@@ -207,7 +227,8 @@ export class PartyDO extends DurableObject<Env> {
   /** Creates the party. Returns `conflict` when the slug is already taken, so the caller can pick another one. */
   async create(input: CreatePartyInput & { id: string; slug: string }): Promise<PartyResult | { ok: false; conflict: true }> {
     this.ensureSchema();
-    if (this.party()) {
+    // A deleted party still holds its slug until it is wiped.
+    if (this.partyRow()) {
       return { ok: false, conflict: true };
     }
     const now = Date.now();
@@ -382,6 +403,84 @@ export class PartyDO extends DurableObject<Env> {
   }
 
 
+  /**
+   * Removes a user whose account is being deleted, and drops everything queued for their email:
+   * - an open party they host is deleted: it reads as gone right away, members get it removed from their lists
+   *   through the outbox, and the party is wiped once that is delivered (by the alarm, not before this returns);
+   * - an open party they joined is left;
+   * - in a drawn party their membership stays, so the draw holds, but is anonymized: a new random id (also as the
+   *   giver's target and as the host), no email. The names stay, so their Secret Santa still knows who to buy for.
+   */
+  async forgetMember(userId: string, email: string): Promise<ForgetMemberResult> {
+    const party = this.partyRow();
+    if (!party) {
+      return 'none';
+    }
+    const membership = this.membership(userId);
+    const result = this.ctx.storage.transactionSync((): ForgetMemberResult => {
+      this.dropQueued(email);
+      if (party.deleted_at) {
+        return 'none';
+      }
+      if (!party.is_closed && party.host_id === userId) {
+        this.markDeleted();
+        this.sql.exec('DELETE FROM memberships WHERE member_id = ?', userId);
+        const members = this.sql.exec<{ member_email: string }>('SELECT member_email FROM memberships WHERE member_email IS NOT NULL').toArray();
+        for (const { member_email } of members) {
+          this.enqueue({ kind: 'user.sync', email: member_email });
+        }
+        return 'deleted';
+      }
+      if (!party.is_closed && membership) {
+        this.sql.exec('DELETE FROM memberships WHERE member_id = ?', userId);
+        return 'left';
+      }
+      if (party.is_closed && (membership || party.host_id === userId)) {
+        const anonymous = newObjectId();
+        this.sql.exec('UPDATE memberships SET member_id = ?, member_email = NULL WHERE member_id = ?', anonymous, userId);
+        this.sql.exec('UPDATE memberships SET target_id = ? WHERE target_id = ?', anonymous, userId);
+        this.sql.exec('UPDATE party SET host_id = ? WHERE host_id = ?', anonymous, userId);
+        return 'anonymized';
+      }
+      return 'none';
+    });
+    if (result === 'deleted') {
+      await this.deliverSoon();
+    }
+    return result;
+  }
+
+  private markDeleted() {
+    // Parties created before deletion existed don't have the column yet.
+    const columns = this.sql.exec<{ name: string }>('PRAGMA table_info(party)').toArray().map(c => c.name);
+    if (!columns.includes('deleted_at')) {
+      this.sql.exec('ALTER TABLE party ADD COLUMN deleted_at INTEGER');
+    }
+    this.sql.exec('UPDATE party SET deleted_at = ?', Date.now());
+  }
+
+  /**
+   * Moves a member to a new email. In a party not drawn yet, the membership and everything queued for the old email
+   * move to the new one, so later updates reach the moved account. A drawn party keeps the old email: the member still
+   * sees it, since membership goes by user id. Returns the party's summary for the member's list, or null when they
+   * are not a member (or there is no party).
+   */
+  changeMemberEmail(userId: string, oldEmail: string, newEmail: string): UserPartyRecord | null {
+    const party = this.party();
+    if (!party || !this.membership(userId)) {
+      return null;
+    }
+    if (!party.is_closed) {
+      this.ctx.storage.transactionSync(() => {
+        this.sql.exec('UPDATE memberships SET member_email = ? WHERE member_id = ?', newEmail, userId);
+        this.sql.exec(
+          "UPDATE outbox SET payload = json_set(payload, '$.email', ?) WHERE json_extract(payload, '$.email') = ?", newEmail, oldEmail,
+        );
+      });
+    }
+    return this.summary(party, userId);
+  }
+
   /** Delivers a batch: one email, or all queued changes for one user in a single UserDO call. */
   private async deliver({ messages }: OutboxBatch) {
     const [first] = messages;
@@ -471,6 +570,11 @@ export class PartyDO extends DurableObject<Env> {
     const next = this.sql.exec<{ at: number | null }>('SELECT MIN(next_attempt_at) AS at FROM outbox').one().at;
     if (next !== null) {
       await this.ctx.storage.setAlarm(Math.max(next, Date.now()));
+    } else if (this.partyRow()!.deleted_at) {
+      // A deleted party's last updates are out: forget it entirely.
+      await this.ctx.storage.deleteAlarm();
+      await this.ctx.storage.deleteAll();
+      this.schemaReady = false;
     }
   }
 

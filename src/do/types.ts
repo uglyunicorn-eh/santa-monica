@@ -71,6 +71,9 @@ export type PartyResult =
   | { ok: true; view: PartyView }
   | { ok: false; error: PartyUserError };
 
+/** What `PartyDO.forgetMember` did for a deleted account. */
+export type ForgetMemberResult = 'deleted' | 'left' | 'anonymized' | 'none';
+
 export type CreatePartyInput = {
   name: string;
   password: string | null;

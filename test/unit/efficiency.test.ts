@@ -186,6 +186,54 @@ describe('Durable Object calls per operation', () => {
     expect(counting.calls).toEqual([{ binding: 'PARTY', name: node.code, method: 'join' }]);
   });
 
+  it('requests an account email with one profile read (two for an email change: also the new address)', async () => {
+    const me = await person('Me');
+    const counting = countingEnv();
+    const bindings = { ...counting.env, EMAIL: { send: async () => ({ messageId: 'm' }) } } as unknown as typeof env;
+    expect((await gql(bindings, `mutation { profile { requestAccountDeletion { status } } }`, {}, me.token)).data.profile.requestAccountDeletion.status).toBe('ok');
+    expect(counting.calls.map(c => `${c.binding}.${c.method}`)).toEqual(['USER.get']);
+
+    counting.reset();
+    const newEmail = `eff-new-${++counter}@example.com`;
+    const res = await gql(bindings, `mutation ($email: String!) { profile { requestEmailChange(input: { email: $email }) { status } } }`, { email: newEmail }, me.token);
+    expect(res.data.profile.requestEmailChange.status).toBe('ok');
+    expect(counting.calls.map(c => `${c.binding}:${c.name === me.email ? 'old' : 'new'}.${c.method}`).sort()).toEqual(['USER:new.get', 'USER:old.get']);
+  });
+
+  it('deletes an account with one call per party, plus two to the user', async () => {
+    const me = await person('Me');
+    const friend = await person('Friend');
+    const mine = (await gql(env, CREATE, { name: 'Mine' }, me.token)).data.parties.createParty.node;
+    const theirs = (await gql(env, CREATE, { name: 'Theirs' }, friend.token)).data.parties.createParty.node;
+    await gql(env, JOIN, { party: theirs.id, name: 'Me' }, me.token);
+    const token = await jwt.issueToken('AccountDeletion', { sub: nodeIdToStr({ kind: 'User', id: me.id }), email: me.email, jti: crypto.randomUUID() }, { ttl: 60 });
+
+    const counting = countingEnv();
+    const res = await gql(counting.env, `mutation ($token: String!) { profile { confirmAccountDeletion(input: { token: $token }) { status } } }`, { token });
+    expect(res.data.profile.confirmAccountDeletion.status).toBe('ok');
+    const calls = counting.calls.map(c => `${c.binding}.${c.method}`);
+    expect(calls[0]).toBe('USER.startAccountChange');
+    expect(calls.slice(1, 3).sort()).toEqual(['PARTY.forgetMember', 'PARTY.forgetMember']);
+    expect(calls.slice(3)).toEqual(['USER.tombstone']);
+    expect(counting.calls.filter(c => c.binding === 'PARTY').map(c => c.name).sort()).toEqual([mine.code, theirs.code].sort());
+  });
+
+  it('changes the email with one call per party, plus four to the two addresses', async () => {
+    const me = await person('Me');
+    const friend = await person('Friend');
+    const theirs = (await gql(env, CREATE, { name: 'Theirs' }, friend.token)).data.parties.createParty.node;
+    await gql(env, JOIN, { party: theirs.id, name: 'Me' }, me.token);
+    const newEmail = `eff-moved-${++counter}@example.com`;
+    const token = await jwt.issueToken('EmailChange', { sub: nodeIdToStr({ kind: 'User', id: me.id }), email: me.email, newEmail, jti: crypto.randomUUID() }, { ttl: 60 });
+
+    const counting = countingEnv();
+    const res = await gql(counting.env, `mutation ($token: String!) { profile { confirmEmailChange(input: { token: $token }) { status userToken } } }`, { token });
+    expect(res.data.profile.confirmEmailChange.status).toBe('ok');
+    expect(counting.calls.map(c => `${c.binding}:${c.name === me.email ? 'old' : c.name === newEmail ? 'new' : 'party'}.${c.method}`)).toEqual([
+      'USER:new.get', 'USER:old.startAccountChange', 'PARTY:party.changeMemberEmail', 'USER:new.receive', 'USER:old.tombstone',
+    ]);
+  });
+
   it('leaves and closes with one call each', async () => {
     const host = await person('Host');
     const guest = await person('Guest');
