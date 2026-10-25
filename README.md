@@ -11,6 +11,13 @@ This is back-end side of the Anonymous Ded Morozes
 
 The API is a Cloudflare Worker (Hono + Apollo Server) with its data in Durable Objects: one `PartyDO` per party and one `UserDO` per user. Mail goes through Cloudflare Email Service. See [docs/MIGRATION_PLAN.md](docs/MIGRATION_PLAN.md) for the design.
 
+A party code is the key to a party without a secret phrase, so codes are hard to guess and slow to try:
+
+- New parties get 8-letter codes (about 2·10^11 possibilities); parties created before keep their 5-letter codes.
+- `party(code)` answers at most 10 different codes per request (`MAX_PARTY_LOOKUPS`), and each client IP can look up 60 codes a minute (`PARTY_LOOKUP_RATE_LIMIT_IP`).
+- Each user can try to join 10 times a minute (`JOIN_RATE_LIMIT_USER`).
+- After 5 wrong secret phrases for a party within 15 minutes, that person has to wait out the 15 minutes (`MAX_PHRASE_GUESSES` in `src/do/PartyDO.ts`). This one is counted by the party itself, so it holds everywhere; Cloudflare's rate limits are counted per location.
+
 One person can host at most 3 open parties at a time (`MAX_OPEN_HOSTED_PARTIES` in `src/apollo/mutations/parties.ts`). Parties joined as a guest don't count. Closing or deleting a party frees its slot right away. Hosts can't leave their own party.
 
 The host can delete a party at any time (`deleteParty`): it leaves every member's list but the host's and its link stops working. For 24 hours (`RESTORE_WINDOW_MS` in `src/do/PartyDO.ts`) the host can bring it back exactly as it was with `restoreParty`; restoring an open party needs a free slot. After that the party's alarm erases it, and its code is never reused. The check and a slot for the new party are taken in one `UserDO.startHosting` call, so parallel creates can't get past the limit.

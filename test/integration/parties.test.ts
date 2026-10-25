@@ -33,7 +33,7 @@ describe('creating a party', () => {
       name: 'Office party', isHost: true, isJoined: true, isClosed: false, isProtected: true,
       password: 'Jingle Bells', participantCount: 1, participants: [''], target: null,
     });
-    expect(party.code).toMatch(/^[QWERTYUIPASDFGHJKLZXCVBNMO]{5}$/);
+    expect(party.code).toMatch(/^[QWERTYUIPASDFGHJKLZXCVBNMO]{8}$/);
     expect(party.id).toBe(nodeIdToStr({ kind: 'Party', id: party.code }));
   });
 
