@@ -124,8 +124,8 @@ Emailed links point at `FRONTEND_URL` (`wrangler.jsonc`): `https://gnomik.me` in
 
 GitHub secrets. Pull-request jobs run code from any branch, so they never see the production token:
 
-- `CLOUDFLARE_API_TOKEN`: a secret of the `production` environment, which only `main` can deploy to. An account API token with **Workers Scripts: Edit** on the `gnomik-api` Worker only (the custom domain already exists, so no zone access is needed).
-- `CLOUDFLARE_PREVIEW_API_TOKEN`: a secret of the `preview` environment, which the preview deploy and cleanup jobs name. The same kind of token, on `gnomik-api-preview` only.
+- `CLOUDFLARE_API_TOKEN`: a secret of the `production` environment, which only `main` can deploy to. An account API token with two policies: **Workers › gnomik-api › Individual Workers Editor**, and **Workers Routes: Edit** on the `gnomik.me` zone only. The second is needed because `wrangler deploy` re-applies the `api.gnomik.me` custom domain on every deploy, and custom domains can't be scoped to one Worker yet.
+- `CLOUDFLARE_PREVIEW_API_TOKEN`: a secret of the `preview` environment, which the preview deploy and cleanup jobs name. One policy: **Workers › gnomik-api-preview › Individual Workers Editor** (Previews have no custom domain, so no zone access).
 - `CLOUDFLARE_ACCOUNT_ID` (repository).
 - `PREVIEW_JWT_PRIVATE_KEY` (repository): a P-256 private key used to sign preview tokens; a local frontend pointed at a preview needs its public key, see santa-barbara's README.
 
