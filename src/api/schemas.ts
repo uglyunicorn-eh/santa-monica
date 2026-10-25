@@ -199,7 +199,8 @@ export const tokens = {
 // ---------------------------------------------------------------------------------------------------------------------
 // Responses: stored records in, JSON out
 
-const isoTime = v.pipe(v.number(), v.transform((ms: number) => new Date(ms).toISOString()));
+/** A stored time (ms since the epoch) as the ISO 8601 string the API answers with. */
+const iso = (ms: number) => new Date(ms).toISOString();
 const isoString = v.pipe(v.string(), v.isoTimestamp());
 
 /** The signed-in user. The API never returns anyone else's. */
@@ -216,8 +217,8 @@ export const user = v.pipe(
 export const session = v.object({ userToken: v.string(), user });
 
 const deletionTimes = (deletedAt: number | null | undefined) => ({
-  deletedAt: deletedAt ? new Date(deletedAt).toISOString() : null,
-  restorableUntil: deletedAt ? new Date(deletedAt + RESTORE_WINDOW_MS).toISOString() : null,
+  deletedAt: deletedAt ? iso(deletedAt) : null,
+  restorableUntil: deletedAt ? iso(deletedAt + RESTORE_WINDOW_MS) : null,
 });
 
 /** A party in a list: what the user's own copy of it carries. */
@@ -263,8 +264,8 @@ export const partySummary = v.pipe(
     isProtected: s.isProtected,
     isClosed: s.isClosed,
     isJoined: true,
-    createdAt: new Date(s.createdAt).toISOString(),
-    rolledAt: s.closedAt === null ? null : new Date(s.closedAt).toISOString(),
+    createdAt: iso(s.createdAt),
+    rolledAt: s.closedAt === null ? null : iso(s.closedAt),
     ...deletionTimes(s.deletedAt),
   })),
   PartySummaryJson,
@@ -274,7 +275,7 @@ export const partySummary = v.pipe(
 export const party = v.pipe(
   v.object({
     slug: v.string(), name: v.string(), password: v.nullable(v.string()), isProtected: v.boolean(),
-    isHost: v.boolean(), isJoined: v.boolean(), isClosed: v.boolean(), createdAt: isoTime,
+    isHost: v.boolean(), isJoined: v.boolean(), isClosed: v.boolean(), createdAt: v.number(),
     closedAt: v.nullable(v.number()), deletedAt: v.nullable(v.number()), participantCount: v.nullable(v.number()),
     participants: v.nullable(v.array(v.string())), target: v.nullable(v.object({ name: v.string() })),
   }),
@@ -285,8 +286,8 @@ export const party = v.pipe(
     isProtected: p.isProtected,
     isClosed: p.isClosed,
     isJoined: p.isJoined,
-    createdAt: p.createdAt,
-    rolledAt: p.closedAt === null ? null : new Date(p.closedAt).toISOString(),
+    createdAt: iso(p.createdAt),
+    rolledAt: p.closedAt === null ? null : iso(p.closedAt),
     ...deletionTimes(p.deletedAt),
     password: p.password,
     participantCount: p.participantCount,
