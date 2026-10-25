@@ -147,7 +147,18 @@ describe('HTTP surface', () => {
     for (let i = 0; i < 10; i++) {
       expect((await call('GET', '/v1/parties?code=QWERT', { ip })).status).toBe(404);
     }
-    expect(await call('GET', '/v1/parties?code=QWERT', { ip })).toEqual({ status: 429, body: apiError('rate_limited', expect.any(String)) });
+    expect(await call('GET', '/v1/parties?code=QWERT', { ip })).toEqual({ status: 429, body: apiError('rate_limited', expect.any(String), 'party') });
     expect((await call('GET', '/v1/parties?code=QWERTYUI', { ip })).status).toBe(404);
+  });
+
+  it('limits code checks through party writes per client, as for lookups: no way around the lookup limit', async () => {
+    const who = await signIn(uniqueEmail('prober'));
+    const ip = uniqueIp();
+    const statuses = [];
+    for (let i = 0; i < 61; i++) {
+      statuses.push((await call('POST', '/v1/parties/leave', { token: who.token, ip, body: { code: `QQQQQQ${String.fromCharCode(65 + (i % 26))}${String.fromCharCode(65 + Math.floor(i / 26))}` } })).status);
+    }
+    expect(statuses.slice(0, 60).every(status => status === 404)).toBe(true);
+    expect(statuses[60]).toBe(429);
   });
 });

@@ -73,6 +73,9 @@ const MAIL_REQUEST_TTL_MS = 10 * 60 * 1000;
 /** How a cancelled email-change link is recorded in `used_magic_links.outcome`. */
 const CANCELLED = '!cancelled';
 
+/** The new-party limit counts the parties a user started over this rolling window. */
+export const PARTY_STARTS_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 /** The per-address email cap counts the emails sent to an address over this rolling window. */
 export const MAIL_QUOTA_WINDOW_MS = 60 * 60 * 1000;
 
@@ -134,6 +137,9 @@ export class UserDO extends DurableObject<Env> {
           key TEXT PRIMARY KEY,
           detail TEXT NOT NULL,
           expires_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS party_starts (
+          at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS mail_sent (
           at INTEGER NOT NULL,
@@ -356,10 +362,16 @@ export class UserDO extends DurableObject<Env> {
   /**
    * Checks the open-party limit and, when there is room, holds a slot for the party about to be created, in one step:
    * concurrent creates each see the slots the others hold. The slot is released when the new party lands in the list
-   * (`releaseHostSlot`) or after HOST_RESERVATION_TTL_MS. Returns null when there is no user or the session no longer
-   * belongs to them.
+   * (`releaseHostSlot`) or after HOST_RESERVATION_TTL_MS. With `newParties`, a new party also counts against that many
+   * started per PARTY_STARTS_WINDOW_MS (restoring one doesn't). Returns null when there is no user or the session no
+   * longer belongs to them.
    */
-  startHosting(limit: number, session: Session, request?: { key: string; id: string; slug: string; detail?: string }): HostingStart | null {
+  startHosting(
+    limit: number,
+    session: Session,
+    request?: { key: string; id: string; slug: string; detail?: string },
+    newParties?: number,
+  ): HostingStart | null {
     const user = this.get();
     if (!sessionMatches(user, session)) {
       return null;
@@ -381,7 +393,15 @@ export class UserDO extends DurableObject<Env> {
       return { ...user!, openHostedParties: open + held, allowed: true, request: { id: repeated.party_id, slug: repeated.slug } };
     }
     if (open + held >= limit) {
-      return { ...user!, openHostedParties: open + held, allowed: false };
+      return { ...user!, openHostedParties: open + held, allowed: false, limit: 'open' };
+    }
+    if (newParties !== undefined) {
+      // Deleting a party frees its slot at once, so the open-party limit alone doesn't bound how many get made.
+      this.sql.exec('DELETE FROM party_starts WHERE at <= ?', now - PARTY_STARTS_WINDOW_MS);
+      if (this.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM party_starts').one().n >= newParties) {
+        return { ...user!, openHostedParties: open + held, allowed: false, limit: 'new' };
+      }
+      this.sql.exec('INSERT INTO party_starts (at) VALUES (?)', now);
     }
     const reservation = newObjectId();
     this.sql.exec('INSERT INTO host_reservations (id, expires_at) VALUES (?, ?)', reservation, now + HOST_RESERVATION_TTL_MS);

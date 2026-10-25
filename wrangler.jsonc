@@ -86,6 +86,8 @@
       },
       "previews": {
         "vars": {
+          // Previews are public, so they email only these (comma-separated addresses and @domains). Add yours to test.
+          "EMAIL_ALLOWLIST": "@uglyunicorn.ca,@gnomik.me",
           "FRONTEND_URL": "http://localhost:4321",
           "ALLOWED_ORIGINS": "https://gnomik.me,https://*.gnomik-me.pages.dev,http://localhost:4321,http://localhost:4322,http://localhost:4323"
         },

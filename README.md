@@ -66,14 +66,17 @@ JSON in, JSON out. A signed-in request sends `Authorization: Bearer <session tok
 | What | Limit | Where |
 |---|---|---|
 | Party codes | 8 letters (about 2·10^11); older parties keep 5-letter codes | `src/api/schemas.ts` |
-| Party lookups per IP | 60 a minute; 10 a minute for 5-letter codes (also joins and sign-in links to them) | `PARTY_LOOKUP_RATE_LIMIT_IP`, `LEGACY_CODE_LOOKUP_RATE_LIMIT_IP` |
+| Party codes tried per IP | 60 a minute; 10 a minute for 5-letter codes. Every route that takes a code counts (lookups and all party writes), since each one tells whether the party exists; so do sign-in links to 5-letter codes | `PARTY_LOOKUP_RATE_LIMIT_IP`, `LEGACY_CODE_LOOKUP_RATE_LIMIT_IP` |
 | Joins per user | 10 a minute | `JOIN_RATE_LIMIT_USER` |
 | Wrong secret phrases | 5 per person and 20 per party in 15 minutes; the right phrase always gets in | `src/do/PartyDO.ts` |
 | Emails | 10 a minute per IP, 3 a minute per address, and exactly 6 an hour per address | `ENTER_RATE_LIMIT_*`, `src/api/rateLimit.ts` |
 | Open parties per host | 3 | `src/api/routes/parties.ts` |
+| New parties per person | 10 a day, deleted ones included (restoring one doesn't count) | `MAX_NEW_PARTIES_PER_DAY`, counted by `UserDO` |
 | Request body | 16 KB | `src/api/limits.ts` |
 
-Cloudflare's rate limits are counted per location and approximately; the phrase and per-address email limits are counted exactly by the Durable Objects. The hourly email cap is a trade-off: someone who knows an address can use up its emails, but only for an hour.
+Cloudflare's rate limits are counted per location and approximately; the phrase, new-party and per-address email limits are counted exactly by the Durable Objects. The hourly email cap is a trade-off: someone who knows an address can use up its emails, but only for an hour.
+
+**The draw** is uniformly random over every way to give everyone one target other than themselves (`src/utils/santaShuffle.ts`, with a cryptographic random source), so nobody can guess who drew whom better than by chance.
 
 **Privacy in logs.** Logs and traces never carry emails, names or party codes. They refer to a party by `party.ref`, a 12-hex-digit HMAC of its code keyed from `JWT_PRIVATE_KEY` (`src/utils/logRef.ts`), so a party's requests can be followed but its code can't be recovered.
 
@@ -101,7 +104,7 @@ To try the web app against a local API, run `npx wrangler dev --env preview` her
 
 ## Deployment
 
-- **Pull requests** (`.github/workflows/preview.yml`): CI, then a [Worker Preview](https://developers.cloudflare.com/workers/previews/) `pr-<number>` of the `gnomik-api-preview` Worker at `https://pr-<number>-gnomik-api-preview.uglyunicorn.workers.dev`, with its own empty storage, smoke-tested and linked on the PR. It is deleted when the PR closes. Previews take their settings from the `previews` block of `env.preview` in `wrangler.jsonc`.
+- **Pull requests** (`.github/workflows/preview.yml`): CI, then a [Worker Preview](https://developers.cloudflare.com/workers/previews/) `pr-<number>` of the `gnomik-api-preview` Worker at `https://pr-<number>-gnomik-api-preview.uglyunicorn.workers.dev`, with its own empty storage, smoke-tested and linked on the PR. It is deleted when the PR closes. Previews take their settings from the `previews` block of `env.preview` in `wrangler.jsonc`. Previews are public, so they only email the addresses in `EMAIL_ALLOWLIST` there (addresses and `@domains`); add yours to test with real email.
 - **Merges to `main`** (`.github/workflows/deploy.yml`): CI, then production at `https://api.gnomik.me`, smoke-tested.
 - Third-party actions are pinned to commit SHAs; Dependabot proposes updates weekly. `package.json` `overrides` pins `undici` and `zod` (from the Cloudflare toolchain) past known advisories; drop them once the toolchain depends on fixed versions.
 

@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest';
 
 import { MAX_BODY_BYTES, MAX_NAME_LENGTH } from 'src/api/limits';
 import { PARTY_CODE_RE } from 'src/api/schemas';
+import { MAX_NEW_PARTIES_PER_DAY, MAX_OPEN_HOSTED_PARTIES } from 'src/api/routes/parties';
 import { MAX_PARTY_PHRASE_GUESSES, MAX_PHRASE_GUESSES, PHRASE_GUESS_WINDOW_MS } from 'src/do/PartyDO';
+import { PARTY_STARTS_WINDOW_MS } from 'src/do/UserDO';
 
 import { denied, request, signIn, testEnv, uniqueEmail } from './helpers';
 
@@ -148,5 +150,66 @@ describe('old 5-letter party codes', () => {
     expect(await request('POST', '/v1/auth/magic-link', { body: { email: uniqueEmail(), party: 'QWERT' }, env: legacy })).toMatchObject({ status: 429, body: { error: { field: 'party' } } });
     expect((await request('GET', `/v1/parties?code=${code}`, { env: legacy })).status).toBe(200);
     expect((await join(guest.token, code, undefined, legacy)).status).toBe(200);
+  });
+});
+
+describe('party codes in writes', () => {
+  const write = (token: string, action: string, code: string, e: typeof env) =>
+    request('POST', `/v1/parties/${action}`, { token, body: { code, ...(action === 'join' ? { name: 'Guest' } : {}) }, env: e });
+
+  it('count against the per-client lookup limit on every route that takes one', async () => {
+    const host = await signIn();
+    const { code } = await create(host.token);
+    const limited = testEnv({ PARTY_LOOKUP_RATE_LIMIT_IP: denied });
+    for (const action of ['join', 'leave', 'draw', 'delete', 'restore']) {
+      expect([action, await write(host.token, action, code, limited)]).toMatchObject([action, {
+        status: 429, body: { error: { code: 'rate_limited', field: 'party', message: 'Too many party lookups. Please wait a minute and try again.' } },
+      }]);
+    }
+    // Nothing happened: the party is still open, with its host.
+    expect((await request('GET', `/v1/parties?code=${code}`, { token: host.token })).body).toMatchObject({ isHost: true, deletedAt: null, isClosed: false });
+  });
+
+  it('count old 5-letter codes against the stricter limit too', async () => {
+    const user = await signIn();
+    const strict = testEnv({ LEGACY_CODE_LOOKUP_RATE_LIMIT_IP: denied });
+    for (const action of ['join', 'leave', 'draw', 'delete', 'restore']) {
+      expect([action, (await write(user.token, action, 'QWERT', strict)).status]).toEqual([action, 429]);
+    }
+    expect((await write(user.token, 'leave', 'QWERTYUI', strict)).status).toBe(404);
+  });
+});
+
+describe('starting parties', () => {
+  const remove = (token: string, code: string) => request('POST', '/v1/parties/delete', { token, body: { code } });
+
+  it(`allows ${MAX_NEW_PARTIES_PER_DAY} a day per person, deleted ones included; repeats and restores don't count`, async () => {
+    const host = await signIn();
+    const key = crypto.randomUUID();
+    const first = await request('POST', '/v1/parties', { token: host.token, key, body: { name: 'Again' } });
+    expect((await request('POST', '/v1/parties', { token: host.token, key, body: { name: 'Again' } })).body.code).toBe(first.body.code);
+    await remove(host.token, first.body.code);
+    for (let i = 1; i < MAX_NEW_PARTIES_PER_DAY; i++) {
+      const { code } = await create(host.token);
+      await remove(host.token, code);
+    }
+    expect(await request('POST', '/v1/parties', { token: host.token, body: { name: 'One too many' } })).toMatchObject({
+      status: 429, body: { error: { code: 'rate_limited', message: "You've started a lot of parties today. Please try again tomorrow." } },
+    });
+    // Restoring a deleted party isn't starting a new one.
+    expect((await request('POST', '/v1/parties/restore', { token: host.token, body: { code: first.body.code } })).status).toBe(200);
+
+    await runInDurableObject(env.USER.getByName(host.email), async (_i, state) => {
+      state.storage.sql.exec('UPDATE party_starts SET at = at - ?', PARTY_STARTS_WINDOW_MS);
+    });
+    expect((await request('POST', '/v1/parties', { token: host.token, body: { name: 'Next day' } })).status).toBe(201);
+  });
+
+  it('reports the open-party limit first when both apply', async () => {
+    const host = await signIn();
+    for (let i = 0; i < MAX_OPEN_HOSTED_PARTIES; i++) {
+      await create(host.token);
+    }
+    expect(await request('POST', '/v1/parties', { token: host.token, body: { name: 'Fourth' } })).toMatchObject({ status: 409, body: { error: { code: 'conflict' } } });
   });
 });

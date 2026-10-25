@@ -2,6 +2,7 @@ import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
 
 import { EMAILS_PER_ADDRESS_PER_HOUR } from 'src/api/rateLimit';
+import { isPermanentMailError, recipientAllowed } from 'src/mail';
 import { MAIL_QUOTA_WINDOW_MS } from 'src/do/UserDO';
 
 import { denied, mailer, request, signIn, testEnv, uniqueEmail } from './helpers';
@@ -107,5 +108,26 @@ describe('the per-address email cap', () => {
     const taken = await signIn();
     expect((await ask(taken.email, key())).status).toBe(202);
     expect(await counted(taken.email)).toBe(1);
+  });
+});
+
+describe('the email allowlist (PR previews)', () => {
+  it('matches whole addresses and @domains, in any case; no list means anyone', () => {
+    const list = ' tester@Example.com , @Team.test ,';
+    expect(recipientAllowed(undefined, 'anyone@example.org')).toBe(true);
+    expect(['tester@example.com', 'TESTER@example.com', 'a@team.test', 'b@TEAM.TEST'].map(to => recipientAllowed(list, to))).toEqual([true, true, true, true]);
+    expect(['other@example.com', 'a@team.test.evil.example', 'a@notteam.test', 'tester@example.com.evil'].map(to => recipientAllowed(list, to))).toEqual([false, false, false, false]);
+    expect(recipientAllowed('', 'tester@example.com')).toBe(false);
+  });
+
+  it("sends nothing to anyone else, and the outbox doesn't retry it", async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { sent, EMAIL } = mailer();
+    const preview = testEnv({ EMAIL, EMAIL_ALLOWLIST: '@allowed.test' });
+    expect((await request('POST', '/v1/auth/magic-link', { body: { email: uniqueEmail() }, env: preview })).status).toBe(503);
+    expect((await request('POST', '/v1/auth/magic-link', { body: { email: `ok-${crypto.randomUUID().slice(0, 8)}@allowed.test` }, env: preview })).status).toBe(202);
+    expect(sent.map(m => m.to.split('@')[1])).toEqual(['allowed.test']);
+    expect(isPermanentMailError(Object.assign(new Error('x'), { code: 'E_RECIPIENT_NOT_ALLOWED' }))).toBe(true);
+    error.mockRestore();
   });
 });

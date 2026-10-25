@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import * as v from 'valibot';
 
 import { action } from 'src/api/action';
 import { ApiContext, ApiEnv, RequestSession, clientIp } from 'src/api/context';
@@ -17,6 +18,9 @@ const SLUG_ATTEMPTS = 10;
 
 /** How many open (not closed) parties one person can host at a time. */
 export const MAX_OPEN_HOSTED_PARTIES = 3;
+
+/** How many parties one person can start per day (`PARTY_STARTS_WINDOW_MS`), deleted ones included. */
+export const MAX_NEW_PARTIES_PER_DAY = 10;
 
 const tooManyOpenParties = (action: string) =>
   fail('conflict', `You can host up to ${MAX_OPEN_HOSTED_PARTIES} open parties at a time. Close or delete one of them to ${action}.`);
@@ -41,12 +45,24 @@ function anonymousView(view: PartyView): PartyView | null {
 
 const session = (c: ApiContext): RequestSession => c.get('session')!;
 
-/** Party codes are how a party without a secret phrase is reached, so looking them up is limited per client. */
-async function admitLookup(c: ApiContext) {
+/**
+ * Party codes are how a party without a secret phrase is reached, and any route that takes one tells whether it
+ * exists. So every one of them is limited per client: 60 codes a minute, 10 for old 5-letter codes.
+ */
+async function admitCode(c: ApiContext, code: string) {
+  annotate({ 'party.ref': await partyRef(c.env, code) });
   const { success } = await c.env.PARTY_LOOKUP_RATE_LIMIT_IP.limit({ key: clientIp(c) });
   if (!success) {
-    throw fail('rate_limited', 'Too many party lookups. Please wait a minute and try again.');
+    throw fail('rate_limited', 'Too many party lookups. Please wait a minute and try again.', 'party');
   }
+  await admitLegacyCode(c.env, clientIp(c), code, 'party');
+}
+
+/** A party write's body, after the code passed `admitCode`. */
+async function readPartyWrite<S extends typeof bodies.partyAction | typeof bodies.joinParty>(c: ApiContext, schema: S) {
+  const body = await readBody(c, schema);
+  await admitCode(c, body.code);
+  return body as v.InferOutput<S>;
 }
 
 /** The session, proven to still belong to its user (one UserDO call), for routes whose party call can't check it. */
@@ -66,9 +82,7 @@ export const parties = new Hono<ApiEnv>();
  */
 parties.get('/', optionalSession, action('party', async (c, span) => {
   const code = readPartyCode(c);
-  annotate({ 'party.ref': await partyRef(c.env, code) });
-  await admitLookup(c);
-  await admitLegacyCode(c.env, clientIp(c), code);
+  await admitCode(c, code);
   const s = c.get('session');
   const stub = c.env.PARTY.getByName(code);
   const [view, user] = await Promise.all([stub.view(s?.userId), s ? s.verify() : null]);
@@ -92,13 +106,18 @@ parties.post('/', requireSession, action('createParty', async c => {
   const userDO = c.env.USER.getByName(s.email);
   let id = newObjectId();
   let slug = randomString(PARTY_CODE_LENGTH, PARTY_CODE_ALPHABET);
-  const user = await userDO.startHosting(MAX_OPEN_HOSTED_PARTIES, s, key ? { key, id, slug, detail: input.name } : undefined);
+  const user = await userDO.startHosting(
+    MAX_OPEN_HOSTED_PARTIES, s, key ? { key, id, slug, detail: input.name } : undefined, MAX_NEW_PARTIES_PER_DAY,
+  );
   if (!user) {
     throw notLoggedIn('creating');
   }
   annotate({ 'user.open_hosted_parties': user.openHostedParties });
   if (!user.allowed) {
-    throw tooManyOpenParties('start a new one');
+    annotate({ 'party.limit': user.limit });
+    throw user.limit === 'new'
+      ? fail('rate_limited', "You've started a lot of parties today. Please try again tomorrow.")
+      : tooManyOpenParties('start a new one');
   }
   if (user.request) {
     ({ id, slug } = user.request);
@@ -140,16 +159,14 @@ parties.post('/', requireSession, action('createParty', async c => {
  * in the call it makes to the user anyway. Joining twice keeps one membership.
  */
 parties.post('/join', requireSession, action('joinParty', async c => {
-  const { code, name, password } = await readBody(c, bodies.joinParty);
+  const { code, name, password } = await readPartyWrite(c, bodies.joinParty);
   const s = session(c);
-  annotate({ 'party.ref': await partyRef(c.env, code) });
-  // Joining with a code is how a party without a secret phrase is reached, so attempts are limited per user.
+  // Joining is also limited per user, so trying codes from many addresses doesn't get around it.
   const { success } = await c.env.JOIN_RATE_LIMIT_USER.limit({ key: s.userId });
   annotate({ 'party.join_rate_limited': !success });
   if (!success) {
     throw fail('rate_limited', "Whoa, that's a lot of tries! Please wait a minute and try again.", 'party');
   }
-  await admitLegacyCode(c.env, clientIp(c), code, 'party');
   return sendParty(c, await c.env.PARTY.getByName(code).join(
     { id: s.userId, email: s.email, name },
     name,
@@ -160,24 +177,21 @@ parties.post('/join', requireSession, action('joinParty', async c => {
 
 /** Leaves a party. Leaving one you're not in answers with the party as it is. */
 parties.post('/leave', requireSession, action('leaveParty', async c => {
-  const { code } = await readBody(c, bodies.partyAction);
-  annotate({ 'party.ref': await partyRef(c.env, code) });
+  const { code } = await readPartyWrite(c, bodies.partyAction);
   const user = await verified(c);
   return sendParty(c, await c.env.PARTY.getByName(code).leave(user.id));
 }));
 
 /** Rolls the dice (host only). A repeat answers with the same draw; nothing is drawn or mailed again. */
 parties.post('/draw', requireSession, action('closeParty', async c => {
-  const { code } = await readBody(c, bodies.partyAction);
-  annotate({ 'party.ref': await partyRef(c.env, code) });
+  const { code } = await readPartyWrite(c, bodies.partyAction);
   const user = await verified(c);
   return sendParty(c, await c.env.PARTY.getByName(code).close(user.id));
 }));
 
 /** Deletes an open party (host only); it can be restored for a day. A repeat answers with the deleted party. */
 parties.post('/delete', requireSession, action('deleteParty', async c => {
-  const { code } = await readBody(c, bodies.partyAction);
-  annotate({ 'party.ref': await partyRef(c.env, code) });
+  const { code } = await readPartyWrite(c, bodies.partyAction);
   const user = await verified(c);
   return sendParty(c, await c.env.PARTY.getByName(code).delete(user.id));
 }));
@@ -188,8 +202,7 @@ parties.post('/delete', requireSession, action('deleteParty', async c => {
  * party as it is, holding no slot.
  */
 parties.post('/restore', requireSession, action('restoreParty', async c => {
-  const { code } = await readBody(c, bodies.partyAction);
-  annotate({ 'party.ref': await partyRef(c.env, code) });
+  const { code } = await readPartyWrite(c, bodies.partyAction);
   const s = session(c);
   const stub = c.env.PARTY.getByName(code);
   const view = await stub.view(s.userId);
