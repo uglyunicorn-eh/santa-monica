@@ -10,14 +10,16 @@ import { listParties } from 'src/api/party';
 import { ADDRESS_QUOTA, NOTICE_QUOTA, emailRateLimit, tooManyForAddress } from 'src/api/rateLimit';
 import { requireSession } from 'src/api/session';
 import { accepted, bodies, partyPage, queries, session as sessionJson, tokens, user as userJson } from 'src/api/schemas';
-import { AccountDeletionToken, EmailChangeToken } from 'src/api/types';
+import { AccountDeletionToken, EmailChangeCancelToken, EmailChangeToken } from 'src/api/types';
 import { issueSession, sendCourtesyMail, sendRequestedMail } from 'src/api/users';
 import type { MailQuota } from 'src/do/UserDO';
 import { UserRecord } from 'src/do/types';
-import { renderAccountDeletion, renderEmailChange, renderEmailChangeNotice } from 'src/mail';
+import { renderAccountDeletion, renderEmailChange, renderEmailChangeNotice, renderEmailTakenNotice } from 'src/mail';
 import { canonicalEmail } from 'src/utils/email';
 import { nodeIdToStr } from 'src/utils/strings/nodeId';
 import { annotate } from 'src/utils/tracing';
+
+import { from } from 'src/config.json';
 
 /** Account links (deletion, email change) work for an hour. */
 const LINK_TTL = 60 * 60;
@@ -104,14 +106,18 @@ me.post('/deletion', requireSession, action('requestAccountDeletion', async c =>
       throw tooManyEmails();
     }
     const token = await jwtFor(env).issueToken<AccountDeletionToken>('AccountDeletion', {
-      sub: nodeIdToStr({ kind: 'User', id: user.id }), email: user.email, jti: crypto.randomUUID(),
+      sub: nodeIdToStr({ kind: 'User', id: user.id }), email: user.email, jti: crypto.randomUUID(), ver: user.tokenVersion,
     }, { ttl: LINK_TTL });
     const message = renderAccountDeletion({ url: `${env.FRONTEND_URL}/profile/delete/${token}`, assetsUrl: env.PUBLIC_URL });
     await sendRequestedMail(env, user.email, message, undefined);
   });
 }));
 
-/** Emails a link to the new address that moves the account there, and a notice to the current one. */
+/**
+ * Emails a link to the new address that moves the account there, and a notice to the current one with a link that
+ * cancels it ("This wasn't me"). When the new address already has an account, it gets a notice instead of the link,
+ * and the answer is the same as for a free address, so this can't be used to find out which addresses have accounts.
+ */
 me.post('/email-change', requireSession, action('requestEmailChange', async c => {
   const { email: newEmail, typed } = await readBody(c, bodies.emailChange);
   const { env } = c;
@@ -130,19 +136,30 @@ me.post('/email-change', requireSession, action('requestEmailChange', async c =>
     if (rateLimited) {
       throw tooManyEmails();
     }
-    if (recipient === 'taken' || takenAsTyped) {
-      throw emailTaken('email');
-    }
     annotate({ 'mail.capped': recipient === 'capped' });
     if (recipient === 'capped') {
       throw tooManyForAddress('email');
     }
-    const token = await jwtFor(env).issueToken<EmailChangeToken>('EmailChange', {
-      sub: nodeIdToStr({ kind: 'User', id: user.id }), email: user.email, newEmail, jti: crypto.randomUUID(),
-    }, { ttl: LINK_TTL });
-    const link = renderEmailChange({ url: `${env.FRONTEND_URL}/profile/email/${token}`, oldEmail: user.email, newEmail, assetsUrl: env.PUBLIC_URL });
-    await sendRequestedMail(env, newEmail, link, 'email');
-    await sendCourtesyMail(env, user.email, renderEmailChangeNotice({ oldEmail: user.email, newEmail, assetsUrl: env.PUBLIC_URL }));
+    const taken = recipient === 'taken' || Boolean(takenAsTyped);
+    annotate({ 'account.email_taken': taken });
+    const jwt = jwtFor(env);
+    const sub = nodeIdToStr({ kind: 'User', id: user.id });
+    const jti = crypto.randomUUID();
+    if (taken) {
+      await sendRequestedMail(env, newEmail, renderEmailTakenNotice({ email: newEmail, assetsUrl: env.PUBLIC_URL }), 'email');
+    } else {
+      const token = await jwt.issueToken<EmailChangeToken>('EmailChange', {
+        sub, email: user.email, newEmail, jti, ver: user.tokenVersion,
+      }, { ttl: LINK_TTL });
+      const link = renderEmailChange({ url: `${env.FRONTEND_URL}/profile/email/${token}`, oldEmail: user.email, newEmail, assetsUrl: env.PUBLIC_URL });
+      await sendRequestedMail(env, newEmail, link, 'email');
+    }
+    // Sent the same way in both cases. Cancelling when nothing was sent still signs out everywhere, which is what
+    // someone who didn't ask for the change wants.
+    const cancel = await jwt.issueToken<EmailChangeCancelToken>('EmailChangeCancel', { sub, email: user.email, jti }, { ttl: LINK_TTL });
+    await sendCourtesyMail(env, user.email, renderEmailChangeNotice({
+      oldEmail: user.email, newEmail, cancelUrl: `${env.FRONTEND_URL}/profile/email/cancel/${cancel}`, assetsUrl: env.PUBLIC_URL,
+    }));
   });
 }));
 
@@ -150,7 +167,9 @@ me.post('/email-change', requireSession, action('requestEmailChange', async c =>
  * Verifies an emailed account link: the body's token must carry a valid signature for `type`, and its payload must fit
  * that link's schema. Returns the payload, with `sub` read as the user id. Throws 400 when it isn't valid.
  */
-async function verifyLink<S extends typeof tokens.accountDeletion | typeof tokens.emailChange>(c: ApiContext, type: 'AccountDeletion' | 'EmailChange', schema: S) {
+async function verifyLink<S extends typeof tokens.accountDeletion | typeof tokens.emailChange | typeof tokens.emailChangeCancel>(
+  c: ApiContext, type: 'AccountDeletion' | 'EmailChange' | 'EmailChangeCancel', schema: S,
+) {
   const { token } = await readBody(c, bodies.link);
   let payload: unknown;
   try {
@@ -178,7 +197,7 @@ me.post('/deletion/confirm', action('confirmAccountDeletion', async c => {
   const link = await verifyLink(c, 'AccountDeletion', tokens.accountDeletion);
   const key = await keyHash(idempotencyKey(c));
   const user = c.env.USER.getByName(link.email);
-  const started = await user.startAccountChange(link.userId, link.jti, link.exp * 1000, { key });
+  const started = await user.startAccountChange(link.userId, link.jti, link.exp * 1000, { key, ver: link.ver });
   annotate({ 'account.link': started.ok ? 'started' : started.reason });
   if (!started.ok) {
     if (started.reason === 'repeat') {
@@ -217,7 +236,7 @@ me.post('/email-change/confirm', action('confirmEmailChange', async c => {
   const key = await keyHash(idempotencyKey(c));
   const jwt = jwtFor(env);
   const moved = await moveAccount(env, {
-    userId: link.userId, from: link.email, to: link.newEmail, jti: link.jti, expiresAt: link.exp * 1000, key,
+    userId: link.userId, from: link.email, to: link.newEmail, jti: link.jti, expiresAt: link.exp * 1000, key, ver: link.ver,
   });
   if (moved.ok) {
     annotate({ 'account.link': 'redeemed', 'account.parties': moved.parties });
@@ -237,6 +256,27 @@ me.post('/email-change/confirm', action('confirmEmailChange', async c => {
       throw notFinished();
     default:
       throw linkFailed[moved.reason]();
+  }
+}));
+
+/**
+ * "This wasn't me", from the notice about an email change: the change can no longer be confirmed, and every session
+ * and every other pending account link stops working, so whoever asked for the change is signed out too. The account
+ * keeps its email. One UserDO call. Repeating the request that cancelled (same Idempotency-Key) answers ok again.
+ */
+me.post('/email-change/cancel', action('cancelEmailChange', async c => {
+  const link = await verifyLink(c, 'EmailChangeCancel', tokens.emailChangeCancel);
+  const key = await keyHash(idempotencyKey(c));
+  const cancelled = await c.env.USER.getByName(link.email).cancelAccountChange(link.userId, link.jti, link.exp * 1000, key);
+  annotate({ 'account.link': cancelled });
+  switch (cancelled) {
+    case 'cancelled':
+    case 'repeat':
+      return send(c, accepted, { ok: true });
+    case 'too_late':
+      throw fail('link_used', `The email was already changed. If this wasn't you, write to ${from.email}.`, 'token');
+    default:
+      throw linkFailed[cancelled]();
   }
 }));
 

@@ -5,8 +5,8 @@ import { UserToken } from 'src/api/types';
 import { strToNodeId } from 'src/utils/strings/nodeId';
 
 import {
-  Person, apiError, call, confirmDeletion, confirmEmailChange, createParty, deleteAccount, drawParty, joinParty, jwt,
-  leaveParty, mailbox, me, myParties, newKey, requestDeletion, requestEmailChange, settleParty, signIn,
+  Person, apiError, call, changeEmail, confirmDeletion, confirmEmailChange, createParty, deleteAccount, drawParty, joinParty, jwt,
+  leaveParty, linkToken, mailbox, me, myParties, newKey, requestDeletion, requestEmailChange, settleParty, signIn,
   uniqueEmail, viewParty,
 } from './support';
 
@@ -109,7 +109,7 @@ describe('deleting an account', () => {
     expect((await joinParty(who, open, 'Me')).status).toBe(401);
     expect((await call('POST', '/v1/parties', { token: who.token, body: { name: 'Nope' } })).status).toBe(401);
     expect((await call('POST', '/v1/me/deletion', { token: who.token })).status).toBe(401);
-    const token = await jwt().issueToken('AccountDeletion', { sub: who.id, email: who.email, jti: crypto.randomUUID() }, { ttl: 60 });
+    const token = await jwt().issueToken('AccountDeletion', { sub: who.id, email: who.email, jti: crypto.randomUUID(), ver: 0 }, { ttl: 60 });
     expect(await confirmDeletion(token)).toEqual({
       status: 409, body: apiError('account_busy', 'Another change to this account is in progress. Please try again in a minute.', 'token'),
     });
@@ -150,7 +150,9 @@ describe('changing the email', () => {
     const token = await requestEmailChange(who, newEmail);
     const notice = (await mailbox(who.email)).at(-1)!;
     expect(notice.text).toContain(newEmail);
-    expect(notice.text).not.toMatch(/profile\/email/);
+    // The notice has only the link that cancels the change, never the one that confirms it.
+    expect(notice.text).not.toMatch(/profile\/email\/(?!cancel\/)/);
+    expect(linkToken(notice, 'profile/email/cancel')).toBeTruthy();
 
     const res = await confirmEmailChange(token);
     expect(res).toMatchObject({ status: 200, body: { user: { id: who.id, name: 'Moroz', email: newEmail } } });
@@ -242,12 +244,15 @@ describe('changing the email', () => {
     expect((await myParties({ token: userToken })).body.items).toEqual([]);
   });
 
-  it('rejects a new address that is already taken, when asked and when confirming', async () => {
+  it("doesn't tell whether an address is taken when asked, and refuses a taken one when confirming", async () => {
     const who = await person('me');
     const taken = await person('taken');
-    expect(await call('POST', '/v1/me/email-change', { token: who.token, body: { email: taken.email } })).toEqual({
-      status: 409, body: apiError('conflict', 'This email is already used by another account.', 'email'),
-    });
+    const before = (await mailbox(taken.email)).length;
+    expect(await call('POST', '/v1/me/email-change', { token: who.token, body: { email: taken.email } })).toEqual({ status: 202, body: { ok: true } });
+    const notice = (await mailbox(taken.email)).slice(before);
+    expect(notice.map(m => m.subject)).toEqual(['Someone tried to use your email on Anonymous Ded Morozes']);
+    expect(notice[0].text).not.toMatch(/https?:/);
+    expect(await me(taken)).toMatchObject({ status: 200, body: { email: taken.email } });
 
     const later = uniqueEmail('later');
     const token = await requestEmailChange(who, later);
@@ -290,4 +295,34 @@ describe('changing the email', () => {
     }
   });
 
+});
+
+describe('"This wasn\'t me" on an email change', () => {
+  it('stops the change, signs out everywhere, and the email stays', async () => {
+    const who = await person('me');
+    const other = await call('POST', '/v1/me/email-change', { token: who.token, body: { email: uniqueEmail('other') } });
+    expect(other.status).toBe(202);
+    const pending = await requestEmailChange(who, uniqueEmail('new'));
+    const cancelLink = linkToken((await mailbox(who.email)).at(-1)!, 'profile/email/cancel');
+    const key = newKey();
+
+    expect(await call('POST', '/v1/me/email-change/cancel', { key, body: { token: cancelLink } })).toEqual({ status: 200, body: { ok: true } });
+    expect(await call('POST', '/v1/me/email-change/cancel', { key, body: { token: cancelLink } })).toEqual({ status: 200, body: { ok: true } });
+    expect((await confirmEmailChange(pending)).status).toBe(409);
+    expect((await me(who)).status).toBe(401);
+
+    // The owner signs in again with the same address and finds the same account.
+    const again = await signIn(who.email);
+    expect(again.id).toBe(who.id);
+    expect(await me(again)).toMatchObject({ status: 200, body: { email: who.email } });
+  });
+
+  it('is too late once the change was confirmed', async () => {
+    const who = await person('me');
+    await changeEmail(who, uniqueEmail('moved'));
+    const cancelLink = linkToken((await mailbox(who.email)).at(-1)!, 'profile/email/cancel');
+    expect(await call('POST', '/v1/me/email-change/cancel', { body: { token: cancelLink } })).toEqual({
+      status: 409, body: apiError('link_used', "The email was already changed. If this wasn't you, write to info@gnomik.me.", 'token'),
+    });
+  });
 });

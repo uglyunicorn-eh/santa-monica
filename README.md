@@ -22,8 +22,9 @@ Plain JSON routes under `/v1` (`src/api/`). A signed-in request sends `Authoriza
 | `GET /v1/me` | yes | The signed-in user |
 | `PATCH /v1/me` `{name}` | yes | Sets the profile name |
 | `GET /v1/me/parties?first&after` | yes | My parties, newest first: `{items, hasMore, endCursor}` (`first` 1–100, default 10) |
-| `POST /v1/me/email-change` `{email}` | yes | Emails a link to the new address, and a notice to the current one (202) |
+| `POST /v1/me/email-change` `{email}` | yes | Emails a link to the new address (or, when it has an account, a notice without a link), and a notice with a cancel link to the current one (202) |
 | `POST /v1/me/email-change/confirm` `{token}` | link | Moves the account: `{userToken, user}` |
+| `POST /v1/me/email-change/cancel` `{token}` | link | "This wasn't me": stops the change and signs out everywhere |
 | `POST /v1/me/deletion` | yes | Emails a link that deletes the account (202) |
 | `POST /v1/me/deletion/confirm` `{token}` | link | Deletes the account |
 | `GET /v1/parties/:code` | optional | A party, as this person sees it |
@@ -43,7 +44,7 @@ Plain JSON routes under `/v1` (`src/api/`). A signed-in request sends `Authoriza
 
 Accounts are keyed by the normalized address (`canonicalEmail` in `src/utils/email.ts`): trimmed and lowercased, and for Gmail also without dots or a `+tag` before the `@`, with `googlemail.com` read as `gmail.com`. Gmail delivers every such spelling to the same mailbox, so `John.Doe+santa@googlemail.com` and `johndoe@gmail.com` are one account, share one per-address rate limit, and get their mail at `johndoe@gmail.com`. Other providers' addresses are only lowercased.
 
-Accounts made before this are kept under the address as typed (lowercased), and the `UserDO`s can't be listed to move them up front. So they move on their owner's next sign-in: when the normalized address has no account and the typed one does, the account moves over the same way an email change moves it (`adoptTypedAccount` in `src/api/account.ts`), parties and all, and older session tokens stop working. Asking to change to an address whose account is still kept under the typed spelling answers that the address is taken.
+Accounts made before this are kept under the address as typed (lowercased), and the `UserDO`s can't be listed to move them up front. So they move on their owner's next sign-in: when the normalized address has no account and the typed one does, the account moves over the same way an email change moves it (`adoptTypedAccount` in `src/api/account.ts`), parties and all, and older session tokens stop working. Asking to change to an address whose account is still kept under the typed spelling treats it as taken.
 
 ### Idempotency
 
@@ -86,6 +87,7 @@ The host can delete a party until its dice are rolled: it leaves every member's 
 | `POST /v1/me/email-change` | 2, or 3 for a Gmail address typed differently from its normalized form | 0 |
 | `POST /v1/me/deletion/confirm` | 2 | 1 per party |
 | `POST /v1/me/email-change/confirm` | 4 | 1 per party |
+| `POST /v1/me/email-change/cancel` | 1 | 0 |
 | `GET /v1/parties/:code` | 0 anonymous, 1 signed in (in parallel) | 1 |
 | `POST /v1/parties` | 1 | 1 |
 | `POST /v1/parties/:code/join` | 0 (the party checks the session itself) | 1 |
@@ -148,6 +150,9 @@ Deleting an account and changing its email go through a link mailed to the user 
 - **Deleting** (`POST /v1/me/deletion` → `<FRONTEND_URL>/profile/delete/<token>` → `POST /v1/me/deletion/confirm`): every party on the user's list is told once (`PartyDO.forgetMember`). An open party they host is erased at once, whoever joined (even one they had deleted): it is gone right away, its code is never handed out again, and its members' lists are updated through the outbox. Open parties they joined are left. In drawn parties their membership is anonymized (new id, no email; the names stay so the draw still works). Then the `UserDO` is tombstoned.
 - **While either runs**, the account is held (up to a minute): it reads as missing, can't join or create parties, and can't start another change. If a party can't be reached, what can be undone is undone and the link works again.
 - **Changing the email** (`POST /v1/me/email-change` → `<FRONTEND_URL>/profile/email/<token>` to the new address, plus a notice to the old one → `POST /v1/me/email-change/confirm`): open parties move the membership and their queued updates to the new email (`PartyDO.changeMemberEmail`). Then the account is copied to the new address's `UserDO` (same id, token version + 1) and the old one is tombstoned. Drawn parties keep the old email; the user still sees them, since membership goes by user id. The confirm returns a session token for the new address.
+  - **An address that already has an account** isn't revealed: the request answers 202 as for any address, and that address gets a notice without a link ("Someone tried to move another account to this address…"). Both notices count against the per-address email cap.
+  - **"This wasn't me"**: the notice to the current address links to `<FRONTEND_URL>/profile/email/cancel/<token>` (an `EmailChangeCancel` token, an hour). `POST /v1/me/email-change/cancel` uses up the change link and bumps the account's token version (`UserDO.cancelAccountChange`), which signs out every session. Too late once the change was confirmed.
+  - **Account links carry the token version** (`ver`) they were issued for, and work only while it still matches. So cancelling voids every pending email-change and deletion link at once, not just the one it names: someone with a stolen session may have asked for several.
 
 Magic-link and session tokens are ES256 JWTs (issuer `api.gnomik.me`) signed with `JWT_PRIVATE_KEY`, a P-256 private key in PKCS#8 PEM (real or escaped `\n` line breaks). The frontend ([santa-barbara](https://github.com/uglyunicorn-eh/santa-barbara)) verifies them in the browser with the matching public key, `publicKey` in its `src/config.json`, so the two must stay a pair: rotating the key means updating that file too.
 

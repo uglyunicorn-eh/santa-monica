@@ -70,6 +70,9 @@ const CREATE_REQUEST_TTL_MS = 10 * 60 * 1000;
 /** How long a repeated account email request (deletion, email change) with the same request id sends nothing again. */
 const MAIL_REQUEST_TTL_MS = 10 * 60 * 1000;
 
+/** How a cancelled email-change link is recorded in `used_magic_links.outcome`. */
+const CANCELLED = '!cancelled';
+
 /** The per-address email cap counts the emails sent to an address over this rolling window. */
 export const MAIL_QUOTA_WINDOW_MS = 60 * 60 * 1000;
 
@@ -204,11 +207,12 @@ export class UserDO extends DurableObject<Env> {
    * account (`userId`) and not used yet, marks it used, and returns the user with the slugs of all their parties.
    * Until the change finishes (the account is tombstoned), is aborted, or a minute passes, the account is held: it
    * reads as missing, refuses joins and profile changes, and no other change can start, so the party list can't
-   * change under the one running.
+   * change under the one running. With `ver`, the link works only while the account's token version is still that
+   * (`'stale'` otherwise): a version bump, such as cancelling an email change, voids every link issued before it.
    */
-  startAccountChange(userId: string, jti: string, expiresAt: number, request?: { key?: string; outcome?: string }):
+  startAccountChange(userId: string, jti: string, expiresAt: number, request?: { key?: string; outcome?: string; ver?: number }):
     | { ok: true; user: UserRecord; parties: string[] }
-    | { ok: false; reason: 'gone' | 'used' | 'busy' }
+    | { ok: false; reason: 'gone' | 'used' | 'busy' | 'stale' }
     | { ok: false; reason: 'repeat'; outcome: string | null } {
     // A used link is reported as used even when the change it made left this account a tombstone, unless this is a
     // repeat of the request that used it.
@@ -222,6 +226,9 @@ export class UserDO extends DurableObject<Env> {
     if (!row || row.deleted_at !== null || row.id !== userId) {
       return { ok: false, reason: 'gone' };
     }
+    if (request?.ver !== undefined && request.ver !== row.token_version) {
+      return { ok: false, reason: 'stale' };
+    }
     if (isChanging(row)) {
       return { ok: false, reason: 'busy' };
     }
@@ -232,6 +239,40 @@ export class UserDO extends DurableObject<Env> {
     this.sql.exec('UPDATE user SET changing_until = ?', Date.now() + ACCOUNT_CHANGE_MS);
     const parties = this.sql.exec<{ slug: string }>('SELECT slug FROM parties').toArray().map(r => r.slug);
     return { ok: true, user: toRecord(row), parties };
+  }
+
+  /**
+   * "This wasn't me" from the notice about an email change: uses up the change link (`jti`) so it can't be confirmed,
+   * and bumps the token version, which signs out every session and voids every other pending account link. Answers
+   * `'too_late'` when the change link was already used to move the account, `'busy'` while a change is running, and
+   * `'repeat'` for a repeat of the request that cancelled (same `requestKey`); another use of a used cancel link is
+   * `'used'`.
+   */
+  cancelAccountChange(userId: string, jti: string, expiresAt: number, requestKey?: string): 'cancelled' | 'repeat' | 'used' | 'too_late' | 'gone' | 'busy' {
+    const used = this.usedLink(jti);
+    if (used) {
+      if (used.outcome !== CANCELLED) {
+        // The change link was used: it is moving the account right now, or has moved it (the account here is gone).
+        const row = this.row();
+        return row && row.deleted_at === null && isChanging(row) ? 'busy' : 'too_late';
+      }
+      return requestKey && used.request_key === requestKey ? 'repeat' : 'used';
+    }
+    const row = this.row();
+    if (!row || row.deleted_at !== null || row.id !== userId) {
+      return 'gone';
+    }
+    if (isChanging(row)) {
+      return 'busy';
+    }
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec(
+        'INSERT INTO used_magic_links (jti, expires_at, request_key, outcome) VALUES (?, ?, ?, ?)',
+        jti, expiresAt, requestKey ?? null, CANCELLED,
+      );
+      this.sql.exec('UPDATE user SET token_version = token_version + 1');
+    });
+    return 'cancelled';
   }
 
   /** Releases an account change that could not finish, and the link that started it, so the link can be tried again. */
@@ -432,14 +473,14 @@ export class UserDO extends DurableObject<Env> {
   }
 
   /**
-   * Checks this address can receive an email-change link: `'taken'` when an account uses it, `'capped'` when it has
-   * had too many emails, otherwise counts the link and answers `'ok'`.
+   * Counts an email about an email change to this address: `'capped'`, counting nothing, when it has had too many
+   * emails; otherwise `'taken'` when an account uses it (it gets a notice instead of the link), or `'ok'`.
    */
   checkRecipient(quota: MailQuota): 'ok' | 'taken' | 'capped' {
-    if (this.get()) {
-      return 'taken';
+    if (!this.takeMailQuota(quota, null)) {
+      return 'capped';
     }
-    return this.takeMailQuota(quota, null) ? 'ok' : 'capped';
+    return this.get() ? 'taken' : 'ok';
   }
 
   /**

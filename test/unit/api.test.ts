@@ -9,7 +9,7 @@ import { bodies, encodeCursor, headers, params, party as partyJson, partyPage, q
 import { authenticate } from 'src/api/session';
 import { EnterRequestToken, UserToken } from 'src/api/types';
 import { PartyDO } from 'src/do/PartyDO';
-import { nodeIdToStr } from 'src/utils/strings/nodeId';
+import { nodeIdToStr, strToNodeId } from 'src/utils/strings/nodeId';
 
 import { denied, jwt, mailer, request, sessionToken, signIn, testEnv, uniqueEmail } from './helpers';
 
@@ -201,12 +201,10 @@ describe('POST /v1/me/deletion and /v1/me/email-change', () => {
     error.mockRestore();
   });
 
-  it('refuses the same address, a taken one, a rate limit and a revoked session', async () => {
+  it('refuses the same address, a rate limit and a revoked session', async () => {
     const who = await signIn();
-    const taken = await signIn();
     const ask = (email: string, e?: typeof env) => request('POST', '/v1/me/email-change', { token: who.token, body: { email }, env: e });
     expect(await ask(who.email)).toMatchObject({ status: 400, body: { error: { message: "That's already your email." } } });
-    expect(await ask(taken.email)).toMatchObject({ status: 409, body: { error: { code: 'conflict', field: 'email' } } });
     expect(await ask(uniqueEmail(), testEnv({ ENTER_RATE_LIMIT_EMAIL: denied }))).toMatchObject({ status: 429 });
     await env.USER.getByName(who.email).tombstone();
     expect((await ask(uniqueEmail())).status).toBe(401);
@@ -215,7 +213,7 @@ describe('POST /v1/me/deletion and /v1/me/email-change', () => {
 
 describe('POST /v1/me/deletion/confirm', () => {
   const deletionLink = (sub: string, email: string, jti = crypto.randomUUID(), ttl = 60) =>
-    jwt().issueToken('AccountDeletion', { sub, email, jti }, { ttl });
+    jwt().issueToken('AccountDeletion', { sub, email, jti, ver: 0 }, { ttl });
 
   it('deletes the account, answers a repeat of the same request ok, and refuses anyone else', async () => {
     const who = await signIn();
@@ -263,9 +261,99 @@ describe('POST /v1/me/deletion/confirm', () => {
   });
 });
 
+describe('POST /v1/me/email-change to an address that has an account', () => {
+  it('answers as for any address: that address gets a notice without a link, the current one the usual notice', async () => {
+    const who = await signIn();
+    const taken = await signIn();
+    const free = uniqueEmail('free');
+    const asked = async (email: string) => {
+      const { sent, EMAIL } = mailer();
+      const res = await request('POST', '/v1/me/email-change', { token: who.token, key: key(), body: { email }, env: testEnv({ EMAIL }) });
+      return { res, sent };
+    };
+    const [toTaken, toFree] = [await asked(taken.email), await asked(free)];
+    expect(toTaken.res).toEqual(toFree.res);
+    expect(toTaken.sent.map(m => [m.to, m.subject])).toEqual([
+      [taken.email, 'Someone tried to use your email on Anonymous Ded Morozes'],
+      [who.email, 'Your Anonymous Ded Morozes email is being changed'],
+    ]);
+    expect(toTaken.sent[0].text).not.toMatch(/https?:/);
+    expect(tokenFrom(toFree.sent[0].text, 'profile/email')).toBeTruthy();
+    // Both notices to the current address carry a cancel link.
+    expect([toTaken.sent[1].text, toFree.sent[1].text].map(text => Boolean(tokenFrom(text, 'profile/email/cancel')))).toEqual([true, true]);
+    expect((await request('GET', '/v1/me', { token: taken.token })).body.email).toBe(taken.email);
+  });
+});
+
+describe('POST /v1/me/email-change/cancel', () => {
+  /** Asks to move `who` to a new address; returns the change link's token and the cancel link's token. */
+  async function askToMove(who: { token: string }, newEmail = uniqueEmail('new')) {
+    const { sent, EMAIL } = mailer();
+    expect((await request('POST', '/v1/me/email-change', { token: who.token, key: key(), body: { email: newEmail }, env: testEnv({ EMAIL }) })).status).toBe(202);
+    return { change: tokenFrom(sent[0].text, 'profile/email'), cancel: tokenFrom(sent[1].text, 'profile/email/cancel') };
+  }
+  const cancel = (token: string, k?: string) => request('POST', '/v1/me/email-change/cancel', { key: k, body: { token } });
+  const confirm = (token: string) => request('POST', '/v1/me/email-change/confirm', { body: { token } });
+
+  it('stops the change, signs out everywhere and keeps the email; a repeat of the same request answers ok again', async () => {
+    const who = await signIn();
+    const { change, cancel: cancelLink } = await askToMove(who);
+    const k = key();
+    expect(await cancel(cancelLink, k)).toMatchObject({ status: 200, body: { ok: true } });
+    expect(await cancel(cancelLink, k)).toMatchObject({ status: 200 });
+    expect(await cancel(cancelLink, key())).toMatchObject({ status: 409, body: { error: { code: 'link_used' } } });
+    expect(await cancel(cancelLink)).toMatchObject({ status: 409 });
+
+    expect(await confirm(change)).toMatchObject({ status: 409, body: { error: { code: 'link_used' } } });
+    expect((await request('GET', '/v1/me', { token: who.token })).status).toBe(401);
+    expect(await env.USER.getByName(who.email).get()).toMatchObject({ id: who.id, email: who.email, tokenVersion: 1 });
+  });
+
+  it('voids every other pending account link too', async () => {
+    const who = await signIn();
+    const first = await askToMove(who);
+    const second = await askToMove(who);
+    const { sent, EMAIL } = mailer();
+    await request('POST', '/v1/me/deletion', { token: who.token, env: testEnv({ EMAIL }) });
+    const deletion = tokenFrom(sent[0].text, 'profile/delete');
+
+    expect((await cancel(first.cancel)).status).toBe(200);
+    expect(await confirm(second.change)).toMatchObject({ status: 400, body: { error: { code: 'invalid_link', message: expect.stringMatching(/signed out everywhere/) } } });
+    expect(await request('POST', '/v1/me/deletion/confirm', { body: { token: deletion } })).toMatchObject({ status: 400, body: { error: { code: 'invalid_link' } } });
+    expect(await env.USER.getByName(who.email).get()).toMatchObject({ id: who.id });
+  });
+
+  it('is too late once the change was confirmed, and waits while it is running', async () => {
+    const who = await signIn();
+    const done = await askToMove(who);
+    expect((await confirm(done.change)).status).toBe(200);
+    expect(await cancel(done.cancel)).toMatchObject({ status: 409, body: { error: { code: 'link_used', message: expect.stringMatching(/already changed.*info@gnomik\.me/) } } });
+
+    const other = await signIn();
+    const running = await askToMove(other);
+    const { jti } = await jwt().jwtVerify<{ jti: string }>(running.change, 'EmailChange');
+    const stub = env.USER.getByName(other.email);
+    await stub.startAccountChange(other.id, jti, Date.now() + 60_000, { outcome: 'somewhere@example.com' });
+    expect(await cancel(running.cancel)).toMatchObject({ status: 409, body: { error: { code: 'account_busy' } } });
+    // Another account change is running, not the one this link cancels.
+    const held = await askToMove(await signIn());
+    const { email: heldEmail, sub } = await jwt().jwtVerify<{ email: string; sub: string }>(held.cancel, 'EmailChangeCancel');
+    await env.USER.getByName(heldEmail).startAccountChange(strToNodeId(sub)!.id, crypto.randomUUID(), Date.now() + 60_000);
+    expect(await cancel(held.cancel)).toMatchObject({ status: 409, body: { error: { code: 'account_busy' } } });
+  });
+
+  it('refuses invalid links and accounts that are gone', async () => {
+    expect(await cancel('garbage')).toMatchObject({ status: 400, body: { error: { code: 'invalid_link' } } });
+    const who = await signIn();
+    const { cancel: cancelLink } = await askToMove(who);
+    await env.USER.getByName(who.email).tombstone();
+    expect(await cancel(cancelLink)).toMatchObject({ status: 400, body: { error: { code: 'invalid_link', message: 'This account no longer exists.' } } });
+  });
+});
+
 describe('POST /v1/me/email-change/confirm', () => {
   const changeLink = (who: { nodeId: string; email: string }, newEmail: string | undefined, ttl = 60) =>
-    jwt().issueToken('EmailChange', { sub: who.nodeId, email: who.email, ...(newEmail === undefined ? {} : { newEmail }), jti: crypto.randomUUID() }, { ttl });
+    jwt().issueToken('EmailChange', { sub: who.nodeId, email: who.email, ...(newEmail === undefined ? {} : { newEmail }), jti: crypto.randomUUID(), ver: 0 }, { ttl });
   const confirm = (token: string, options: { key?: string; env?: typeof env } = {}) =>
     request('POST', '/v1/me/email-change/confirm', { body: { token }, ...options });
 
@@ -779,7 +867,7 @@ describe('the remaining refusals', () => {
 
   it('refuse a confirmation link that was used by another request, or while the account is busy', async () => {
     const who = await signIn();
-    const token = await jwt().issueToken('EmailChange', { sub: who.nodeId, email: who.email, newEmail: uniqueEmail(), jti: crypto.randomUUID() }, { ttl: 60 });
+    const token = await jwt().issueToken('EmailChange', { sub: who.nodeId, email: who.email, newEmail: uniqueEmail(), jti: crypto.randomUUID(), ver: 0 }, { ttl: 60 });
     await env.USER.getByName(who.email).startAccountChange(who.id, 'other', Date.now() + 60_000);
     expect(await request('POST', '/v1/me/email-change/confirm', { body: { token } })).toMatchObject({ status: 409, body: { error: { code: 'account_busy' } } });
   });
