@@ -56,6 +56,7 @@ const BUDGETS: Record<string, { USER: number | string; PARTY: number | string }>
   'PATCH /me': { USER: 1, PARTY: 0 },
   'GET /me/parties': { USER: 1, PARTY: 0 },
   'POST /me/deletion': { USER: 1, PARTY: 0 },
+  'POST /me/sign-out': { USER: 1, PARTY: 0 },
   'POST /me/email-change': { USER: 2, PARTY: 0 },
   'POST /me/deletion/confirm': { USER: 2, PARTY: '1 per party' },
   'POST /me/email-change/confirm': { USER: 4, PARTY: '1 per party' },
@@ -131,6 +132,13 @@ describe('Durable Object call budgets', () => {
     const newEmail = uniqueEmail('new');
     expect((await request('POST', '/v1/me/email-change', { token: who.token, body: { email: newEmail }, env: counting.env })).status).toBe(202);
     expect(counting.calls.map(c => `${c.name === who.email ? 'old' : 'new'}.${c.method}`)).toEqual(['old.beginMailRequest', 'new.checkRecipient']);
+  });
+
+  it('POST /me/sign-out: one call, which also checks the session', async () => {
+    const who = await person();
+    const counting = countingEnv();
+    expect((await request('POST', '/v1/me/sign-out', { token: who.token, env: counting.env })).status).toBe(200);
+    expect(counting.methods()).toEqual(['USER.signOutEverywhere']);
   });
 
   it('POST /me/email-change/cancel: one call, fresh or repeated; none for an invalid link', async () => {

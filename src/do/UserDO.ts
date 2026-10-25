@@ -344,6 +344,18 @@ export class UserDO extends DurableObject<Env> {
   }
 
   /**
+   * Ends every session of the account at once ("Sign out everywhere"): bumps the token version, which also voids every
+   * pending account link. Changes nothing, and answers false, for a session that no longer belongs to this user.
+   */
+  signOutEverywhere(session: Session): boolean {
+    if (!sessionMatches(this.get(), session)) {
+      return false;
+    }
+    this.sql.exec('UPDATE user SET token_version = token_version + 1');
+    return true;
+  }
+
+  /**
    * Deletes the account, leaving a tombstone: the profile and party list are wiped, and every session token issued
    * so far is revoked. An object without a user yet gets a tombstone too, so nothing can be written to it.
    */

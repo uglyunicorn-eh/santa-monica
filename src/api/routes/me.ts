@@ -95,6 +95,19 @@ async function mailRequest(c: ApiContext, kind: string, detail: string, quota: M
   return send(c, accepted, { ok: true }, 202);
 }
 
+/**
+ * Signs out every device, this one included: every session token issued so far stops working, and so does every
+ * pending account link. One UserDO call, which also checks the session; a repeat finds the session already gone (401).
+ */
+me.post('/sign-out', requireSession, action('signOutEverywhere', async c => {
+  await readBody(c, bodies.empty);
+  const s = session(c);
+  if (!await c.env.USER.getByName(s.email).signOutEverywhere(s)) {
+    throw notSignedIn();
+  }
+  return send(c, accepted, { ok: true });
+}));
+
 /** Emails a link that deletes the account (see `/deletion/confirm`). */
 me.post('/deletion', requireSession, action('requestAccountDeletion', async c => {
   await readBody(c, bodies.empty);
