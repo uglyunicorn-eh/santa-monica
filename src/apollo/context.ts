@@ -27,6 +27,8 @@ export interface ApolloContext extends BaseContext, JwtHelpers {
    */
   retrieveUser: () => Promise<UserRecord | null>;
   sendMail: (to: string, message: MailMessage) => Promise<void>;
+  /** Party codes looked up with `party(code)` in this request, for the per-request cap (see MAX_PARTY_LOOKUPS). */
+  partyLookups?: Set<string>;
   /** Party views loaded during this request, so each party is asked at most once. */
   partyNodes?: Map<string, Promise<Party | null>>;
 };

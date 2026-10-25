@@ -1,5 +1,5 @@
 import { ApolloContext, requireUser } from 'src/apollo/context';
-import { PARTY_CODE_RE, partyViewToNode } from 'src/apollo/resolvers/party';
+import { PARTY_CODE_ALPHABET, PARTY_CODE_LENGTH, PARTY_CODE_RE, partyViewToNode } from 'src/apollo/resolvers/party';
 import { MutationPayload } from 'src/apollo/types';
 import { PartyResult, PartyUserError } from 'src/do/types';
 import _ from 'src/utils/graphql/resolvable';
@@ -83,7 +83,7 @@ const partyMutations = {
         return tooManyOpenParties('start a new one');
       }
       for (let attempt = 0; attempt < SLUG_ATTEMPTS; attempt++) {
-        const slug = randomString(5, 'QWERTYUIPASDFGHJKLZXCVBNMO');
+        const slug = randomString(PARTY_CODE_LENGTH, PARTY_CODE_ALPHABET);
         const result = await env.PARTY.getByName(slug).create({
           id: newObjectId(),
           slug,
@@ -108,6 +108,13 @@ const partyMutations = {
         return unknownParty;
       }
       annotate({ 'party.code': slug });
+
+      // Joining with a code is how a party without a secret phrase is reached, so attempts are limited per user.
+      const { success } = await env.JOIN_RATE_LIMIT_USER.limit({ key: userId! });
+      annotate({ 'party.join_rate_limited': !success });
+      if (!success) {
+        return { status: 'error' as const, userErrors: [{ fieldName: 'party', messages: ["Whoa, that's a lot of tries! Please wait a minute and try again."] }] };
+      }
 
       // The member comes from the session token and the name from the form: no need to read the profile. The party
       // checks the session against the user through the update it sends them anyway.

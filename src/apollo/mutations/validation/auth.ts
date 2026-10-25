@@ -1,10 +1,11 @@
+import { PARTY_CODE_RE } from 'src/apollo/resolvers/party';
 import * as yup from 'yup';
 
 import * as YupHelpers from 'src/utils/yup/index';
 
 export const enterRequestInputSchema = yup.object().shape({
   email: YupHelpers.string('Email').email("Must be a valid email").max(128).required(),
-  party: YupHelpers.string('Party Code').matches(/^[QWERTYUIPASDFGHJKLZXCVBNMO]{5}$/, "Invalid party code").notRequired(),
+  party: YupHelpers.string('Party Code').matches(PARTY_CODE_RE, "Invalid party code").notRequired(),
 });
 
 export const enterInputSchema = yup.object().shape({

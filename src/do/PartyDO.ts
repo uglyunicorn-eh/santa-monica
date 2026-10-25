@@ -63,6 +63,10 @@ const ADDED_COLUMNS: Record<string, Record<string, string>> = {
   party: { closed_at: 'INTEGER', deleted_at: 'INTEGER' },
 };
 
+/** Wrong secret phrases one person can try on a party within PHRASE_GUESS_WINDOW_MS before having to wait. */
+export const MAX_PHRASE_GUESSES = 5;
+export const PHRASE_GUESS_WINDOW_MS = 15 * 60 * 1000;
+
 const MAX_ATTEMPTS = 15;
 const MAX_BACKOFF_MS = 60 * 60 * 1000;
 
@@ -107,6 +111,35 @@ export class PartyDO extends DurableObject<Env> {
         }
       }
     }
+    // Wrong secret phrases per person, so guessing one is slow (see MAX_PHRASE_GUESSES).
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS phrase_guesses (
+        member_id TEXT PRIMARY KEY,
+        failures INTEGER NOT NULL,
+        first_failed_at INTEGER NOT NULL
+      )
+    `);
+  }
+
+  /** How long this person must wait before guessing the secret phrase again, or 0 when they may guess now. */
+  private guessLockout(memberId: string): number {
+    const row = this.sql
+      .exec<{ failures: number; first_failed_at: number }>('SELECT failures, first_failed_at FROM phrase_guesses WHERE member_id = ?', memberId)
+      .toArray()[0];
+    const left = row ? row.first_failed_at + PHRASE_GUESS_WINDOW_MS - Date.now() : 0;
+    return row && row.failures >= MAX_PHRASE_GUESSES && left > 0 ? left : 0;
+  }
+
+  /** Counts a wrong secret phrase, starting a new window when the last one has passed. */
+  private recordWrongGuess(memberId: string) {
+    const now = Date.now();
+    this.sql.exec(
+      `INSERT INTO phrase_guesses (member_id, failures, first_failed_at) VALUES (?, 1, ?)
+       ON CONFLICT (member_id) DO UPDATE SET
+         failures = CASE WHEN first_failed_at + ? <= excluded.first_failed_at THEN 1 ELSE failures + 1 END,
+         first_failed_at = CASE WHEN first_failed_at + ? <= excluded.first_failed_at THEN excluded.first_failed_at ELSE first_failed_at END`,
+      memberId, now, PHRASE_GUESS_WINDOW_MS, PHRASE_GUESS_WINDOW_MS,
+    );
   }
 
   private ensureSchema() {
@@ -324,9 +357,16 @@ export class PartyDO extends DurableObject<Env> {
     if (party.is_closed) {
       return closedToNewMembers;
     }
+    const lockedFor = this.guessLockout(member.id);
+    if (lockedFor) {
+      const minutes = Math.ceil(lockedFor / 60_000);
+      return fail('password', `That's a lot of wrong guesses! Please ask your friend for the secret phrase and try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`);
+    }
     if ((party.password || '').toUpperCase() !== (password || '').toUpperCase()) {
+      this.recordWrongGuess(member.id);
       return fail('password', "Hmm... Seems you've got a wrong secret phrase. Please try a different one or ask your friend for a hint.");
     }
+    this.sql.exec('DELETE FROM phrase_guesses WHERE member_id = ?', member.id);
     const displayName = name || member.name;
     if (!displayName) {
       return fail('name', 'We were unable to get your name.');

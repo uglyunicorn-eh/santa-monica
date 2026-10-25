@@ -21,7 +21,33 @@ type PartyHistoryArgs = {
   after?: string | null;
 }
 
-export const PARTY_CODE_RE = /^[QWERTYUIPASDFGHJKLZXCVBNMO]{5}$/;
+export const PARTY_CODE_ALPHABET = 'QWERTYUIPASDFGHJKLZXCVBNMO';
+
+/** New parties get 8-letter codes (26^8, about 2·10^11); parties made before that keep their 5-letter ones. */
+export const PARTY_CODE_LENGTH = 8;
+export const PARTY_CODE_RE = new RegExp(`^(?:[${PARTY_CODE_ALPHABET}]{5}|[${PARTY_CODE_ALPHABET}]{${PARTY_CODE_LENGTH}})$`);
+
+/** Distinct party codes one request can look up (each costs a call to a party, and codes must not be scanned). */
+export const MAX_PARTY_LOOKUPS = 10;
+
+/**
+ * Counts a lookup of this code against the request's cap and the client's rate limit. A code looked up again in the
+ * same request is free. Throws when either limit is reached.
+ */
+async function admitLookup(context: ApolloContext, code: string) {
+  context.partyLookups ??= new Set();
+  if (context.partyLookups.has(code)) {
+    return;
+  }
+  if (context.partyLookups.size >= MAX_PARTY_LOOKUPS) {
+    throw new GraphQLError(`At most ${MAX_PARTY_LOOKUPS} parties can be looked up in one request.`, { extensions: { code: 'BAD_USER_INPUT' } });
+  }
+  context.partyLookups.add(code);
+  const { success } = await context.env.PARTY_LOOKUP_RATE_LIMIT_IP.limit({ key: context.clientIp });
+  if (!success) {
+    throw new GraphQLError('Too many party lookups. Please wait a minute and try again.', { extensions: { code: 'RATE_LIMITED' } });
+  }
+}
 
 const MAX_PARTIES = 100;
 
@@ -165,6 +191,7 @@ async function listParties(context: ApolloContext, userEmail: string, first: num
 export default {
   party: async (root: any, { code }: PartyArgs, context: ApolloContext) =>
     withSpan('api.party', { 'api.action': 'party', 'user.id': context.userId, 'party.code': code.toUpperCase() }, async span => {
+      await admitLookup(context, code.toUpperCase());
       const node = await loadPartyNode(context, code.toUpperCase());
       span.setAttributes({ 'party.found': Boolean(node), 'party.joined': node?.isJoined });
       return node;
