@@ -1,5 +1,3 @@
-export type NodeKind = 'User' | 'Party';
-
 export interface INodeId {
   kind: string;
   id: string;

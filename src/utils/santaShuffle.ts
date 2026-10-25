@@ -7,7 +7,7 @@ interface Pair<T> {
 
 type Comparator<T> = (a: T, b: T) => boolean;
 
-export function shuffle<T>(items: T[]): T[] {
+function shuffle<T>(items: T[]): T[] {
   const result = [...items];
   for (let i = result.length - 1; i > 0; i--) {
     const j = randomInt(i + 1);

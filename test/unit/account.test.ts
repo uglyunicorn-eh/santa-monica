@@ -11,7 +11,7 @@ type Person = { userId: string; userEmail: string };
 async function signedIn(name = 'Person'): Promise<Person> {
   const email = uniqueEmail();
   const user = await env.USER.getByName(email).ensure(email);
-  await env.USER.getByName(email).apply([{ type: 'setName', name }]);
+  await env.USER.getByName(email).apply([{ type: 'setNameIfEmpty', name }]);
   return { userId: user.id, userEmail: email };
 }
 

@@ -464,21 +464,6 @@ describe('party → user updates', () => {
     await request('POST', '/v1/parties/leave', { body: { code: party.code }, token: guest.token });
     expect(await env.USER.getByName(guest.email).listParties(10)).toEqual([]);
   });
-
-  it('delivers older queued messages (from before summaries) as one sync per user', async () => {
-    const host = await person('Host');
-    const party = await create(host.token, 'Legacy');
-    // Record first, then deliver by calling the alarm handler directly: a real alarm could fire before the recorder is in place.
-    const { applied, done } = recordUserCalls(party.code);
-    await done;
-    await runInDurableObject(env.PARTY.getByName(party.code), async (instance: PartyDO, state) => {
-      for (const kind of ['user.removeParty', 'user.addParty']) {
-        state.storage.sql.exec('INSERT INTO outbox (payload, next_attempt_at) VALUES (?, 0)', JSON.stringify({ kind, email: host.email, party: { slug: party.code } }));
-      }
-      await instance.alarm();
-    });
-    expect(applied).toEqual([{ email: host.email, updates: [{ type: 'addParty', party: expect.objectContaining({ slug: party.code, isHost: true }) }] }]);
-  });
 });
 
 describe('party lists saved before summaries existed', () => {

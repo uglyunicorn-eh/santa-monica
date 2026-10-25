@@ -39,7 +39,6 @@ export type UserPartyListItem = Omit<UserPartyRecord, 'isHost' | 'isProtected' |
 export type UserUpdate =
   | { type: 'addParty'; party: UserPartyRecord }
   | { type: 'removeParty'; slug: string }
-  | { type: 'setName'; name: string }
   | { type: 'releaseHostSlot'; reservation: string }
   /**
    * Sent when the user joins a party: the name they joined with becomes their profile name only if they have none,

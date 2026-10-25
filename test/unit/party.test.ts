@@ -97,12 +97,11 @@ describe('PartyDO', () => {
     await createParty('HGFDS', host.member);
     await stub.join(guest.member, 'Guest', null);
 
-    // Simulate an earlier message for the guest that failed and is waiting for its retry. It is the older user.setName
-    // form, queued before joining stopped overwriting names: it is delivered as setNameIfEmpty.
+    // Simulate an earlier message for the guest that failed and is waiting for its retry.
     await runInDurableObject(stub, async (_instance, state) => {
       state.storage.sql.exec(
         'INSERT INTO outbox (payload, attempts, next_attempt_at) VALUES (?, 1, ?)',
-        JSON.stringify({ kind: 'user.setName', email: 'guest6@example.com', name: 'Retried' }), Date.now() + 60_000,
+        JSON.stringify({ kind: 'user.setNameIfEmpty', email: 'guest6@example.com', name: 'Retried' }), Date.now() + 60_000,
       );
     });
 

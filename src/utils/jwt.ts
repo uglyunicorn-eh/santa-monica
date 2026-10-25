@@ -27,7 +27,7 @@ type KeyPair = { privateKey: CryptoKey; publicKey: CryptoKey };
 const ES256 = { name: 'ECDSA', namedCurve: 'P-256' } as const;
 
 /** Imports a P-256 private key from PKCS#8 PEM (with real or escaped "\n" line breaks) and derives its public key. */
-export async function importEcKeyPair(pem: string): Promise<KeyPair> {
+async function importEcKeyPair(pem: string): Promise<KeyPair> {
   const body = pem.replace(/\\n/g, '\n').replace(/-----(BEGIN|END) [A-Z ]+-----/g, '').replace(/\s+/g, '');
   const pkcs8 = Uint8Array.from(atob(body), c => c.charCodeAt(0));
 

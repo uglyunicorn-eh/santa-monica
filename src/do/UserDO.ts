@@ -512,10 +512,6 @@ export class UserDO extends DurableObject<Env> {
           case 'removeParty':
             this.sql.exec('DELETE FROM parties WHERE slug = ?', update.slug);
             break;
-          case 'setName':
-            name = update.name;
-            this.sql.exec('UPDATE user SET name = ?', name);
-            break;
           case 'setNameIfEmpty':
             // Only the account that joined: a join checked late (by the alarm) must not name a newer account.
             if (user && name === '' && (update.userId ?? user.id) === user.id) {

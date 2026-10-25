@@ -33,17 +33,15 @@ type MembershipRow = {
 };
 
 // user.sync sends the member's current view of this party (added, closed, or removed if they left). It is computed at
-// delivery time, so it is always current and safe to repeat. user.addParty / user.removeParty are older forms of it.
-// A sync from creating a party carries the host's slot reservation (see UserDO.startHosting), released on delivery.
+// delivery time, so it is always current and safe to repeat. A sync from creating a party carries the host's slot
+// reservation (see UserDO.startHosting), released on delivery.
 // user.setNameIfEmpty gives a new member's profile the name they joined with, unless they already have one.
-// user.setName is its older form, queued before joining stopped overwriting profile names; it is delivered the same way.
 type OutboxMessage =
   | { kind: 'user.sync'; email: string; reservation?: string }
-  | { kind: 'user.addParty' | 'user.removeParty'; email: string }
-  | { kind: 'user.setNameIfEmpty' | 'user.setName'; email: string; name: string; memberId?: string }
+  | { kind: 'user.setNameIfEmpty'; email: string; name: string; memberId?: string }
   // Sent when the party is gone for good (erased after deletion, or its host's account was deleted): the party row is
-  // gone, so the slug travels with the message. user.partyCancelled is the earlier name.
-  | { kind: 'user.partyPurged' | 'user.partyCancelled'; email: string; slug: string }
+  // gone, so the slug travels with the message.
+  | { kind: 'user.partyPurged'; email: string; slug: string }
   | { kind: 'mail.partyNotification'; email: string; partyName: string; slug: string };
 
 type OutboxRow = { id: number; payload: string; attempts: number; next_attempt_at: number };
@@ -739,9 +737,9 @@ export class PartyDO extends DurableObject<Env> {
     const updates: UserUpdate[] = [];
     let synced = false;
     for (const message of messages) {
-      if (message.kind === 'user.setNameIfEmpty' || message.kind === 'user.setName') {
+      if (message.kind === 'user.setNameIfEmpty') {
         updates.push({ type: 'setNameIfEmpty', name: message.name, userId: message.memberId });
-      } else if (message.kind === 'user.partyPurged' || message.kind === 'user.partyCancelled') {
+      } else if (message.kind === 'user.partyPurged') {
         synced = true;
         updates.push({ type: 'removeParty', slug: message.slug });
       } else if (!synced && this.party()) {
