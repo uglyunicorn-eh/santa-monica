@@ -1,5 +1,6 @@
 import { ApolloContext } from "src/apollo/context";
 import { Party } from "src/apollo/types";
+import { RESTORE_WINDOW_MS } from "src/do/PartyDO";
 import { PartyView, UserPartyListItem, UserPartyRecord } from "src/do/types";
 import { Env } from "src/env";
 import { nodeIdToStr } from "src/utils/strings/nodeId";
@@ -17,6 +18,12 @@ export const PARTY_CODE_RE = /^[QWERTYUIPASDFGHJKLZXCVBNMO]{5}$/;
 
 const MAX_PARTIES = 100;
 
+/** When a deleted party was deleted and until when it can be restored, as ISO strings (both null otherwise). */
+const deletion = (deletedAt: number | null | undefined) => ({
+  deletedAt: deletedAt ? new Date(deletedAt).toISOString() : null,
+  restorableUntil: deletedAt ? new Date(deletedAt + RESTORE_WINDOW_MS).toISOString() : null,
+});
+
 export function partyViewToNode(view: PartyView | null): Party | null {
   if (!view) {
     return null;
@@ -32,6 +39,7 @@ export function partyViewToNode(view: PartyView | null): Party | null {
     participantCount: view.participantCount,
     participants: view.participants,
     isClosed: view.isClosed,
+    ...deletion(view.deletedAt),
     target: view.target
       ? { id: nodeIdToStr({ kind: 'User', id: view.target.id }), name: view.target.name }
       : null,
@@ -46,7 +54,7 @@ export async function viewParty(env: Env, code: string, userId?: string): Promis
 }
 
 /** A party in the user's list: the summary fields from UserDO. The rest load lazily (see `partyFields`). */
-type PartySummaryNode = Pick<Party, 'id' | 'code' | 'name' | 'isHost' | 'isProtected' | 'isClosed' | 'isJoined'>;
+type PartySummaryNode = Pick<Party, 'id' | 'code' | 'name' | 'isHost' | 'isProtected' | 'isClosed' | 'isJoined' | 'deletedAt' | 'restorableUntil'>;
 
 const summaryToNode = (summary: UserPartyRecord): PartySummaryNode => ({
   id: nodeIdToStr({ kind: 'Party', id: summary.slug }),
@@ -55,10 +63,11 @@ const summaryToNode = (summary: UserPartyRecord): PartySummaryNode => ({
   isHost: summary.isHost,
   isProtected: summary.isProtected,
   isClosed: summary.isClosed,
+  ...deletion(summary.deletedAt),
   isJoined: true,
 });
 
-const isComplete = (item: UserPartyListItem): item is UserPartyRecord =>
+const isComplete = (item: UserPartyListItem): item is UserPartyListItem & UserPartyRecord =>
   item.isHost !== null && item.isProtected !== null && item.isClosed !== null;
 
 /** Loads a party's full view once per request, however many fields ask for it. */
@@ -111,6 +120,7 @@ export default {
           type: 'addParty' as const,
           party: {
             slug: node.code, name: node.name, isHost: node.isHost, isProtected: node.isProtected, isClosed: node.isClosed,
+            deletedAt: node.deletedAt ? Date.parse(node.deletedAt) : null,
             createdAt: stale.find(item => item.slug === node.code)!.createdAt,
           },
         })));

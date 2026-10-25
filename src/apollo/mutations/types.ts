@@ -17,7 +17,11 @@ export type ClosePartyInput = {
   party: string;
 }
 
-export type CancelPartyInput = {
+export type DeletePartyInput = {
+  party: string;
+}
+
+export type RestorePartyInput = {
   party: string;
 }
 

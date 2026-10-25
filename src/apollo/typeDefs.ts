@@ -36,6 +36,10 @@ export const typeDefs = `#graphql
     isHost: Boolean!
     isProtected: Boolean!
     isClosed: Boolean!
+    "When the host deleted the party (ISO 8601). Only the host sees a deleted party."
+    deletedAt: String
+    "Until when the host can restore the deleted party (ISO 8601). After that it is gone for good."
+    restorableUntil: String
     participantCount: Int
     participants: [String!]
     target: User
@@ -61,8 +65,9 @@ export const typeDefs = `#graphql
     joinParty(input: JoinPartyInput!): JoinPartyPayload!
     leaveParty(input: LeavePartyInput!): LeavePartyPayload!
     closeParty(input: ClosePartyInput!): ClosePartyPayload!
-    "Deletes an open party nobody else has joined. Only the host can cancel it."
-    cancelParty(input: CancelPartyInput!): CancelPartyPayload!
+    "Deletes the party (host only). It can be restored for a day with restoreParty."
+    deleteParty(input: DeletePartyInput!): DeletePartyPayload!
+    restoreParty(input: RestorePartyInput!): RestorePartyPayload!
   }
 
   input CreatePartyInput {
@@ -108,13 +113,24 @@ export const typeDefs = `#graphql
     node: Party
   }
 
-  input CancelPartyInput {
+  input DeletePartyInput {
     party: ID!
   }
 
-  type CancelPartyPayload implements MutationPayload {
+  type DeletePartyPayload implements MutationPayload {
     status: MutationStatus!
     userErrors: [UserError!]
+    node: Party
+  }
+
+  input RestorePartyInput {
+    party: ID!
+  }
+
+  type RestorePartyPayload implements MutationPayload {
+    status: MutationStatus!
+    userErrors: [UserError!]
+    node: Party
   }
 
   type AuthOpts {

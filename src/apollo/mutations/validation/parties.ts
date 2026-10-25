@@ -21,6 +21,10 @@ export const closePartyInputSchema = yup.object().shape({
   party: YupHelpers.string('Party ID').max(100).required(),
 });
 
-export const cancelPartyInputSchema = yup.object().shape({
+export const deletePartyInputSchema = yup.object().shape({
+  party: YupHelpers.string('Party ID').max(100).required(),
+});
+
+export const restorePartyInputSchema = yup.object().shape({
   party: YupHelpers.string('Party ID').max(100).required(),
 });

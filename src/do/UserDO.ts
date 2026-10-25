@@ -13,6 +13,7 @@ type PartyRow = {
   is_host: number | null;
   is_protected: number | null;
   is_closed: number | null;
+  deleted_at: number | null;
 };
 
 const flag = (value: number | null) => (value === null ? null : Boolean(value));
@@ -45,7 +46,8 @@ export class UserDO extends DurableObject<Env> {
           created_at INTEGER NOT NULL,
           is_host INTEGER,
           is_protected INTEGER,
-          is_closed INTEGER
+          is_closed INTEGER,
+          deleted_at INTEGER
         );
         CREATE TABLE IF NOT EXISTS host_reservations (
           id TEXT PRIMARY KEY,
@@ -58,7 +60,7 @@ export class UserDO extends DurableObject<Env> {
       `);
       // Lists created before party summaries existed get the columns added; their rows stay null until refreshed.
       const columns = new Set(this.sql.exec<{ name: string }>('PRAGMA table_info(parties)').toArray().map(c => c.name));
-      for (const column of ['is_host', 'is_protected', 'is_closed']) {
+      for (const column of ['is_host', 'is_protected', 'is_closed', 'deleted_at']) {
         if (!columns.has(column)) {
           this.sql.exec(`ALTER TABLE parties ADD COLUMN ${column} INTEGER`);
         }
@@ -111,7 +113,7 @@ export class UserDO extends DurableObject<Env> {
     const now = Date.now();
     this.sql.exec('DELETE FROM host_reservations WHERE expires_at < ?', now);
     const open = this.sql
-      .exec<{ n: number }>('SELECT COUNT(*) AS n FROM parties WHERE is_host = 1 AND NOT COALESCE(is_closed, 0)')
+      .exec<{ n: number }>('SELECT COUNT(*) AS n FROM parties WHERE is_host = 1 AND NOT COALESCE(is_closed, 0) AND deleted_at IS NULL')
       .one().n;
     const held = this.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM host_reservations').one().n;
     if (open + held >= limit) {
@@ -128,10 +130,10 @@ export class UserDO extends DurableObject<Env> {
       for (const update of updates) {
         switch (update.type) {
           case 'addParty': {
-            const { slug, name, createdAt, isHost, isProtected, isClosed } = update.party;
+            const { slug, name, createdAt, isHost, isProtected, isClosed, deletedAt = null } = update.party;
             this.sql.exec(
-              'INSERT OR REPLACE INTO parties (slug, name, created_at, is_host, is_protected, is_closed) VALUES (?, ?, ?, ?, ?, ?)',
-              slug, name, createdAt, Number(isHost), Number(isProtected), Number(isClosed),
+              'INSERT OR REPLACE INTO parties (slug, name, created_at, is_host, is_protected, is_closed, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+              slug, name, createdAt, Number(isHost), Number(isProtected), Number(isClosed), deletedAt,
             );
             break;
           }
@@ -152,7 +154,7 @@ export class UserDO extends DurableObject<Env> {
   listParties(first: number): UserPartyListItem[] {
     return this.sql
       .exec<PartyRow>(
-        'SELECT slug, name, created_at, is_host, is_protected, is_closed FROM parties ORDER BY created_at DESC LIMIT ?', first,
+        'SELECT slug, name, created_at, is_host, is_protected, is_closed, deleted_at FROM parties ORDER BY created_at DESC LIMIT ?', first,
       )
       .toArray()
       .map(row => ({
@@ -162,6 +164,7 @@ export class UserDO extends DurableObject<Env> {
         isHost: flag(row.is_host),
         isProtected: flag(row.is_protected),
         isClosed: flag(row.is_closed),
+        deletedAt: row.deleted_at,
       }));
   }
 }

@@ -12,6 +12,8 @@ export type Party = Node & {
   isHost: boolean;
   isProtected: boolean;
   isClosed: boolean;
+  deletedAt: string | null;
+  restorableUntil: string | null;
   participantCount: number | null;
   participants: string[] | null;
   target: User | null;
