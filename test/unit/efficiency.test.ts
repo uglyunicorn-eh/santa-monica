@@ -228,15 +228,15 @@ describe('party → user updates', () => {
   it('delivers older queued messages (from before summaries) as one sync per user', async () => {
     const host = await person('Host');
     const { node } = (await gql(env, CREATE, { name: 'Legacy' }, host.token)).data.parties.createParty;
-    await runInDurableObject(env.PARTY.getByName(node.code), async (_i, state) => {
+    // Record first, then deliver by calling the alarm handler directly: a real alarm could fire before the recorder is in place.
+    const { applied, done } = recordUserCalls(node.code);
+    await done;
+    await runInDurableObject(env.PARTY.getByName(node.code), async (instance: PartyDO, state) => {
       for (const kind of ['user.removeParty', 'user.addParty']) {
         state.storage.sql.exec('INSERT INTO outbox (payload, next_attempt_at) VALUES (?, 0)', JSON.stringify({ kind, email: host.email, party: { slug: node.code } }));
       }
-      await state.storage.setAlarm(Date.now());
+      await instance.alarm();
     });
-    const { applied, done } = recordUserCalls(node.code);
-    await done;
-    await runDurableObjectAlarm(env.PARTY.getByName(node.code));
     expect(applied).toEqual([{ email: host.email, updates: [{ type: 'addParty', party: expect.objectContaining({ slug: node.code, isHost: true }) }] }]);
   });
 });
