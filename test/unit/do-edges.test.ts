@@ -1,7 +1,7 @@
 import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
 
-import { PartyDO } from 'src/do/PartyDO';
+import { MAX_PARTY_MEMBERS, PartyDO } from 'src/do/PartyDO';
 import { UserDO } from 'src/do/UserDO';
 import { newObjectId } from 'src/utils/ids';
 
@@ -426,6 +426,22 @@ describe('PartyDO join session check', () => {
       ok: false, error: { code: 'conflict', fieldName: 'party', message: 'Party is already packed. Sorry, we cannot accept a new participant...' },
     });
     expect(await stub.view(host.id)).toMatchObject({ isClosed: true, participantCount: 2 });
+    expect(await env.USER.getByName(guest.email).listParties(10)).toEqual([]);
+  });
+
+  it('refuses a join when the party filled up while the user was being updated, and takes it off their list', async () => {
+    const { stub, host } = await party();
+    const guest = await signedUp('late');
+    await duringUserCall(stub, async instance => {
+      const { sql } = instance as unknown as { sql: SqlStorage };
+      for (let i = 1; i < MAX_PARTY_MEMBERS; i++) {
+        sql.exec('INSERT INTO memberships (member_id, name, joined_at) VALUES (?, ?, ?)', `stand-in-${i}`, `Stand-in ${i}`, Date.now());
+      }
+    });
+    expect(await stub.join(guest, 'Late', null, {})).toEqual({
+      ok: false, error: { code: 'conflict', fieldName: 'party', message: `This party is full: it already has ${MAX_PARTY_MEMBERS} people.` },
+    });
+    expect(await stub.view(host.id)).toMatchObject({ participantCount: MAX_PARTY_MEMBERS });
     expect(await env.USER.getByName(guest.email).listParties(10)).toEqual([]);
   });
 

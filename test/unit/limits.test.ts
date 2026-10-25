@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { MAX_BODY_BYTES, MAX_NAME_LENGTH } from 'src/api/limits';
 import { PARTY_CODE_RE } from 'src/api/schemas';
 import { MAX_NEW_PARTIES_PER_DAY, MAX_OPEN_HOSTED_PARTIES } from 'src/api/routes/parties';
-import { MAX_PARTY_PHRASE_GUESSES, MAX_PHRASE_GUESSES, PHRASE_GUESS_WINDOW_MS } from 'src/do/PartyDO';
+import { MAX_PARTY_MEMBERS, MAX_PARTY_PHRASE_GUESSES, MAX_PHRASE_GUESSES, PHRASE_GUESS_WINDOW_MS } from 'src/do/PartyDO';
 import { PARTY_STARTS_WINDOW_MS } from 'src/do/UserDO';
 
 import { denied, request, signIn, testEnv, uniqueEmail } from './helpers';
@@ -39,6 +39,29 @@ describe('request size', () => {
     const who = await signIn();
     expect((await request('PATCH', '/v1/me', { token: who.token, body: { name: 'x'.repeat(MAX_NAME_LENGTH) } })).status).toBe(200);
     expect((await request('PATCH', '/v1/me', { token: who.token, body: { name: 'x'.repeat(MAX_NAME_LENGTH + 1) } })).status).toBe(400);
+  });
+});
+
+describe('party size', () => {
+  /** Adds stand-in members straight to the party, so the test doesn't need a hundred real joins. */
+  const addMembers = (code: string, count: number) => runInDurableObject(env.PARTY.getByName(code), async (_instance, state) => {
+    for (let i = 0; i < count; i++) {
+      state.storage.sql.exec('INSERT INTO memberships (member_id, name, joined_at) VALUES (?, ?, ?)', `stand-in-${i}`, `Stand-in ${i}`, Date.now());
+    }
+  });
+
+  it(`takes at most ${MAX_PARTY_MEMBERS} people, host included`, async () => {
+    const host = await signIn();
+    const { code } = await create(host.token);
+    await addMembers(code, MAX_PARTY_MEMBERS - 2);
+
+    const last = await signIn();
+    expect((await join(last.token, code)).status).toBe(200);
+    expect(await join((await signIn()).token, code)).toMatchObject({
+      status: 409, body: { error: { code: 'conflict', field: 'party', message: `This party is full: it already has ${MAX_PARTY_MEMBERS} people.` } },
+    });
+    // Someone already in still gets the party back when they join again.
+    expect((await join(last.token, code)).status).toBe(200);
   });
 });
 
