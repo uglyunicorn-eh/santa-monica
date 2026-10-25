@@ -117,11 +117,41 @@ describe('Durable Object calls per operation', () => {
     expect(counting.calls.map(c => `${c.binding}.${c.method}`)).toEqual(['USER.get', 'PARTY.create']);
   });
 
-  it('reads the user with one call', async () => {
+  it('reads my profile with one call, and none without a session', async () => {
     const me = await person('Me');
     const counting = countingEnv();
     expect((await gql(counting.env, `{ user { id name email } }`, {}, me.token)).data.user).toMatchObject({ name: 'Me', email: me.email });
     expect(counting.calls).toEqual([{ binding: 'USER', name: me.email, method: 'get' }]);
+
+    counting.reset();
+    expect((await gql(counting.env, `{ user { id } parties { code } }`)).data).toEqual({ user: null, parties: null });
+    expect(counting.count()).toBe(0);
+  });
+
+  it('signs in with one call, whether the link is fresh, used or invalid', async () => {
+    const email = `eff-enter-${++counter}@example.com`;
+    const token = await jwt.issueToken('EnterRequest', { email, jti: crypto.randomUUID() }, { ttl: 60 });
+    const ENTER = `mutation ($token: String!) { auth { enter(input: { enterRequestToken: $token }) { status userToken user { id name } } } }`;
+    const counting = countingEnv();
+
+    expect((await gql(counting.env, ENTER, { token })).data.auth.enter.status).toBe('ok');
+    expect(counting.calls).toEqual([{ binding: 'USER', name: email, method: 'redeemMagicLink' }]);
+
+    counting.reset();
+    expect((await gql(counting.env, ENTER, { token })).data.auth.enter.status).toBe('error');
+    expect(counting.calls).toEqual([{ binding: 'USER', name: email, method: 'redeemMagicLink' }]);
+
+    counting.reset();
+    expect((await gql(counting.env, ENTER, { token: 'garbage' })).data.auth.enter.status).toBe('error');
+    expect(counting.count()).toBe(0);
+  });
+
+  it('requests a magic link without touching any Durable Object', async () => {
+    const counting = countingEnv();
+    const bindings = { ...counting.env, EMAIL: { send: async () => ({ messageId: 'm' }) } } as unknown as typeof env;
+    const res = await gql(bindings, `mutation ($email: String!) { auth { enterRequest(input: { email: $email }) { status } } }`, { email: `eff-link-${++counter}@example.com` });
+    expect(res.data.auth.enterRequest.status).toBe('ok');
+    expect(counting.count()).toBe(0);
   });
 
   it('updates the profile name with one call, which also checks the session', async () => {
@@ -240,15 +270,15 @@ describe('party → user updates', () => {
   it('delivers older queued messages (from before summaries) as one sync per user', async () => {
     const host = await person('Host');
     const { node } = (await gql(env, CREATE, { name: 'Legacy' }, host.token)).data.parties.createParty;
-    await runInDurableObject(env.PARTY.getByName(node.code), async (_i, state) => {
+    // Record first, then deliver by calling the alarm handler directly: a real alarm could fire before the recorder is in place.
+    const { applied, done } = recordUserCalls(node.code);
+    await done;
+    await runInDurableObject(env.PARTY.getByName(node.code), async (instance: PartyDO, state) => {
       for (const kind of ['user.removeParty', 'user.addParty']) {
         state.storage.sql.exec('INSERT INTO outbox (payload, next_attempt_at) VALUES (?, 0)', JSON.stringify({ kind, email: host.email, party: { slug: node.code } }));
       }
-      await state.storage.setAlarm(Date.now());
+      await instance.alarm();
     });
-    const { applied, done } = recordUserCalls(node.code);
-    await done;
-    await runDurableObjectAlarm(env.PARTY.getByName(node.code));
     expect(applied).toEqual([{ email: host.email, updates: [{ type: 'addParty', party: expect.objectContaining({ slug: node.code, isHost: true }) }] }]);
   });
 });
