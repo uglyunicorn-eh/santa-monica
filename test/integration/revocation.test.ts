@@ -18,6 +18,7 @@ const ROUTES: Record<string, { revoked: 'unauthenticated' | 'anonymous' | 'no se
   'POST /auth/session': { revoked: 'no session' },
   'POST /me/deletion/confirm': { revoked: 'no session' },
   'POST /me/email-change/confirm': { revoked: 'no session' },
+  'POST /me/email-change/cancel': { revoked: 'no session' },
   'GET /me': { revoked: 'unauthenticated', call: (f, token) => call('GET', '/v1/me', { token }) },
   'PATCH /me': { revoked: 'unauthenticated', call: (f, token) => call('PATCH', '/v1/me', { token, body: { name: 'Ghost' } }) },
   'GET /me/parties': { revoked: 'unauthenticated', call: (f, token) => call('GET', '/v1/me/parties', { token }) },

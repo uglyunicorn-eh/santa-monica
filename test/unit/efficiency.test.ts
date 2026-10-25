@@ -59,6 +59,7 @@ const BUDGETS: Record<string, { USER: number | string; PARTY: number | string }>
   'POST /me/email-change': { USER: 2, PARTY: 0 },
   'POST /me/deletion/confirm': { USER: 2, PARTY: '1 per party' },
   'POST /me/email-change/confirm': { USER: 4, PARTY: '1 per party' },
+  'POST /me/email-change/cancel': { USER: 1, PARTY: 0 },
   'GET /parties/:code': { USER: '0 anonymous, 1 signed in', PARTY: 1 },
   'POST /parties': { USER: 1, PARTY: 1 },
   'POST /parties/:code/join': { USER: 0, PARTY: 1 },
@@ -132,13 +133,28 @@ describe('Durable Object call budgets', () => {
     expect(counting.calls.map(c => `${c.name === who.email ? 'old' : 'new'}.${c.method}`)).toEqual(['old.beginMailRequest', 'new.checkRecipient']);
   });
 
+  it('POST /me/email-change/cancel: one call, fresh or repeated; none for an invalid link', async () => {
+    const who = await person();
+    const token = await jwt().issueToken('EmailChangeCancel', { sub: who.nodeId, email: who.email, jti: crypto.randomUUID() }, { ttl: 60 });
+    const counting = countingEnv();
+    const k = key();
+    for (let i = 0; i < 2; i++) {
+      counting.reset();
+      expect((await request('POST', '/v1/me/email-change/cancel', { key: k, body: { token }, env: counting.env })).status).toBe(200);
+      expect(counting.methods()).toEqual(['USER.cancelAccountChange']);
+    }
+    counting.reset();
+    await request('POST', '/v1/me/email-change/cancel', { body: { token: 'garbage' }, env: counting.env });
+    expect(counting.count()).toBe(0);
+  });
+
   it('confirming a deletion: two calls to the user and one per party, however many parties', async () => {
     for (const parties of [1, 3]) {
       const who = await person();
       for (let i = 0; i < parties; i++) {
         await create(who.token, `P${i}`);
       }
-      const token = await jwt().issueToken('AccountDeletion', { sub: who.nodeId, email: who.email, jti: crypto.randomUUID() }, { ttl: 60 });
+      const token = await jwt().issueToken('AccountDeletion', { sub: who.nodeId, email: who.email, jti: crypto.randomUUID(), ver: 0 }, { ttl: 60 });
       const counting = countingEnv();
       expect((await request('POST', '/v1/me/deletion/confirm', { body: { token }, env: counting.env })).status).toBe(200);
       expect([counting.count('USER'), counting.count('PARTY')]).toEqual([2, parties]);
@@ -153,7 +169,7 @@ describe('Durable Object call budgets', () => {
         await create(who.token, `P${i}`);
       }
       const newEmail = uniqueEmail('moved');
-      const token = await jwt().issueToken('EmailChange', { sub: who.nodeId, email: who.email, newEmail, jti: crypto.randomUUID() }, { ttl: 60 });
+      const token = await jwt().issueToken('EmailChange', { sub: who.nodeId, email: who.email, newEmail, jti: crypto.randomUUID(), ver: 0 }, { ttl: 60 });
       const counting = countingEnv();
       expect((await request('POST', '/v1/me/email-change/confirm', { body: { token }, env: counting.env })).status).toBe(200);
       expect([counting.count('USER'), counting.count('PARTY')]).toEqual([4, parties]);

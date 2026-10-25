@@ -15,7 +15,7 @@ export type IssueTokenOptions = {
   ttl?: number;
 };
 
-export type TokenType = 'EnterRequest' | 'UserToken' | 'AccountDeletion' | 'EmailChange';
+export type TokenType = 'EnterRequest' | 'UserToken' | 'AccountDeletion' | 'EmailChange' | 'EmailChangeCancel';
 
 export type JwtHelpers = {
   issueToken: <P extends TokenPayload = TokenPayload>(type: TokenType, payload: P, options?: IssueTokenOptions) => Promise<TokenValue>;

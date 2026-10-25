@@ -184,8 +184,11 @@ const linkId = v.pipe(v.string(), v.nonEmpty());
 export const tokens = {
   user: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), ver: v.optional(v.number()) }),
   enterRequest: v.object({ email: v.pipe(v.string(), v.nonEmpty(), v.toLowerCase()), typed: v.optional(v.string()), jti: linkId, exp: v.number(), party: v.optional(v.string()) }),
-  accountDeletion: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number() }),
-  emailChange: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), newEmail: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number() }),
+  accountDeletion: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number(), ver: v.number() }),
+  emailChange: v.object({
+    sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), newEmail: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number(), ver: v.number(),
+  }),
+  emailChangeCancel: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number() }),
 };
 
 // ---------------------------------------------------------------------------------------------------------------------

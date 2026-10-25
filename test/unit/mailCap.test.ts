@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { EMAILS_PER_ADDRESS_PER_HOUR } from 'src/api/rateLimit';
 import { MAIL_QUOTA_WINDOW_MS } from 'src/do/UserDO';
 
-import { mailer, request, signIn, testEnv, uniqueEmail } from './helpers';
+import { denied, mailer, request, signIn, testEnv, uniqueEmail } from './helpers';
 
 const key = () => crypto.randomUUID();
 
@@ -96,9 +96,16 @@ describe('the per-address email cap', () => {
     expect([await counted(who.email), await counted(fresh)]).toEqual([before + 1, 1]);
 
     // A refused change gives back what it counted.
-    const taken = await signIn();
     const counts = await counted(who.email);
-    expect((await ask(taken.email, key())).status).toBe(409);
+    const limited = await request('POST', '/v1/me/email-change', {
+      token: who.token, key: key(), body: { email: uniqueEmail() }, env: testEnv({ ENTER_RATE_LIMIT_EMAIL: denied }),
+    });
+    expect(limited.status).toBe(429);
     expect(await counted(who.email)).toBe(counts);
+
+    // An address with an account gets a notice instead of the link, counted the same way.
+    const taken = await signIn();
+    expect((await ask(taken.email, key())).status).toBe(202);
+    expect(await counted(taken.email)).toBe(1);
   });
 });

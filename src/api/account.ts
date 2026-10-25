@@ -6,6 +6,7 @@ export const linkFailed = {
   used: () => fail('link_used', 'This link has already been used. Please request a new one.', 'token'),
   gone: () => fail('invalid_link', 'This account no longer exists.', 'token'),
   busy: () => fail('account_busy', 'Another change to this account is in progress. Please try again in a minute.', 'token'),
+  stale: () => fail('invalid_link', 'This link is no longer valid: your account was signed out everywhere since. Please request a new one.', 'token'),
 };
 export const notFinished = () => fail('not_finished', "We couldn't finish this right now. Please open the link again in a few minutes.", 'token');
 export const emailTaken = (field: string) => fail('conflict', 'This email is already used by another account.', field);
@@ -33,11 +34,13 @@ export type AccountMove = {
   jti: string;
   expiresAt: number;
   key?: string;
+  /** The token version the link was issued for; the move is refused (`stale`) when the account's has changed since. */
+  ver?: number;
 };
 
 export type AccountMoveResult =
   | { ok: true; user: UserRecord; parties: number }
-  | { ok: false; reason: 'gone' | 'used' | 'busy' | 'taken' | 'not_finished' }
+  | { ok: false; reason: 'gone' | 'used' | 'busy' | 'stale' | 'taken' | 'not_finished' }
   | { ok: false; reason: 'repeat'; current: UserRecord | null };
 
 /**
@@ -46,12 +49,12 @@ export type AccountMoveResult =
  * Drawn parties keep the old email. Every session token issued before stops working. If a party can't be reached,
  * the parties already moved go back and nothing changes (`not_finished`), so the link can be tried again.
  */
-export async function moveAccount(env: Env, { userId, from, to, jti, expiresAt, key }: AccountMove): Promise<AccountMoveResult> {
+export async function moveAccount(env: Env, { userId, from, to, jti, expiresAt, key, ver }: AccountMove): Promise<AccountMoveResult> {
   const oldUser = env.USER.getByName(from);
   const newUser = env.USER.getByName(to);
   const [current, started] = await Promise.all([
     newUser.get(),
-    oldUser.startAccountChange(userId, jti, expiresAt, { key, outcome: to }),
+    oldUser.startAccountChange(userId, jti, expiresAt, { key, outcome: to, ver }),
   ]);
   if (!started.ok) {
     return started.reason === 'repeat' ? { ok: false, reason: 'repeat', current } : { ok: false, reason: started.reason };

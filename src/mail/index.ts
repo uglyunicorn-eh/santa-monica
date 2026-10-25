@@ -3,6 +3,7 @@ import { Env } from 'src/env';
 import * as accountDeletion from './templates/accountDeletion';
 import * as emailChange from './templates/emailChange';
 import * as emailChangeNotice from './templates/emailChangeNotice';
+import * as emailTakenNotice from './templates/emailTakenNotice';
 import * as partyNotification from './templates/partyNotification';
 import * as signIn from './templates/signIn';
 
@@ -54,9 +55,14 @@ export const renderEmailChange = ({ url, oldEmail, newEmail, assetsUrl }: { url:
   return render(emailChange, { ...emailChange.vars, ...vars, body: fillBody(emailChange.body, vars) });
 };
 
-export const renderEmailChangeNotice = ({ oldEmail, newEmail, assetsUrl }: { oldEmail: string; newEmail: string; assetsUrl: string }) => {
-  const vars = { oldEmail, newEmail, assetsUrl, assetsVersion };
+export const renderEmailChangeNotice = ({ oldEmail, newEmail, cancelUrl, assetsUrl }: { oldEmail: string; newEmail: string; cancelUrl: string; assetsUrl: string }) => {
+  const vars = { oldEmail, newEmail, url: cancelUrl, assetsUrl, assetsVersion };
   return render(emailChangeNotice, { ...emailChangeNotice.vars, ...vars, body: fillBody(emailChangeNotice.body, vars) });
+};
+
+export const renderEmailTakenNotice = ({ email, assetsUrl }: { email: string; assetsUrl: string }) => {
+  const vars = { email, assetsUrl, assetsVersion };
+  return render(emailTakenNotice, { ...emailTakenNotice.vars, ...vars, body: fillBody(emailTakenNotice.body, vars) });
 };
 
 export const sendMail = async (env: Env, to: string, message: MailMessage) => {

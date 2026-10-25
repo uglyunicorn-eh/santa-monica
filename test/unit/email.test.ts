@@ -132,7 +132,9 @@ describe('changing to a Gmail address', () => {
 
     const other = gmailUser();
     await signIn(`${dotted(other)}@gmail.com`);
-    expect(await ask(who.token, `${dotted(other)}@gmail.com`)).toMatchObject({ status: 409, body: { error: { code: 'conflict' } } });
+    const notified = mailer();
+    expect((await ask(who.token, `${dotted(other)}@gmail.com`, testEnv({ EMAIL: notified.EMAIL }))).status).toBe(202);
+    expect(notified.sent[0]).toMatchObject({ to: `${other}@gmail.com`, subject: 'Someone tried to use your email on Anonymous Ded Morozes' });
 
     const free = gmailUser();
     const { sent, EMAIL } = mailer();
