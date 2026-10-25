@@ -4,11 +4,13 @@ import { action } from 'src/api/action';
 import { ApiContext, ApiEnv, RequestSession, clientIp } from 'src/api/context';
 import { fail, notSignedIn } from 'src/api/errors';
 import { idempotencyKey, readBody, readParams, send } from 'src/api/input';
+import { admitLegacyCode } from 'src/api/rateLimit';
 import { PARTY_CODE_ALPHABET, PARTY_CODE_LENGTH, bodies, params, party as partyJson } from 'src/api/schemas';
 import { optionalSession, requireSession } from 'src/api/session';
 import { PartyResult, PartyView } from 'src/do/types';
 import { newObjectId } from 'src/utils/ids';
 import { randomString } from 'src/utils/strings/random';
+import { partyRef } from 'src/utils/logRef';
 import { annotate } from 'src/utils/tracing';
 
 const SLUG_ATTEMPTS = 10;
@@ -64,8 +66,9 @@ export const parties = new Hono<ApiEnv>();
  */
 parties.get('/:code', optionalSession, action('party', async (c, span) => {
   const { code } = readParams(c, params.party);
-  annotate({ 'party.code': code });
+  annotate({ 'party.ref': await partyRef(c.env, code) });
   await admitLookup(c);
+  await admitLegacyCode(c.env, clientIp(c), code);
   const s = c.get('session');
   const stub = c.env.PARTY.getByName(code);
   const [view, user] = await Promise.all([stub.view(s?.userId), s ? s.verify() : null]);
@@ -126,7 +129,7 @@ parties.post('/', requireSession, action('createParty', async c => {
       }
       continue;
     }
-    annotate({ 'party.code': slug });
+    annotate({ 'party.ref': await partyRef(c.env, slug) });
     return sendParty(c, result, 201);
   }
   throw new Error('Unable to generate a unique party code.');
@@ -140,13 +143,14 @@ parties.post('/:code/join', requireSession, action('joinParty', async c => {
   const { code } = readParams(c, params.party);
   const { name, password } = await readBody(c, bodies.joinParty);
   const s = session(c);
-  annotate({ 'party.code': code });
+  annotate({ 'party.ref': await partyRef(c.env, code) });
   // Joining with a code is how a party without a secret phrase is reached, so attempts are limited per user.
   const { success } = await c.env.JOIN_RATE_LIMIT_USER.limit({ key: s.userId });
   annotate({ 'party.join_rate_limited': !success });
   if (!success) {
     throw fail('rate_limited', "Whoa, that's a lot of tries! Please wait a minute and try again.", 'party');
   }
+  await admitLegacyCode(c.env, clientIp(c), code, 'party');
   return sendParty(c, await c.env.PARTY.getByName(code).join(
     { id: s.userId, email: s.email, name },
     name,
@@ -158,7 +162,7 @@ parties.post('/:code/join', requireSession, action('joinParty', async c => {
 /** Leaves a party. Leaving one you're not in answers with the party as it is. */
 parties.post('/:code/leave', requireSession, action('leaveParty', async c => {
   const { code } = readParams(c, params.party);
-  annotate({ 'party.code': code });
+  annotate({ 'party.ref': await partyRef(c.env, code) });
   const user = await verified(c);
   return sendParty(c, await c.env.PARTY.getByName(code).leave(user.id));
 }));
@@ -166,7 +170,7 @@ parties.post('/:code/leave', requireSession, action('leaveParty', async c => {
 /** Rolls the dice (host only). A repeat answers with the same draw; nothing is drawn or mailed again. */
 parties.post('/:code/draw', requireSession, action('closeParty', async c => {
   const { code } = readParams(c, params.party);
-  annotate({ 'party.code': code });
+  annotate({ 'party.ref': await partyRef(c.env, code) });
   const user = await verified(c);
   return sendParty(c, await c.env.PARTY.getByName(code).close(user.id));
 }));
@@ -174,7 +178,7 @@ parties.post('/:code/draw', requireSession, action('closeParty', async c => {
 /** Deletes an open party (host only); it can be restored for a day. A repeat answers with the deleted party. */
 parties.delete('/:code', requireSession, action('deleteParty', async c => {
   const { code } = readParams(c, params.party);
-  annotate({ 'party.code': code });
+  annotate({ 'party.ref': await partyRef(c.env, code) });
   const user = await verified(c);
   return sendParty(c, await c.env.PARTY.getByName(code).delete(user.id));
 }));
@@ -186,7 +190,7 @@ parties.delete('/:code', requireSession, action('deleteParty', async c => {
  */
 parties.post('/:code/restore', requireSession, action('restoreParty', async c => {
   const { code } = readParams(c, params.party);
-  annotate({ 'party.code': code });
+  annotate({ 'party.ref': await partyRef(c.env, code) });
   const s = session(c);
   const stub = c.env.PARTY.getByName(code);
   const view = await stub.view(s.userId);

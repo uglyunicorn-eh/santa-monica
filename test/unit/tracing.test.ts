@@ -1,6 +1,9 @@
 import { tracing } from 'cloudflare:workers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { env } from 'cloudflare:test';
+
+import { partyRef } from 'src/utils/logRef';
 import { annotate, recordOutcome, withSpan } from 'src/utils/tracing';
 
 import { jwt, request, signIn } from './helpers';
@@ -107,10 +110,11 @@ describe('API action spans', () => {
     expect(spans.map(s => s.name)).toEqual(['api.createParty', 'api.createParty']);
     expect(spans[0].attributes).toMatchObject({
       'api.action': 'createParty', 'user.id': who.id, 'api.status': 'ok',
-      'party.protected': true, 'party.code': created.body.code, 'party.code_attempts': 1,
+      'party.protected': true, 'party.ref': await partyRef(env, created.body.code), 'party.code_attempts': 1,
     });
     expect(spans[1].attributes).toMatchObject({ 'api.status': 'error', 'api.error_code': 'invalid', 'api.user_error_fields': 'name' });
     expect(JSON.stringify(spans)).not.toContain(who.email);
+    expect(JSON.stringify(spans)).not.toContain(created.body.code);
   });
 
   it('records spans for reads', async () => {
@@ -123,7 +127,9 @@ describe('API action spans', () => {
     await request('GET', '/v1/me', { token: who.token });
 
     expect(spans.map(s => s.name)).toEqual(['api.party', 'api.partyHistory', 'api.user']);
-    expect(spans[0].attributes).toMatchObject({ 'party.code': party.code, 'party.found': true, 'party.joined': true });
+    expect(spans[0].attributes).toMatchObject({ 'party.ref': await partyRef(env, party.code), 'party.found': true, 'party.joined': true });
+    // The code itself is never recorded: it is the key to a party without a secret phrase.
+    expect(JSON.stringify(spans)).not.toContain(party.code);
     expect(spans[1].attributes).toMatchObject({ 'parties.first': 10, 'parties.count': 1 });
     expect(spans[2].attributes).toMatchObject({ 'user.id': who.id, 'user.found': true });
   });
@@ -137,5 +143,16 @@ describe('API action spans', () => {
     await request('POST', '/v1/auth/session', { body: { token: 'garbage' } });
 
     expect(spans.map(s => s.attributes['auth.magic_link'])).toEqual(['redeemed', 'already_used', 'invalid']);
+  });
+});
+
+describe('partyRef', () => {
+  it('refers to a party by a stable keyed hash of its code, never the code', async () => {
+    const ref = await partyRef(env, 'QWERTYUI');
+    expect(ref).toMatch(/^[0-9a-f]{12}$/);
+    expect(await partyRef(env, 'QWERTYUI')).toBe(ref);
+    expect(await partyRef(env, 'QWERTYUP')).not.toBe(ref);
+    // Another key gives other refs, so a ref can't be matched to a code without the key.
+    expect(await partyRef({ ...env, JWT_PRIVATE_KEY: env.TEST_OTHER_PRIVATE_KEY } as typeof env, 'QWERTYUI')).not.toBe(ref);
   });
 });

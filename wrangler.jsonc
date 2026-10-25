@@ -18,7 +18,8 @@
   "preview_urls": false,
   "vars": {
     "PUBLIC_URL": "https://api.gnomik.me",
-    "FRONTEND_URL": "https://gnomik.me"
+    "FRONTEND_URL": "https://gnomik.me",
+    "ALLOWED_ORIGINS": "https://gnomik.me,https://*.gnomik-me.pages.dev"
   },
   "durable_objects": {
     "bindings": [
@@ -37,6 +38,8 @@
     { "name": "ENTER_RATE_LIMIT_EMAIL", "namespace_id": "1002", "simple": { "limit": 3, "period": 60 } },
     // Party codes are the key to a party without a secret phrase, so looking them up and joining are limited too.
     { "name": "PARTY_LOOKUP_RATE_LIMIT_IP", "namespace_id": "1003", "simple": { "limit": 60, "period": 60 } },
+    // Old 5-letter codes (about 1.2·10^7 of them) are far easier to guess than 8-letter ones, so trying them is slower.
+    { "name": "LEGACY_CODE_LOOKUP_RATE_LIMIT_IP", "namespace_id": "1005", "simple": { "limit": 10, "period": 60 } },
     { "name": "JOIN_RATE_LIMIT_USER", "namespace_id": "1004", "simple": { "limit": 10, "period": 60 } }
   ],
 
@@ -55,7 +58,8 @@
       "preview_urls": false,
       "vars": {
         "PUBLIC_URL": "https://gnomik-api-preview.uglyunicorn.workers.dev",
-        "FRONTEND_URL": "http://localhost:4321"
+        "FRONTEND_URL": "http://localhost:4321",
+        "ALLOWED_ORIGINS": "https://gnomik.me,https://*.gnomik-me.pages.dev,http://localhost:4321,http://localhost:4322,http://localhost:4323"
       },
       "durable_objects": {
         "bindings": [
@@ -70,6 +74,7 @@
         { "name": "ENTER_RATE_LIMIT_IP", "namespace_id": "2001", "simple": { "limit": 10, "period": 60 } },
         { "name": "ENTER_RATE_LIMIT_EMAIL", "namespace_id": "2002", "simple": { "limit": 3, "period": 60 } },
         { "name": "PARTY_LOOKUP_RATE_LIMIT_IP", "namespace_id": "2003", "simple": { "limit": 60, "period": 60 } },
+        { "name": "LEGACY_CODE_LOOKUP_RATE_LIMIT_IP", "namespace_id": "2005", "simple": { "limit": 10, "period": 60 } },
         { "name": "JOIN_RATE_LIMIT_USER", "namespace_id": "2004", "simple": { "limit": 10, "period": 60 } }
       ]
     }

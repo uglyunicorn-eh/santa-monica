@@ -65,6 +65,13 @@ const ADDED_COLUMNS: Record<string, Record<string, string>> = {
 /** Wrong secret phrases one person can try on a party within PHRASE_GUESS_WINDOW_MS before having to wait. */
 export const MAX_PHRASE_GUESSES = 5;
 export const PHRASE_GUESS_WINDOW_MS = 15 * 60 * 1000;
+/**
+ * Wrong secret phrases a party takes from everyone together within PHRASE_GUESS_WINDOW_MS. The per-person limit alone
+ * can be multiplied by signing up many times; this one can't. A correct phrase always gets through it.
+ */
+export const MAX_PARTY_PHRASE_GUESSES = 20;
+/** The `phrase_guesses` row that counts the whole party's wrong guesses (member ids are never empty). */
+const WHOLE_PARTY = '';
 
 const MAX_ATTEMPTS = 15;
 const MAX_BACKOFF_MS = 60 * 60 * 1000;
@@ -123,13 +130,16 @@ export class PartyDO extends DurableObject<Env> {
     `);
   }
 
-  /** How long this person must wait before guessing the secret phrase again, or 0 when they may guess now. */
-  private guessLockout(memberId: string): number {
+  /**
+   * How long `memberId` (or WHOLE_PARTY) must wait before guessing the secret phrase again after `max` wrong guesses,
+   * or 0 when they may guess now.
+   */
+  private guessLockout(memberId: string, max: number): number {
     const row = this.sql
       .exec<{ failures: number; first_failed_at: number }>('SELECT failures, first_failed_at FROM phrase_guesses WHERE member_id = ?', memberId)
       .toArray()[0];
     const left = row ? row.first_failed_at + PHRASE_GUESS_WINDOW_MS - Date.now() : 0;
-    return row && row.failures >= MAX_PHRASE_GUESSES && left > 0 ? left : 0;
+    return row && row.failures >= max && left > 0 ? left : 0;
   }
 
   /** Counts a wrong secret phrase, starting a new window when the last one has passed. */
@@ -365,13 +375,22 @@ export class PartyDO extends DurableObject<Env> {
     if (party.is_closed) {
       return closedToNewMembers;
     }
-    const lockedFor = this.guessLockout(member.id);
+    const waitMessage = (ms: number) => {
+      const minutes = Math.ceil(ms / 60_000);
+      return `That's a lot of wrong guesses! Please ask your friend for the secret phrase and try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`;
+    };
+    const lockedFor = this.guessLockout(member.id, MAX_PHRASE_GUESSES);
     if (lockedFor) {
-      const minutes = Math.ceil(lockedFor / 60_000);
-      return fail('rate_limited', 'password', `That's a lot of wrong guesses! Please ask your friend for the secret phrase and try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`);
+      return fail('rate_limited', 'password', waitMessage(lockedFor));
     }
     if ((party.password || '').toUpperCase() !== (password || '').toUpperCase()) {
+      // Too many wrong guesses at this party from everyone: refuse more for now, without counting them.
+      const partyLockedFor = this.guessLockout(WHOLE_PARTY, MAX_PARTY_PHRASE_GUESSES);
+      if (partyLockedFor) {
+        return fail('rate_limited', 'password', waitMessage(partyLockedFor));
+      }
       this.recordWrongGuess(member.id);
+      this.recordWrongGuess(WHOLE_PARTY);
       return fail('forbidden', 'password', "Hmm... Seems you've got a wrong secret phrase. Please try a different one or ask your friend for a hint.");
     }
     this.sql.exec('DELETE FROM phrase_guesses WHERE member_id = ?', member.id);

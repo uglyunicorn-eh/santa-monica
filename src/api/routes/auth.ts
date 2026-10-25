@@ -5,11 +5,12 @@ import { action } from 'src/api/action';
 import { ApiEnv, clientIp, jwtFor } from 'src/api/context';
 import { fail } from 'src/api/errors';
 import { idempotencyKey, keyHash, readBody, send } from 'src/api/input';
-import { emailRateLimit } from 'src/api/rateLimit';
+import { admitLegacyCode, emailRateLimit } from 'src/api/rateLimit';
 import { accepted, bodies, session, tokens } from 'src/api/schemas';
 import { EnterRequestToken } from 'src/api/types';
 import { issueSession, sendRequestedMail } from 'src/api/users';
 import { renderSignIn } from 'src/mail';
+import { partyRef } from 'src/utils/logRef';
 import { annotate } from 'src/utils/tracing';
 
 /** Magic links work for five minutes. */
@@ -28,7 +29,7 @@ auth.post('/magic-link', action('enterRequest', async c => {
   const key = idempotencyKey(c);
   const detail = party ?? '';
   const recipient = env.USER.getByName(email);
-  annotate({ 'party.code': party });
+  annotate({ 'party.ref': party && await partyRef(env, party) });
 
   if (key && await recipient.seenMailRequest(key, detail)) {
     annotate({ 'mail.request_repeated': true });
@@ -38,6 +39,9 @@ auth.post('/magic-link', action('enterRequest', async c => {
   annotate({ 'auth.rate_limited': rateLimited ?? false });
   if (rateLimited) {
     throw fail('rate_limited', "Whoa, that's a lot of magic links! Please wait a minute and try again.", 'email');
+  }
+  if (party) {
+    await admitLegacyCode(env, clientIp(c), party, 'party');
   }
   if (party && !await env.PARTY.getByName(party).view()) {
     throw fail('not_found', 'Invalid party code.', 'party');

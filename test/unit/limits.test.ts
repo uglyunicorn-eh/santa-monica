@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import { MAX_BODY_BYTES, MAX_NAME_LENGTH } from 'src/api/limits';
 import { PARTY_CODE_RE } from 'src/api/schemas';
-import { MAX_PHRASE_GUESSES, PHRASE_GUESS_WINDOW_MS } from 'src/do/PartyDO';
+import { MAX_PARTY_PHRASE_GUESSES, MAX_PHRASE_GUESSES, PHRASE_GUESS_WINDOW_MS } from 'src/do/PartyDO';
 
 import { denied, request, signIn, testEnv, uniqueEmail } from './helpers';
 
@@ -87,7 +87,7 @@ describe('joining', () => {
       await firstGuessAgo(code, guest.id, PHRASE_GUESS_WINDOW_MS + 1000);
       expect((await join(guest.token, code, 'mistletoe')).status).toBe(200);
       expect(await runInDurableObject(env.PARTY.getByName(code), async (_i, state) =>
-        state.storage.sql.exec('SELECT COUNT(*) AS n FROM phrase_guesses').one().n)).toBe(0);
+        state.storage.sql.exec('SELECT COUNT(*) AS n FROM phrase_guesses WHERE member_id = ?', guest.id).one().n)).toBe(0);
     });
 
     it('starts counting again after a quiet window', async () => {
@@ -102,7 +102,51 @@ describe('joining', () => {
       expect(await join(guest.token, code, 'nope')).toMatchObject(wrong);
       expect(await join(guest.token, code, 'nope again')).toMatchObject(wrong);
       expect(await runInDurableObject(env.PARTY.getByName(code), async (_i, state) =>
-        state.storage.sql.exec('SELECT failures FROM phrase_guesses').one().failures)).toBe(2);
+        state.storage.sql.exec('SELECT failures FROM phrase_guesses WHERE member_id = ?', guest.id).one().failures)).toBe(2);
     });
+  });
+});
+
+describe('guessing a party\'s secret phrase from many accounts', () => {
+  const wrongGuess = async (code: string) => join((await signIn()).token, code, 'nope');
+
+  it(`allows ${MAX_PARTY_PHRASE_GUESSES} wrong guesses from everyone together, then refuses more, while the right phrase still works`, async () => {
+    const host = await signIn();
+    const { code } = await create(host.token, 'mistletoe');
+    for (let i = 0; i < MAX_PARTY_PHRASE_GUESSES; i++) {
+      expect((await wrongGuess(code)).status).toBe(403);
+    }
+    expect(await wrongGuess(code)).toMatchObject({ status: 429, body: { error: { code: 'rate_limited', field: 'password', message: expect.stringMatching(/try again in 15 minutes/) } } });
+    expect((await join((await signIn()).token, code, 'MISTLETOE')).status).toBe(200);
+    // Refused guesses aren't counted.
+    expect(await runInDurableObject(env.PARTY.getByName(code), async (_i, state) =>
+      state.storage.sql.exec("SELECT failures FROM phrase_guesses WHERE member_id = ''").one().failures)).toBe(MAX_PARTY_PHRASE_GUESSES);
+  });
+
+  it('lets guessing go on once the window has passed', async () => {
+    const host = await signIn();
+    const { code } = await create(host.token, 'mistletoe');
+    for (let i = 0; i < MAX_PARTY_PHRASE_GUESSES; i++) {
+      await wrongGuess(code);
+    }
+    await runInDurableObject(env.PARTY.getByName(code), async (_i, state) => {
+      state.storage.sql.exec("UPDATE phrase_guesses SET first_failed_at = ? WHERE member_id = ''", Date.now() - PHRASE_GUESS_WINDOW_MS - 1000);
+    });
+    expect((await wrongGuess(code)).status).toBe(403);
+  });
+});
+
+describe('old 5-letter party codes', () => {
+  const legacy = testEnv({ LEGACY_CODE_LOOKUP_RATE_LIMIT_IP: denied });
+
+  it('are looked up, joined and put in sign-in links under the stricter limit; 8-letter codes are not', async () => {
+    const host = await signIn();
+    const { code } = await create(host.token);
+    const guest = await signIn();
+    expect(await request('GET', '/v1/parties/QWERT', { env: legacy })).toMatchObject({ status: 429, body: { error: { code: 'rate_limited' } } });
+    expect(await join(guest.token, 'QWERT', undefined, legacy)).toMatchObject({ status: 429, body: { error: { field: 'party' } } });
+    expect(await request('POST', '/v1/auth/magic-link', { body: { email: uniqueEmail(), party: 'QWERT' }, env: legacy })).toMatchObject({ status: 429, body: { error: { field: 'party' } } });
+    expect((await request('GET', `/v1/parties/${code}`, { env: legacy })).status).toBe(200);
+    expect((await join(guest.token, code, undefined, legacy)).status).toBe(200);
   });
 });
