@@ -22,7 +22,7 @@ const bindings = {
   TEST_OTHER_PRIVATE_KEY: otherKeyPair.privateKey.export({ type: 'pkcs8', format: 'pem' }) as string,
   PUBLIC_URL: 'https://api.test',
   FRONTEND_URL: 'https://gnomik.me',
-  ALLOWED_ORIGINS: 'https://gnomik.me,https://*.gnomik-me.pages.dev',
+  ALLOWED_ORIGINS: 'https://gnomik.me,https://*.santa-57a.pages.dev',
 };
 
 export default defineConfig({

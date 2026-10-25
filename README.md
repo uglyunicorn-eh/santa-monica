@@ -38,6 +38,7 @@ JSON in, JSON out. A signed-in request sends `Authorization: Bearer <session tok
 | `POST /v1/me/email-change` `{email}` | yes | Emails a confirmation link to the new address, and a notice with a cancel link to the current one (202) |
 | `POST /v1/me/email-change/confirm` `{token}` | link | Moves the account to the new address: `{userToken, user}` |
 | `POST /v1/me/email-change/cancel` `{token}` | link | "This wasn't me": stops the change and signs out everywhere |
+| `POST /v1/me/sign-out` | yes | Signs out every device, this one included |
 | `POST /v1/me/deletion` | yes | Emails a link that deletes the account (202) |
 | `POST /v1/me/deletion/confirm` `{token}` | link | Deletes the account |
 | `GET /v1/parties?code=` | optional | A party, as this person sees it |
@@ -55,7 +56,7 @@ JSON in, JSON out. A signed-in request sends `Authorization: Bearer <session tok
 
 ## Security
 
-**Sessions.** Session tokens last 30 days and carry the account's token version. Every signed-in route checks it, either in the Durable Object call the route makes anyway or with one read of the user (`session.verify()`). Changing the email, deleting the account and "This wasn't me" bump the version, which ends every session at once. `test/integration/revocation.test.ts` calls every route with a revoked token and fails if a new route is missing from it.
+**Sessions.** Session tokens last 30 days and carry the account's token version. Every signed-in route checks it, either in the Durable Object call the route makes anyway or with one read of the user (`session.verify()`). Signing out everywhere, changing the email, deleting the account and "This wasn't me" bump the version, which ends every session at once. `test/integration/revocation.test.ts` calls every route with a revoked token and fails if a new route is missing from it.
 
 **Emailed links.** Sign-in links last 5 minutes; account links (email change, deletion, cancel) last an hour. Each works once. Account links carry the token version they were issued for, so any version bump voids every pending one: someone with a stolen session may have asked for several.
 
@@ -80,7 +81,7 @@ Cloudflare's rate limits are counted per location and approximately; the phrase,
 
 **Privacy in logs.** Logs and traces never carry emails, names or party codes. They refer to a party by `party.ref`, a 12-hex-digit HMAC of its code keyed from `JWT_PRIVATE_KEY` (`src/utils/logRef.ts`), so a party's requests can be followed but its code can't be recovered.
 
-**HTTP.** Only the origins in `ALLOWED_ORIGINS` (`wrangler.jsonc`) get CORS headers: `https://gnomik.me` and its Pages previews in production, plus `http://localhost:4321`–`4323` for previews. Responses carry HSTS, `X-Frame-Options`, `nosniff` and a no-referrer policy.
+**HTTP.** Only the origins in `ALLOWED_ORIGINS` (`wrangler.jsonc`) get CORS headers. Responses carry HSTS, `X-Frame-Options`, `nosniff` and a no-referrer policy.
 
 ## Development
 
@@ -104,39 +105,29 @@ To try the web app against a local API, run `npx wrangler dev --env preview` her
 
 ## Deployment
 
-- **Pull requests** (`.github/workflows/preview.yml`): CI, then a [Worker Preview](https://developers.cloudflare.com/workers/previews/) `pr-<number>` of the `gnomik-api-preview` Worker at `https://pr-<number>-gnomik-api-preview.uglyunicorn.workers.dev`, with its own empty storage, smoke-tested and linked on the PR. It is deleted when the PR closes. Previews take their settings from the `previews` block of `env.preview` in `wrangler.jsonc`. Previews are public, so they only email the addresses in `EMAIL_ALLOWLIST` there (addresses and `@domains`); add yours to test with real email.
-- **Merges to `main`** (`.github/workflows/deploy.yml`): CI, then production at `https://api.gnomik.me`, smoke-tested.
-- Third-party actions are pinned to commit SHAs; Dependabot proposes updates weekly. `package.json` `overrides` pins `undici` and `zod` (from the Cloudflare toolchain) past known advisories; drop them once the toolchain depends on fixed versions.
+The API is a standard Worker; its settings are in `wrangler.jsonc`:
 
-GitHub secrets. Pull-request jobs run code from any branch, so they never see the production token:
+- **Production** (top level): the custom domain, `PUBLIC_URL`, `FRONTEND_URL` (where emailed links point), `ALLOWED_ORIGINS`, the sender address, the rate-limit bindings and the log destinations.
+- **PR previews** (`env.preview` and its `previews` block): [Worker Previews](https://developers.cloudflare.com/workers/previews/) of a separate Worker, each with its own empty storage. They are public, so they only email the addresses in `EMAIL_ALLOWLIST` (addresses and `@domains`).
 
-| Secret | Where | Cloudflare permissions |
-|---|---|---|
-| `CLOUDFLARE_API_TOKEN` | `production` environment (deploys from `main` only) | Individual Workers Editor on `gnomik-api`; Workers Routes Edit on the `gnomik.me` zone (every deploy re-applies the `api.gnomik.me` custom domain) |
-| `CLOUDFLARE_PREVIEW_API_TOKEN` | `preview` environment | Individual Workers Editor on `gnomik-api-preview` |
-| `CLOUDFLARE_ACCOUNT_ID` | repository | — |
-| `PREVIEW_JWT_PRIVATE_KEY` | repository | the previews' signing key |
-
-By hand:
+The one secret is `JWT_PRIVATE_KEY`, a P-256 private key in PKCS#8 PEM:
 
 ```bash
-npx wrangler deploy --env=""                                                   # production
-npx wrangler preview --env preview --name pr-123 --secrets-file secrets.json  # a Preview (JWT_PRIVATE_KEY in secrets.json)
-npx wrangler preview delete --env preview --name pr-123
-npx wrangler secret put JWT_PRIVATE_KEY                                        # production signing key
+npx wrangler secret put JWT_PRIVATE_KEY
+npx wrangler deploy --env=""
 ```
+
+CI (`.github/workflows/`) runs the checks on every pull request, deploys it as a Preview and smoke-tests it, then deploys `main` to production. Pull-request jobs only get a token that can edit the preview Worker; the production token is limited to deployments from `main`. Third-party actions are pinned to commit SHAs, and Dependabot proposes action and npm updates weekly, a week after each release.
 
 **Rotating the signing key.** The frontend verifies tokens with the matching public key (`publicKey` in santa-barbara's `src/config.json`), so update both together. Rotating signs everyone out.
 
 ```bash
 openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out jwt.pem
-openssl pkey -in jwt.pem -pubout                     # public key for santa-barbara's src/config.json
+openssl pkey -in jwt.pem -pubout                     # the public key, for the frontend
 npx wrangler secret put JWT_PRIVATE_KEY < jwt.pem
 rm jwt.pem
 ```
 
 ## Operations
 
-Production logs (`console.*` and Cloudflare's request logs) and traces are kept in Workers Logs and exported to Better Stack (source `gnomik-api`) through the `betterstack-logs` and `betterstack-traces` destinations configured in the Cloudflare dashboard. Previews keep theirs in Workers Logs only.
-
-Every route runs in a span named `api.<action>` (`api.createParty`, `api.joinParty`, `api.party`, …) with the action, the internal user id, the outcome (`api.status`, `api.error_code`) and details such as `party.ref`. Durable Object calls show up as child spans. An unexpected error returns a 500 with an `errorId`; search the logs for it (`message: "Unhandled error"`).
+Logs (`console.*` and Cloudflare's request logs) and traces go to Workers Logs, and can be exported over OpenTelemetry through the destinations named in `wrangler.jsonc`. Every route runs in a span named `api.<action>` (`api.createParty`, `api.joinParty`, `api.party`, …) with the action, the internal user id, the outcome (`api.status`, `api.error_code`) and details such as `party.ref`; Durable Object calls show up as child spans. An unexpected error returns a 500 with an `errorId`, logged with the error (`message: "Unhandled error"`).

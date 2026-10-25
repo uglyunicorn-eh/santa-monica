@@ -22,7 +22,7 @@
   "vars": {
     "PUBLIC_URL": "https://api.gnomik.me",
     "FRONTEND_URL": "https://gnomik.me",
-    "ALLOWED_ORIGINS": "https://gnomik.me,https://*.gnomik-me.pages.dev"
+    "ALLOWED_ORIGINS": "https://gnomik.me,https://*.santa-57a.pages.dev"
   },
   "durable_objects": {
     "bindings": [
@@ -60,7 +60,7 @@
       "vars": {
         "PUBLIC_URL": "https://gnomik-api-preview.uglyunicorn.workers.dev",
         "FRONTEND_URL": "http://localhost:4321",
-        "ALLOWED_ORIGINS": "https://gnomik.me,https://*.gnomik-me.pages.dev,http://localhost:4321,http://localhost:4322,http://localhost:4323"
+        "ALLOWED_ORIGINS": "https://gnomik.me,https://*.santa-57a.pages.dev,http://localhost:4321,http://localhost:4322,http://localhost:4323"
       },
       "durable_objects": {
         "bindings": [
@@ -89,7 +89,7 @@
           // Previews are public, so they email only these (comma-separated addresses and @domains). Add yours to test.
           "EMAIL_ALLOWLIST": "@uglyunicorn.ca,@gnomik.me",
           "FRONTEND_URL": "http://localhost:4321",
-          "ALLOWED_ORIGINS": "https://gnomik.me,https://*.gnomik-me.pages.dev,http://localhost:4321,http://localhost:4322,http://localhost:4323"
+          "ALLOWED_ORIGINS": "https://gnomik.me,https://*.santa-57a.pages.dev,http://localhost:4321,http://localhost:4322,http://localhost:4323"
         },
         // The code reads these from env, so Previews need them declared (each Preview still gets its own storage).
         "durable_objects": {

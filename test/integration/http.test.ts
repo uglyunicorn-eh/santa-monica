@@ -37,7 +37,7 @@ describe('HTTP surface', () => {
   it('lets only the listed origins read the answers', async () => {
     const from = (origin: string) => api('/', { headers: { origin } });
     expect((await from('https://gnomik.me')).headers.get('access-control-allow-origin')).toBe('https://gnomik.me');
-    expect((await from('https://pr-12.gnomik-me.pages.dev')).headers.get('access-control-allow-origin')).toBe('https://pr-12.gnomik-me.pages.dev');
+    expect((await from('https://pr-12.santa-57a.pages.dev')).headers.get('access-control-allow-origin')).toBe('https://pr-12.santa-57a.pages.dev');
     for (const origin of ['https://evil.example', 'https://gnomik.me.evil.example', 'null']) {
       const res = await from(origin);
       expect([origin, res.status, res.headers.get('access-control-allow-origin')]).toEqual([origin, 200, null]);

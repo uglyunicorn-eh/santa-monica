@@ -56,19 +56,19 @@ describe('Worker entry point', () => {
 });
 
 describe('CORS', () => {
-  const allowed = 'https://gnomik.me, https://*.gnomik-me.pages.dev,,';
+  const allowed = 'https://gnomik.me, https://*.santa-57a.pages.dev,,';
 
   it('allows the listed origins and one-label subdomains of a wildcard', () => {
-    for (const origin of ['https://gnomik.me', 'https://abc123.gnomik-me.pages.dev', 'https://my-branch.gnomik-me.pages.dev']) {
+    for (const origin of ['https://gnomik.me', 'https://abc123.santa-57a.pages.dev', 'https://my-branch.santa-57a.pages.dev']) {
       expect([origin, originAllowed(origin, allowed)]).toEqual([origin, true]);
     }
   });
 
   it('refuses everything else', () => {
     for (const origin of [
-      'https://evil.example', 'http://gnomik.me', 'https://gnomik.me.evil.example', 'https://gnomik-me.pages.dev',
-      'https://a.b.gnomik-me.pages.dev', 'http://abc.gnomik-me.pages.dev', 'https://evil.com/.gnomik-me.pages.dev',
-      'https://.gnomik-me.pages.dev', 'null', '',
+      'https://evil.example', 'http://gnomik.me', 'https://gnomik.me.evil.example', 'https://santa-57a.pages.dev',
+      'https://a.b.santa-57a.pages.dev', 'http://abc.santa-57a.pages.dev', 'https://evil.com/.santa-57a.pages.dev',
+      'https://.santa-57a.pages.dev', 'null', '',
     ]) {
       expect([origin, originAllowed(origin, allowed)]).toEqual([origin, false]);
     }

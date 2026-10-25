@@ -5,7 +5,7 @@ import { UserToken } from 'src/api/types';
 import { strToNodeId } from 'src/utils/strings/nodeId';
 
 import {
-  Person, apiError, call, changeEmail, confirmDeletion, confirmEmailChange, createParty, deleteAccount, drawParty, joinParty, jwt,
+  Person, apiError, call, mintUserToken, changeEmail, confirmDeletion, confirmEmailChange, createParty, deleteAccount, drawParty, joinParty, jwt,
   leaveParty, linkToken, mailbox, me, myParties, newKey, requestDeletion, requestEmailChange, settleParty, signIn,
   uniqueEmail, viewParty,
 } from './support';
@@ -326,3 +326,23 @@ describe('"This wasn\'t me" on an email change', () => {
     });
   });
 });
+
+describe('signing out everywhere', () => {
+  it('ends every session and voids pending account links; signing in again finds the same account', async () => {
+    const who = await person('me');
+    // A second device's session (made directly: the per-minute email limit leaves no room for another sign-in here).
+    const laptop = { token: await mintUserToken({ sub: who.id, email: who.email, ver: 0 }) };
+    expect((await me(laptop)).status).toBe(200);
+    const deletion = await requestDeletion(who);
+    expect(await call('POST', '/v1/me/sign-out', { token: who.token })).toEqual({ status: 200, body: { ok: true } });
+    for (const token of [who.token, laptop.token]) {
+      expect((await me({ token })).status).toBe(401);
+    }
+    expect(await confirmDeletion(deletion)).toMatchObject({ status: 400, body: { error: { code: 'invalid_link' } } });
+
+    const again = await signIn(who.email);
+    expect(again.id).toBe(who.id);
+    expect((await me(again)).status).toBe(200);
+  });
+});
+

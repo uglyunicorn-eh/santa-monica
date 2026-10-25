@@ -124,6 +124,20 @@ describe('GET and PATCH /v1/me', () => {
   });
 });
 
+describe('POST /v1/me/sign-out', () => {
+  it('ends every session of the account, this one included; a repeat finds it gone', async () => {
+    const who = await signIn();
+    const otherDevice = await sessionToken(who.id, who.email, 0);
+    expect(await request('POST', '/v1/me/sign-out', { token: who.token })).toMatchObject({ status: 200, body: { ok: true } });
+    for (const token of [who.token, otherDevice]) {
+      expect((await request('GET', '/v1/me', { token })).status).toBe(401);
+    }
+    expect(await request('POST', '/v1/me/sign-out', { token: who.token })).toMatchObject({ status: 401, body: { error: { code: 'unauthenticated' } } });
+    expect(await env.USER.getByName(who.email).get()).toMatchObject({ id: who.id, tokenVersion: 1 });
+    expect((await request('POST', '/v1/me/sign-out', { token: who.token, raw: '{"x":1}' })).status).toBe(400);
+  });
+});
+
 describe('GET /v1/me/parties', () => {
   const addParties = async (email: string, parties: [string, number][]) =>
     await env.USER.getByName(email).apply(parties.map(([slug, createdAt]) => ({

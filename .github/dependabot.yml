@@ -1,12 +1,11 @@
-# Keeps the GitHub Actions pinned to commit SHAs up to date: Dependabot opens a PR that bumps the SHA and its
-# version comment together.
+# Weekly update PRs, each waiting a week after a release so a hijacked release has time to be caught and pulled.
+# GitHub Actions are pinned to commit SHAs: Dependabot bumps the SHA and its version comment together.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
-    # Wait a week after a release before proposing it, so a hijacked release has time to be caught and pulled.
     cooldown:
       default-days: 7
     groups:
@@ -14,3 +13,20 @@ updates:
         patterns: ['*']
     commit-message:
       prefix: ci
+
+  # Minor and patch updates come grouped (runtime and tooling apart); each major update gets its own PR.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      dependencies:
+        dependency-type: production
+        update-types: [minor, patch]
+      dev-dependencies:
+        dependency-type: development
+        update-types: [minor, patch]
+    commit-message:
+      prefix: deps
