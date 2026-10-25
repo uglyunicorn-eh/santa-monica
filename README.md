@@ -63,6 +63,14 @@ A party code is the key to a party without a secret phrase, so codes are hard to
 - After 5 wrong secret phrases for a party within 15 minutes, that person has to wait out the 15 minutes (`MAX_PHRASE_GUESSES` in `src/do/PartyDO.ts`). This one is counted by the party itself, so it holds everywhere; Cloudflare's rate limits are counted per location.
 - After 20 wrong secret phrases for a party within 15 minutes from everyone together (`MAX_PARTY_PHRASE_GUESSES`), more wrong guesses are refused until the window passes, so many accounts can't share the guessing. The right phrase always gets in. Refused guesses aren't counted, so the window can't be kept open forever.
 
+Email is limited per client IP and per address each minute (`ENTER_RATE_LIMIT_IP`, `ENTER_RATE_LIMIT_EMAIL`), but Cloudflare counts those per location and approximately. So each address also gets **at most 6 emails in any hour** (`EMAILS_PER_ADDRESS_PER_HOUR` in `src/api/rateLimit.ts`), counted exactly by that address's `UserDO` (`mail_sent`), whether or not it has an account:
+
+- Sign-in links, account deletion links and email-change links all count, and share one count. Over the cap the request gets 429 "That's a lot of emails for this address. Please try again in an hour."
+- The notice to the current address about an email change counts too, but never blocks the change.
+- A repeat with the same `Idempotency-Key` isn't counted again. A request that fails (the email couldn't be sent, or the change was refused) gives its count back.
+- Party draw notifications aren't counted: one per draw, started by the host.
+- The trade-off: anyone who knows an address can use up its emails for an hour, so its owner can't get a sign-in link until then. A daily cap would make that lockout a day.
+
 One person can host at most 3 open parties at a time (`MAX_OPEN_HOSTED_PARTIES` in `src/api/routes/parties.ts`). Parties joined as a guest don't count. Closing or deleting a party frees its slot right away. Hosts can't leave their own party. The check and a slot for the new party are taken in one `UserDO.startHosting` call, so parallel creates can't get past the limit.
 
 The host can delete a party until its dice are rolled: it leaves every member's list but the host's and its link stops working. For 24 hours (`RESTORE_WINDOW_MS` in `src/do/PartyDO.ts`) the host can bring it back exactly as it was; restoring an open party needs a free slot. After that the party's alarm erases it, and its code is never reused.
@@ -73,7 +81,7 @@ The host can delete a party until its dice are rolled: it leaves every member's 
 
 | Route | `UserDO` | `PartyDO` |
 |---|---|---|
-| `POST /v1/auth/magic-link` | 0, or 2 with an `Idempotency-Key` | 0, or 1 with a party code |
+| `POST /v1/auth/magic-link` | 1 (the email cap), or 2 with an `Idempotency-Key` | 0, or 1 with a party code |
 | `POST /v1/auth/session`, `GET /v1/me`, `PATCH /v1/me`, `GET /v1/me/parties`, `POST /v1/me/deletion` | 1 | 0 |
 | `POST /v1/me/email-change` | 2, or 3 for a Gmail address typed differently from its normalized form | 0 |
 | `POST /v1/me/deletion/confirm` | 2 | 1 per party |

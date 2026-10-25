@@ -70,6 +70,15 @@ const CREATE_REQUEST_TTL_MS = 10 * 60 * 1000;
 /** How long a repeated account email request (deletion, email change) with the same request id sends nothing again. */
 const MAIL_REQUEST_TTL_MS = 10 * 60 * 1000;
 
+/** The per-address email cap counts the emails sent to an address over this rolling window. */
+export const MAIL_QUOTA_WINDOW_MS = 60 * 60 * 1000;
+
+/**
+ * How many emails this address may get per MAIL_QUOTA_WINDOW_MS. With `always`, the email is counted even over the
+ * limit and never refused: for notices that must go out (the courtesy notice about an email change).
+ */
+export type MailQuota = { limit: number; always?: boolean };
+
 /**
  * One instance per user, addressed by the normalized email (`canonicalEmail`, `env.USER.getByName(email)`). Accounts
  * made before addresses were normalized are kept under the address as typed, lowercased, until their next sign-in.
@@ -122,6 +131,10 @@ export class UserDO extends DurableObject<Env> {
           key TEXT PRIMARY KEY,
           detail TEXT NOT NULL,
           expires_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS mail_sent (
+          at INTEGER NOT NULL,
+          request_key TEXT
         );
         CREATE TABLE IF NOT EXISTS used_magic_links (
           jti TEXT PRIMARY KEY,
@@ -346,24 +359,51 @@ export class UserDO extends DurableObject<Env> {
   }
 
   /**
-   * Claims an account email request by its request id. Returns false when the same request (same key and detail) was
-   * claimed in the last MAIL_REQUEST_TTL_MS, so the caller answers it without emailing again. The same key with another
-   * detail (say, a different new address) is a new request and replaces the old claim.
+   * Counts an email to this address against its quota. Returns false, counting nothing, when the limit is reached
+   * (unless `always`). `requestKey` ties the count to a claimed request, so releasing the request gives it back.
    */
-  claimMailRequest(key: string, detail: string): boolean {
+  private takeMailQuota({ limit, always = false }: MailQuota, requestKey: string | null): boolean {
+    const now = Date.now();
+    this.sql.exec('DELETE FROM mail_sent WHERE at <= ?', now - MAIL_QUOTA_WINDOW_MS);
+    const sent = this.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM mail_sent').one().n;
+    if (sent >= limit && !always) {
+      return false;
+    }
+    this.sql.exec('INSERT INTO mail_sent (at, request_key) VALUES (?, ?)', now, requestKey);
+    return true;
+  }
+
+  /** Counts an email without a request id to this address. Returns false, counting nothing, when the cap is reached. */
+  countMail(quota: MailQuota): boolean {
+    return this.takeMailQuota(quota, null);
+  }
+
+  /**
+   * Claims an email request to this address by its request id, and counts it against the address's quota.
+   * `'repeat'` when the same request (same key and detail) was claimed in the last MAIL_REQUEST_TTL_MS, so the caller
+   * answers it without emailing again; `'capped'`, claiming nothing, when the quota is used up. The same key with
+   * another detail (say, a different new address) is a new request and replaces the old claim.
+   */
+  claimMailRequest(key: string, detail: string, quota: MailQuota): 'claimed' | 'repeat' | 'capped' {
     const now = Date.now();
     this.sql.exec('DELETE FROM mail_requests WHERE expires_at < ?', now);
     const claimed = this.sql.exec<{ detail: string }>('SELECT detail FROM mail_requests WHERE key = ?', key).toArray()[0];
     if (claimed?.detail === detail) {
-      return false;
+      return 'repeat';
+    }
+    if (!this.takeMailQuota(quota, key)) {
+      return 'capped';
     }
     this.sql.exec('INSERT OR REPLACE INTO mail_requests (key, detail, expires_at) VALUES (?, ?, ?)', key, detail, now + MAIL_REQUEST_TTL_MS);
-    return true;
+    return 'claimed';
   }
 
-  /** Frees a claimed request whose email didn't go out, so a retry of it sends one. */
+  /** Frees a claimed request whose email didn't go out, so a retry of it sends one, and gives back what it counted. */
   releaseMailRequest(key: string, detail: string): void {
-    this.sql.exec('DELETE FROM mail_requests WHERE key = ? AND detail = ?', key, detail);
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec('DELETE FROM mail_requests WHERE key = ? AND detail = ?', key, detail);
+      this.sql.exec('DELETE FROM mail_sent WHERE rowid = (SELECT MAX(rowid) FROM mail_sent WHERE request_key = ?)', key);
+    });
   }
 
   /**
@@ -378,18 +418,28 @@ export class UserDO extends DurableObject<Env> {
 
   /**
    * Starts an account email request from a signed-in user, in one call: checks the session, then claims the request
-   * id when there is one. Returns the user, `'repeat'` for a request already claimed, or null when the session no
-   * longer belongs to this user.
+   * id when there is one, and counts the email to this address against `quota`. Returns the user, `'repeat'` for a
+   * request already claimed, `'capped'` when this address has had too many emails, or null when the session no longer
+   * belongs to this user.
    */
-  beginMailRequest(session: Session, key: string | undefined, detail: string): UserRecord | 'repeat' | null {
+  beginMailRequest(session: Session, key: string | undefined, detail: string, quota: MailQuota): UserRecord | 'repeat' | 'capped' | null {
     const user = this.get();
     if (!sessionMatches(user, session)) {
       return null;
     }
-    if (key && !this.claimMailRequest(key, detail)) {
-      return 'repeat';
+    const started = key ? this.claimMailRequest(key, detail, quota) : (this.takeMailQuota(quota, null) ? 'claimed' : 'capped');
+    return started === 'claimed' ? user : started;
+  }
+
+  /**
+   * Checks this address can receive an email-change link: `'taken'` when an account uses it, `'capped'` when it has
+   * had too many emails, otherwise counts the link and answers `'ok'`.
+   */
+  checkRecipient(quota: MailQuota): 'ok' | 'taken' | 'capped' {
+    if (this.get()) {
+      return 'taken';
     }
-    return user;
+    return this.takeMailQuota(quota, null) ? 'ok' : 'capped';
   }
 
   /**

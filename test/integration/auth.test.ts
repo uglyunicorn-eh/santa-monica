@@ -1,10 +1,12 @@
-import { env } from 'cloudflare:test';
+import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 
+import { EMAILS_PER_ADDRESS_PER_HOUR } from 'src/api/rateLimit';
+import { MAIL_QUOTA_WINDOW_MS } from 'src/do/UserDO';
 import { nodeIdToStr } from 'src/utils/strings/nodeId';
 
 import {
-  apiError, createParty, magicLinkToken, mailbox, me, mintEnterRequestToken, mintUserToken, newKey, redeem,
+  ageRows, apiError, createParty, magicLinkToken, mailbox, me, mintEnterRequestToken, mintUserToken, newKey, redeem,
   requestMagicLink, signIn, uniqueEmail,
 } from './support';
 
@@ -220,5 +222,26 @@ describe('tokens', () => {
 
   it('answers 401 without a session', async () => {
     expect(await me({})).toEqual({ status: 401, body: apiError('unauthenticated', 'Your session has expired. Please sign in again.') });
+  });
+});
+
+describe('the per-address email cap', () => {
+  it('refuses sign-in links to an address that had its fill this hour, until the hour has passed', async () => {
+    const email = uniqueEmail('capped');
+    const stub = env.USER.getByName(email);
+    // The per-minute limit allows 3 a minute, so the earlier emails of the hour are put in place directly.
+    await runInDurableObject(stub, async (_i, state) => {
+      for (let i = 0; i < EMAILS_PER_ADDRESS_PER_HOUR; i++) {
+        state.storage.sql.exec('INSERT INTO mail_sent (at) VALUES (?)', Date.now() - i * 60_000);
+      }
+    });
+    expect(await requestMagicLink(email)).toEqual({
+      status: 429, body: apiError('rate_limited', "That's a lot of emails for this address. Please try again in an hour.", 'email'),
+    });
+    expect(await mailbox(email)).toEqual([]);
+
+    await ageRows(stub, 'mail_sent', 'at', MAIL_QUOTA_WINDOW_MS);
+    expect((await requestMagicLink(email)).status).toBe(202);
+    expect(await mailbox(email)).toHaveLength(1);
   });
 });
