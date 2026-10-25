@@ -1,11 +1,12 @@
 import { DurableObject } from 'cloudflare:workers';
 
 import { Env } from 'src/env';
-import { isPermanentMailError, renderPartyNotification, sendMail } from 'src/mail';
+import { renderPartyNotification, sendMail } from 'src/mail';
 import santaShuffle from 'src/utils/santaShuffle';
 import { Session, sessionMatches } from 'src/utils/session';
 
 import { newObjectId } from 'src/utils/ids';
+import { Outbox } from './outbox';
 
 import { CreatePartyInput, ForgetMemberResult, Member, PartyErrorCode, PartyResult, PartyView, UserPartyRecord, UserRecord, UserUpdate } from './types';
 
@@ -44,9 +45,7 @@ type OutboxMessage =
   | { kind: 'user.partyPurged'; email: string; slug: string }
   | { kind: 'mail.partyNotification'; email: string; partyName: string; slug: string };
 
-type OutboxRow = { id: number; payload: string; attempts: number; next_attempt_at: number };
 
-type OutboxBatch = { key: string; rows: OutboxRow[]; messages: OutboxMessage[] };
 
 /** The joining session's token version, checked against the user's record (see `Session`). */
 export type JoinCheck = Pick<Session, 'tokenVersion'>;
@@ -71,15 +70,14 @@ export const MAX_PARTY_PHRASE_GUESSES = 20;
 /** The `phrase_guesses` row that counts the whole party's wrong guesses (member ids are never empty). */
 const WHOLE_PARTY = '';
 
-const MAX_ATTEMPTS = 15;
-const MAX_BACKOFF_MS = 60 * 60 * 1000;
 
-const fail = (code: PartyErrorCode, fieldName: string | null, message: string) => ({ ok: false as const, error: { code, fieldName, message } });
+/** A refused change, in the same order as the API's `fail(code, message, field)`. */
+const fail = (code: PartyErrorCode, message: string, fieldName: string | null = null) => ({ ok: false as const, error: { code, fieldName, message } });
 
-const notLoggedIn = fail('unauthenticated', null, 'You must be logged in before joining the party.');
-const tryAgain = fail('unavailable', null, "We couldn't reach your account. Please try again in a minute.");
+const notLoggedIn = fail('unauthenticated', 'You must be logged in before joining the party.');
+const tryAgain = fail('unavailable', "We couldn't reach your account. Please try again in a minute.");
 
-const closedToNewMembers = fail('conflict', 'party', 'Party is already packed. Sorry, we cannot accept a new participant...');
+const closedToNewMembers = fail('conflict', 'Party is already packed. Sorry, we cannot accept a new participant...', 'party');
 
 /**
  * One instance per party, addressed by the party slug (`env.PARTY.getByName(slug)`).
@@ -91,12 +89,12 @@ const closedToNewMembers = fail('conflict', 'party', 'Party is already packed. S
 export class PartyDO extends DurableObject<Env> {
   private sql: SqlStorage;
   private schemaReady = false;
-  // Outbox runs (inline and from the alarm) are chained so a message is never delivered twice at the same time.
-  private outboxRun: Promise<void> = Promise.resolve();
+  private outbox: Outbox<OutboxMessage>;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
+    this.outbox = new Outbox(this.sql, () => this.hasSchema(), messages => this.deliver(messages));
   }
 
   // The schema is created on the first write only, so looking up an unknown code does not store anything.
@@ -198,7 +196,7 @@ export class PartyDO extends DurableObject<Env> {
 
   /** Drops queued messages (user updates and mail) addressed to this email. */
   private dropQueued(email: string) {
-    this.sql.exec("DELETE FROM outbox WHERE json_extract(payload, '$.email') = ?", email);
+    this.outbox.drop(email);
   }
 
   private membership(userId: string): MembershipRow | null {
@@ -210,7 +208,7 @@ export class PartyDO extends DurableObject<Env> {
   }
 
   private enqueue(message: OutboxMessage) {
-    this.sql.exec('INSERT INTO outbox (payload, next_attempt_at) VALUES (?, ?)', JSON.stringify(message), Date.now());
+    this.outbox.add(message);
   }
 
   private async deliverSoon() {
@@ -224,9 +222,7 @@ export class PartyDO extends DurableObject<Env> {
 
   /** Whether the outbox still holds changes for this user (waiting for a retry, or being delivered). */
   private hasQueuedUserUpdates(email: string): boolean {
-    return this.sql.exec(
-      "SELECT 1 FROM outbox WHERE json_extract(payload, '$.kind') LIKE 'user.%' AND json_extract(payload, '$.email') = ? LIMIT 1", email,
-    ).toArray().length > 0;
+    return this.outbox.hasUserUpdates(email);
   }
 
   /** The party's summary in a member's list. */
@@ -365,7 +361,7 @@ export class PartyDO extends DurableObject<Env> {
   async join(member: Member, name: string, password: string | null, check?: JoinCheck): Promise<PartyResult> {
     const party = this.liveParty();
     if (!party) {
-      return fail('not_found', 'party', 'Party does not exist.');
+      return fail('not_found', 'Party does not exist.', 'party');
     }
     if (this.membership(member.id)) {
       return { ok: true, view: this.buildView(party, member.id) };
@@ -379,22 +375,22 @@ export class PartyDO extends DurableObject<Env> {
     };
     const lockedFor = this.guessLockout(member.id, MAX_PHRASE_GUESSES);
     if (lockedFor) {
-      return fail('rate_limited', 'password', waitMessage(lockedFor));
+      return fail('rate_limited', waitMessage(lockedFor), 'password');
     }
     if ((party.password || '').toUpperCase() !== (password || '').toUpperCase()) {
       // Too many wrong guesses at this party from everyone: refuse more for now, without counting them.
       const partyLockedFor = this.guessLockout(WHOLE_PARTY, MAX_PARTY_PHRASE_GUESSES);
       if (partyLockedFor) {
-        return fail('rate_limited', 'password', waitMessage(partyLockedFor));
+        return fail('rate_limited', waitMessage(partyLockedFor), 'password');
       }
       this.recordWrongGuess(member.id);
       this.recordWrongGuess(WHOLE_PARTY);
-      return fail('forbidden', 'password', "Hmm... Seems you've got a wrong secret phrase. Please try a different one or ask your friend for a hint.");
+      return fail('forbidden', "Hmm... Seems you've got a wrong secret phrase. Please try a different one or ask your friend for a hint.", 'password');
     }
     this.sql.exec('DELETE FROM phrase_guesses WHERE member_id = ?', member.id);
     const displayName = name || member.name;
     if (!displayName) {
-      return fail('invalid', 'name', 'We were unable to get your name.');
+      return fail('invalid', 'We were unable to get your name.', 'name');
     }
 
     if (check && member.email) {
@@ -414,7 +410,7 @@ export class PartyDO extends DurableObject<Env> {
       // Other requests may have reached the party meanwhile.
       const current = this.liveParty();
       if (!current) {
-        return fail('not_found', 'party', 'Party does not exist.');
+        return fail('not_found', 'Party does not exist.', 'party');
       }
       if (this.membership(member.id)) {
         return { ok: true, view: this.buildView(current, member.id) };
@@ -464,7 +460,7 @@ export class PartyDO extends DurableObject<Env> {
     if (!current) {
       this.enqueue({ kind: 'user.partyPurged', email: member.email, slug: party.slug });
       await this.deliverUserUpdates();
-      return fail('not_found', 'party', 'Party does not exist.');
+      return fail('not_found', 'Party does not exist.', 'party');
     }
     if (!this.membership(member.id)) {
       if (current.is_closed) {
@@ -484,7 +480,7 @@ export class PartyDO extends DurableObject<Env> {
   async leave(userId: string): Promise<PartyResult> {
     const party = this.liveParty();
     if (!party) {
-      return fail('not_found', 'party', 'Party does not exist.');
+      return fail('not_found', 'Party does not exist.', 'party');
     }
     const membership = this.membership(userId);
     if (!membership) {
@@ -492,10 +488,10 @@ export class PartyDO extends DurableObject<Env> {
     }
     // The open-party limit counts the parties in the host's list, so leaving would dodge it: hosts delete instead.
     if (party.host_id === userId) {
-      return fail('conflict', 'party', "As the host, you can't leave your own party. Delete it instead, or close it once others have joined.");
+      return fail('conflict', "As the host, you can't leave your own party. Delete it instead, or close it once others have joined.", 'party');
     }
     if (party.is_closed) {
-      return fail('conflict', 'party', 'Party is already at that stage when you cannot really run away... Sorry but you have to get the gift');
+      return fail('conflict', 'Party is already at that stage when you cannot really run away... Sorry but you have to get the gift', 'party');
     }
 
     this.ctx.storage.transactionSync(() => {
@@ -511,10 +507,10 @@ export class PartyDO extends DurableObject<Env> {
   async close(userId: string): Promise<PartyResult> {
     const party = this.liveParty();
     if (!party) {
-      return fail('not_found', 'party', 'Party does not exist.');
+      return fail('not_found', 'Party does not exist.', 'party');
     }
     if (party.host_id !== userId) {
-      return fail('forbidden', 'party', 'You must be the host to close the party.');
+      return fail('forbidden', 'You must be the host to close the party.', 'party');
     }
     if (party.is_closed) {
       // Already drawn: a repeat gets the same draw. Nothing is drawn or mailed again.
@@ -522,7 +518,7 @@ export class PartyDO extends DurableObject<Env> {
     }
     const members = this.sql.exec<MembershipRow>('SELECT * FROM memberships').toArray();
     if (members.length < 2) {
-      return fail('conflict', 'party', 'You need at least two participants to close the party.');
+      return fail('conflict', 'You need at least two participants to close the party.', 'party');
     }
 
     const draws = santaShuffle(members, (a, b) => a.member_id === b.member_id);
@@ -559,19 +555,19 @@ export class PartyDO extends DurableObject<Env> {
   async delete(userId: string): Promise<PartyResult> {
     const party = this.party();
     if (!party) {
-      return fail('not_found', 'party', 'Party does not exist.');
+      return fail('not_found', 'Party does not exist.', 'party');
     }
     if (party.deleted_at) {
       // Already deleted: the host gets it back as it is (a repeat), anyone else sees no party, as for a lookup.
       return party.host_id === userId && !this.restoreExpired(party)
         ? { ok: true, view: this.buildView(party, userId) }
-        : fail('not_found', 'party', 'Party does not exist.');
+        : fail('not_found', 'Party does not exist.', 'party');
     }
     if (party.host_id !== userId) {
-      return fail('forbidden', 'party', 'You must be the host to delete the party.');
+      return fail('forbidden', 'You must be the host to delete the party.', 'party');
     }
     if (party.is_closed) {
-      return fail('conflict', 'party', 'The dice have already been rolled, so this party can no longer be deleted.');
+      return fail('conflict', 'The dice have already been rolled, so this party can no longer be deleted.', 'party');
     }
     const deletedAt = Date.now();
     this.setDeleted(deletedAt);
@@ -597,10 +593,10 @@ export class PartyDO extends DurableObject<Env> {
       return { ok: true, view: this.buildView(party, userId) };
     }
     if (!party || !party.deleted_at || party.host_id !== userId) {
-      return fail('not_found', 'party', 'There is no deleted party to restore.');
+      return fail('not_found', 'There is no deleted party to restore.', 'party');
     }
     if (this.restoreExpired(party)) {
-      return fail('conflict', 'party', 'This party was deleted more than a day ago and can no longer be restored.');
+      return fail('conflict', 'This party was deleted more than a day ago and can no longer be restored.', 'party');
     }
     this.setDeleted(null, reservation);
     await this.deliverHostNow(this.membership(userId)?.member_email);
@@ -717,16 +713,14 @@ export class PartyDO extends DurableObject<Env> {
     if (!party.is_closed) {
       this.ctx.storage.transactionSync(() => {
         this.sql.exec('UPDATE memberships SET member_email = ? WHERE member_id = ?', newEmail, userId);
-        this.sql.exec(
-          "UPDATE outbox SET payload = json_set(payload, '$.email', ?) WHERE json_extract(payload, '$.email') = ?", newEmail, oldEmail,
-        );
+        this.outbox.readdress(oldEmail, newEmail);
       });
     }
     return party.deleted_at && party.host_id !== userId ? null : this.summary(party, userId);
   }
 
   /** Delivers a batch: one email, or all queued changes for one user in a single UserDO call. */
-  private async deliver({ messages }: OutboxBatch) {
+  private async deliver(messages: OutboxMessage[]) {
     const [first] = messages;
     if (first.kind === 'mail.partyNotification') {
       return await sendMail(this.env, first.email, renderPartyNotification({
@@ -768,71 +762,12 @@ export class PartyDO extends DurableObject<Env> {
     await this.runOutbox(() => true);
   }
 
-  private runOutbox(filter: (message: OutboxMessage) => boolean, skipRetryWait = false): Promise<void> {
-    const run = this.outboxRun.then(() => this.processOutbox(filter, skipRetryWait));
-    this.outboxRun = run.catch(() => undefined);
-    return run;
-  }
-
-  private async processOutbox(filter: (message: OutboxMessage) => boolean, skipRetryWait: boolean) {
-    if (!this.hasSchema()) {
-      return;
-    }
-    const now = Date.now();
-    const rows = this.sql
-      .exec<OutboxRow>('SELECT id, payload, attempts, next_attempt_at FROM outbox ORDER BY id')
-      .toArray();
-
-    // One batch per user (all their due changes, in order) and one per email. While an earlier change for a user is
-    // waiting for a retry, later ones wait too, so a user never sees changes out of order. With skipRetryWait, matching
-    // messages go now even if waiting, still together and in order.
-    const batches = new Map<string, OutboxBatch>();
-    const blocked = new Set<string>();
-    for (const row of rows) {
-      const message = JSON.parse(row.payload) as OutboxMessage;
-      const key = message.kind.startsWith('user.') ? message.email : `mail:${row.id}`;
-      const forced = skipRetryWait && filter(message);
-      if (blocked.has(key) && !forced) {
-        continue;
-      }
-      if (row.next_attempt_at > now && !forced) {
-        blocked.add(key);
-        continue;
-      }
-      if (!filter(message)) {
-        continue;
-      }
-      const batch = batches.get(key) ?? { key, rows: [], messages: [] };
-      batch.rows.push(row);
-      batch.messages.push(message);
-      batches.set(key, batch);
-    }
-
-    await Promise.all([...batches.values()].map(async batch => {
-      const ids = batch.rows.map(row => row.id);
-      try {
-        await this.deliver(batch);
-        this.sql.exec(`DELETE FROM outbox WHERE id IN (${ids.map(() => '?').join(',')})`, ...ids);
-      } catch (error) {
-        const attempts = batch.rows[0].attempts + 1;
-        const kind = batch.messages[0].kind;
-        if (isPermanentMailError(error) || attempts >= MAX_ATTEMPTS) {
-          console.error('Dropping outbox messages', { kind, count: ids.length, attempts, error: String(error) });
-          this.sql.exec(`DELETE FROM outbox WHERE id IN (${ids.map(() => '?').join(',')})`, ...ids);
-          return;
-        }
-        console.warn('Outbox delivery failed, will retry', { kind, count: ids.length, attempts, error: String(error) });
-        const retryAt = Date.now() + Math.min(1000 * 2 ** attempts, MAX_BACKOFF_MS);
-        this.sql.exec(
-          `UPDATE outbox SET attempts = ?, next_attempt_at = ? WHERE id IN (${ids.map(() => '?').join(',')})`,
-          attempts, retryAt, ...ids,
-        );
-      }
-    }));
-
+  /** Delivers due outbox messages that match `filter`, then sets the next alarm. */
+  private async runOutbox(filter: (message: OutboxMessage) => boolean, skipRetryWait = false) {
+    await this.outbox.process(filter, skipRetryWait);
     // The next alarm: the earliest retry, or when a deleted party's restore window ends (it is erased then).
-    const retry = this.sql.exec<{ at: number | null }>('SELECT MIN(next_attempt_at) AS at FROM outbox').one().at;
-    const deletedAt = this.party()?.deleted_at;
+    const retry = this.outbox.nextAttemptAt();
+    const deletedAt = this.hasSchema() ? this.party()?.deleted_at : null;
     const purge = deletedAt ? deletedAt + RESTORE_WINDOW_MS : null;
     const next = [retry, purge].filter((at): at is number => at !== null);
     if (next.length) {
@@ -842,9 +777,6 @@ export class PartyDO extends DurableObject<Env> {
 
   /** Number of undelivered outbox messages. Used by tests. */
   pendingOutbox(): number {
-    if (!this.hasSchema()) {
-      return 0;
-    }
-    return this.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM outbox').one().n;
+    return this.outbox.pending();
   }
 }
