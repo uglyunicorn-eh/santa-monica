@@ -26,7 +26,8 @@ export type UserPartyListItem = Omit<UserPartyRecord, 'isHost' | 'isProtected' |
 export type UserUpdate =
   | { type: 'addParty'; party: UserPartyRecord }
   | { type: 'removeParty'; slug: string }
-  | { type: 'setName'; name: string };
+  | { type: 'setName'; name: string }
+  | { type: 'releaseHostSlot'; reservation: string };
 
 
 export type Member = {
@@ -60,8 +61,16 @@ export type PartyResult =
 
 export type CancelResult = { ok: true } | { ok: false; error: PartyUserError };
 
+/** UserDO.startHosting: whether the user may host another party, holding a slot for it when they may. */
+export type HostingStart = UserRecord & { openHostedParties: number } & (
+  | { allowed: true; reservation: string }
+  | { allowed: false }
+);
+
 export type CreatePartyInput = {
   name: string;
   password: string | null;
   host: Member;
+  /** The host's slot from UserDO.startHosting, released once the party is in their list. */
+  reservation?: string;
 };

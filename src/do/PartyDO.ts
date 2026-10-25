@@ -29,8 +29,10 @@ type MembershipRow = {
 
 // user.sync sends the member's current view of this party (added, closed, or removed if they left). It is computed at
 // delivery time, so it is always current and safe to repeat. user.addParty / user.removeParty are older forms of it.
+// A sync from creating a party carries the host's slot reservation (see UserDO.startHosting), released on delivery.
 type OutboxMessage =
-  | { kind: 'user.sync' | 'user.addParty' | 'user.removeParty'; email: string }
+  | { kind: 'user.sync'; email: string; reservation?: string }
+  | { kind: 'user.addParty' | 'user.removeParty'; email: string }
   | { kind: 'user.setName'; email: string; name: string }
   // Sent when the party is cancelled: the party row is gone, so the slug travels with the message.
   | { kind: 'user.partyCancelled'; email: string; slug: string }
@@ -88,6 +90,11 @@ export class PartyDO extends DurableObject<Env> {
         target_id TEXT,
         target_name TEXT,
         joined_at INTEGER NOT NULL
+      );
+      -- A row here means the party was cancelled: its code is never handed out again.
+      CREATE TABLE IF NOT EXISTS cancelled (
+        slug TEXT PRIMARY KEY,
+        cancelled_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS outbox (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -192,7 +199,7 @@ export class PartyDO extends DurableObject<Env> {
   /** Creates the party. Returns `conflict` when the slug is already taken, so the caller can pick another one. */
   async create(input: CreatePartyInput & { id: string; slug: string }): Promise<PartyResult | { ok: false; conflict: true }> {
     this.ensureSchema();
-    if (this.party()) {
+    if (this.party() || this.sql.exec('SELECT 1 FROM cancelled LIMIT 1').toArray().length) {
       return { ok: false, conflict: true };
     }
     const now = Date.now();
@@ -215,7 +222,7 @@ export class PartyDO extends DurableObject<Env> {
         input.host.id, input.host.email, input.host.name, now,
       );
       if (input.host.email) {
-        this.enqueue({ kind: 'user.sync', email: input.host.email });
+        this.enqueue({ kind: 'user.sync', email: input.host.email, reservation: input.reservation });
       }
     });
     await this.deliverUserUpdates();
@@ -263,6 +270,10 @@ export class PartyDO extends DurableObject<Env> {
     const membership = this.membership(userId);
     if (!membership) {
       return { ok: true, view: this.buildView(party, userId) };
+    }
+    // The open-party limit counts the parties in the host's list, so leaving would dodge it: hosts cancel instead.
+    if (party.host_id === userId) {
+      return fail('party', "As the host, you can't leave your own party. Cancel it instead, or close it once others have joined.");
     }
     if (party.is_closed) {
       return fail('party', 'Party is already at that stage when you cannot really run away... Sorry but you have to get the gift');
@@ -314,7 +325,7 @@ export class PartyDO extends DurableObject<Env> {
     // The host's list is updated before returning, so the closed party stops counting towards their open-party
     // limit right away. Other members and the emails follow on the alarm.
     const hostEmail = members.find(member => member.member_id === userId)?.member_email;
-    await this.runOutbox(message => message.kind.startsWith('user.') && message.email === hostEmail);
+    await this.deliverHostNow(hostEmail);
     await this.deliverSoon();
     return { ok: true, view: this.buildView({ ...party, is_closed: 1 }, userId) };
   }
@@ -340,15 +351,25 @@ export class PartyDO extends DurableObject<Env> {
     }
 
     const hostEmail = this.membership(userId)?.member_email;
+    this.ensureSchema(); // parties created before tombstones existed have no `cancelled` table yet
     this.ctx.storage.transactionSync(() => {
       this.sql.exec('DELETE FROM memberships');
       this.sql.exec('DELETE FROM party');
+      this.sql.exec('INSERT INTO cancelled (slug, cancelled_at) VALUES (?, ?)', party.slug, Date.now());
       if (hostEmail) {
         this.enqueue({ kind: 'user.partyCancelled', email: hostEmail, slug: party.slug });
       }
     });
-    await this.runOutbox(message => message.kind.startsWith('user.') && message.email === hostEmail);
+    await this.deliverHostNow(hostEmail);
     return { ok: true };
+  }
+
+  /**
+   * Delivers everything queued for the host right away, including changes waiting for a retry, so closing or
+   * cancelling frees their open-party slot before the mutation returns. If it fails, the alarm retries as usual.
+   */
+  private async deliverHostNow(email: string | null | undefined) {
+    await this.runOutbox(message => message.kind.startsWith('user.') && message.email === email, true);
   }
 
 
@@ -374,6 +395,12 @@ export class PartyDO extends DurableObject<Env> {
         updates.push(this.memberUpdate(first.email));
       }
     }
+    // Released after the party is in the list (same UserDO transaction), so the slot is never counted twice or not at all.
+    for (const message of messages) {
+      if (message.kind === 'user.sync' && message.reservation) {
+        updates.push({ type: 'releaseHostSlot', reservation: message.reservation });
+      }
+    }
     // A sync queued for a party that has since been cancelled has nothing left to send.
     if (updates.length === 0) {
       return;
@@ -385,13 +412,13 @@ export class PartyDO extends DurableObject<Env> {
     await this.runOutbox(() => true);
   }
 
-  private runOutbox(filter: (message: OutboxMessage) => boolean): Promise<void> {
-    const run = this.outboxRun.then(() => this.processOutbox(filter));
+  private runOutbox(filter: (message: OutboxMessage) => boolean, skipRetryWait = false): Promise<void> {
+    const run = this.outboxRun.then(() => this.processOutbox(filter, skipRetryWait));
     this.outboxRun = run.catch(() => undefined);
     return run;
   }
 
-  private async processOutbox(filter: (message: OutboxMessage) => boolean) {
+  private async processOutbox(filter: (message: OutboxMessage) => boolean, skipRetryWait: boolean) {
     if (!this.hasSchema()) {
       return;
     }
@@ -401,16 +428,18 @@ export class PartyDO extends DurableObject<Env> {
       .toArray();
 
     // One batch per user (all their due changes, in order) and one per email. While an earlier change for a user is
-    // waiting for a retry, later ones wait too, so a user never sees changes out of order.
+    // waiting for a retry, later ones wait too, so a user never sees changes out of order. With skipRetryWait, matching
+    // messages go now even if waiting, still together and in order.
     const batches = new Map<string, OutboxBatch>();
     const blocked = new Set<string>();
     for (const row of rows) {
       const message = JSON.parse(row.payload) as OutboxMessage;
       const key = message.kind.startsWith('user.') ? message.email : `mail:${row.id}`;
-      if (blocked.has(key)) {
+      const forced = skipRetryWait && filter(message);
+      if (blocked.has(key) && !forced) {
         continue;
       }
-      if (row.next_attempt_at > now) {
+      if (row.next_attempt_at > now && !forced) {
         blocked.add(key);
         continue;
       }

@@ -115,11 +115,11 @@ describe('Durable Object calls per operation', () => {
     expect(counting.calls).toEqual([{ binding: 'PARTY', name: node.code, method: 'join' }]);
   });
 
-  it('creates a party with two calls: the host profile and the party', async () => {
+  it('creates a party with two calls: a held slot and the party', async () => {
     const host = await person('Host');
     const counting = countingEnv();
     await gql(counting.env, CREATE, { name: 'Create' }, host.token);
-    expect(counting.calls.map(c => `${c.binding}.${c.method}`)).toEqual(['USER.hostProfile', 'PARTY.create']);
+    expect(counting.calls.map(c => `${c.binding}.${c.method}`)).toEqual(['USER.startHosting', 'PARTY.create']);
   });
 
   it('reads my profile with one call, and none without a session', async () => {
@@ -245,6 +245,53 @@ describe('party → user updates', () => {
       expect(await instance.pendingOutbox()).toBe(0);
     });
     expect(applied).toEqual([]);
+  });
+
+  it('holds the limit when one host creates parties in parallel', async () => {
+    const host = await person('Host');
+    const results = await Promise.all(Array.from({ length: 5 }, (_, i) => gql(env, CREATE, { name: `Rush ${i}` }, host.token)));
+    expect(results.map(r => r.data.parties.createParty.status).sort()).toEqual(['error', 'error', 'ok', 'ok', 'ok']);
+    expect(await env.USER.getByName(host.email).listParties(10)).toHaveLength(3);
+  });
+
+  it('releases the held slot once the party is in the list, and drops slots that expire', async () => {
+    const host = await person('Host');
+    const reservations = () => runInDurableObject(env.USER.getByName(host.email), async (_i, state) =>
+      state.storage.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM host_reservations').one().n);
+
+    await gql(env, CREATE, { name: 'One' }, host.token);
+    expect(await reservations()).toBe(0);
+
+    // Two slots held by creates that never finished: only the expired one stops counting.
+    await runInDurableObject(env.USER.getByName(host.email), async (_i, state) => {
+      state.storage.sql.exec("INSERT INTO host_reservations (id, expires_at) VALUES ('stale', 1), ('live', ?)", Date.now() + 60_000);
+    });
+    expect((await gql(env, CREATE, { name: 'Two' }, host.token)).data.parties.createParty.status).toBe('ok');
+    expect((await gql(env, CREATE, { name: 'Three' }, host.token)).data.parties.createParty.status).toBe('error');
+    expect(await reservations()).toBe(1);
+  });
+
+  it('frees the slot on cancel and close even while an earlier update to the host waits for a retry', async () => {
+    const host = await person('Host');
+    const guest = await person('Guest');
+    const waiting = (code: string) => runInDurableObject(env.PARTY.getByName(code), async (_i, state) => {
+      state.storage.sql.exec('INSERT INTO outbox (payload, attempts, next_attempt_at) VALUES (?, 1, ?)', JSON.stringify({ kind: 'user.sync', email: host.email }), Date.now() + 60_000);
+    });
+    const outbox = (code: string) => runInDurableObject(env.PARTY.getByName(code), async (instance: PartyDO) => await instance.pendingOutbox());
+
+    const cancelled = (await gql(env, CREATE, { name: 'To cancel' }, host.token)).data.parties.createParty.node;
+    await waiting(cancelled.code);
+    await gql(env, `mutation ($party: ID!) { parties { cancelParty(input: { party: $party }) { status } } }`, { party: cancelled.id }, host.token);
+    expect(await outbox(cancelled.code)).toBe(0);
+
+    const closed = (await gql(env, CREATE, { name: 'To close' }, host.token)).data.parties.createParty.node;
+    await gql(env, JOIN, { party: closed.id, name: 'G' }, guest.token);
+    await waiting(closed.code);
+    await gql(env, CLOSE, { party: closed.id }, host.token);
+
+    const list = await env.USER.getByName(host.email).listParties(10);
+    expect(list.map((p: any) => p.slug)).toEqual([closed.code]);
+    expect(list[0].isClosed).toBe(true);
   });
 
   it('removes the party from the list of someone who left', async () => {

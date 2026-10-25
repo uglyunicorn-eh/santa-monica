@@ -1,4 +1,4 @@
-import { env } from 'cloudflare:test';
+import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
 import * as yup from 'yup';
 
@@ -222,12 +222,43 @@ describe('party mutations', () => {
       expect(await cancel(host, node.id)).toMatchObject({ status: 'error', userErrors: [{ messages: ['Party is already closed.'] }] });
     });
 
-    it('works after the host has left their own party', async () => {
+    it('does not let the host leave their own party (they cancel it instead)', async () => {
+      const host = await signedIn('Host');
+      const { node } = await createParty(host, 'Mine');
+      expect(await parties(null, {}, host).leaveParty({ input: { party: node.id } }, host)).toMatchObject({
+        status: 'error',
+        userErrors: [{ fieldName: 'party', messages: ["As the host, you can't leave your own party. Cancel it instead, or close it once others have joined."] }],
+      });
+      expect((await listParties(null, { first: 10 }, host))!.map((p: any) => p.code)).toEqual([node.code]);
+    });
+
+    it('works for a host who left their party before hosts were kept from leaving', async () => {
       const host = await signedIn('Host');
       const { node } = await createParty(host, 'Abandoned');
-      await parties(null, {}, host).leaveParty({ input: { party: node.id } }, host);
+      await runInDurableObject(env.PARTY.getByName(node.code), async (_i, state) => {
+        state.storage.sql.exec('DELETE FROM memberships');
+      });
       expect((await cancel(host, node.id)).status).toBe('ok');
       expect(await party(null, { code: node.code }, host)).toBeNull();
+    });
+
+    it('never hands out a cancelled code again', async () => {
+      const host = await signedIn('Host');
+      const { node } = await createParty(host, 'Once');
+      await cancel(host, node.id);
+      const again = await env.PARTY.getByName(node.code).create({
+        id: 'x', slug: node.code, name: 'Twice', password: null, host: { id: 'h', email: null, name: 'H' },
+      });
+      expect(again).toEqual({ ok: false, conflict: true });
+    });
+
+    it('cancels a party created before tombstones existed', async () => {
+      const host = await signedIn('Host');
+      const { node } = await createParty(host, 'Old');
+      await runInDurableObject(env.PARTY.getByName(node.code), async (_i, state) => {
+        state.storage.sql.exec('DROP TABLE cancelled');
+      });
+      expect((await cancel(host, node.id)).status).toBe('ok');
     });
 
     it('rejects ids that are not parties', async () => {

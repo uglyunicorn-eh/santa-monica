@@ -3,7 +3,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { Env } from 'src/env';
 import { newObjectId } from 'src/utils/ids';
 
-import { UserPartyListItem, UserRecord, UserUpdate } from './types';
+import { HostingStart, UserPartyListItem, UserRecord, UserUpdate } from './types';
 
 type UserRow = { id: string; email: string; name: string; joined: number };
 type PartyRow = {
@@ -16,6 +16,9 @@ type PartyRow = {
 };
 
 const flag = (value: number | null) => (value === null ? null : Boolean(value));
+
+/** How long a slot held for a party being created lasts if the party never arrives (say, the create failed). */
+const HOST_RESERVATION_TTL_MS = 5 * 60 * 1000;
 
 /**
  * One instance per user, addressed by the lowercased email (`env.USER.getByName(email)`).
@@ -43,6 +46,10 @@ export class UserDO extends DurableObject<Env> {
           is_host INTEGER,
           is_protected INTEGER,
           is_closed INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS host_reservations (
+          id TEXT PRIMARY KEY,
+          expires_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS used_magic_links (
           jti TEXT PRIMARY KEY,
@@ -91,16 +98,28 @@ export class UserDO extends DurableObject<Env> {
     return this.row();
   }
 
-  /** The profile plus how many open parties the user hosts, for creating a party in one call. */
-  hostProfile(): (UserRecord & { openHostedParties: number }) | null {
+  /**
+   * Checks the open-party limit and, when there is room, holds a slot for the party about to be created, in one step:
+   * concurrent creates each see the slots the others hold. The slot is released when the new party lands in the list
+   * (`releaseHostSlot`) or after HOST_RESERVATION_TTL_MS. Returns null when the user has no profile.
+   */
+  startHosting(limit: number): HostingStart | null {
     const user = this.row();
     if (!user) {
       return null;
     }
-    const { count } = this.sql
-      .exec<{ count: number }>('SELECT COUNT(*) AS count FROM parties WHERE is_host = 1 AND NOT COALESCE(is_closed, 0)')
-      .one();
-    return { ...user, openHostedParties: count };
+    const now = Date.now();
+    this.sql.exec('DELETE FROM host_reservations WHERE expires_at < ?', now);
+    const open = this.sql
+      .exec<{ n: number }>('SELECT COUNT(*) AS n FROM parties WHERE is_host = 1 AND NOT COALESCE(is_closed, 0)')
+      .one().n;
+    const held = this.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM host_reservations').one().n;
+    if (open + held >= limit) {
+      return { ...user, openHostedParties: open + held, allowed: false };
+    }
+    const reservation = newObjectId();
+    this.sql.exec('INSERT INTO host_reservations (id, expires_at) VALUES (?, ?)', reservation, now + HOST_RESERVATION_TTL_MS);
+    return { ...user, openHostedParties: open + held, allowed: true, reservation };
   }
 
   /** Applies a batch of changes from a party, in order, in one transaction. Safe to retry. */
@@ -121,6 +140,9 @@ export class UserDO extends DurableObject<Env> {
             break;
           case 'setName':
             this.sql.exec('UPDATE user SET name = ?', update.name);
+            break;
+          case 'releaseHostSlot':
+            this.sql.exec('DELETE FROM host_reservations WHERE id = ?', update.reservation);
             break;
         }
       }

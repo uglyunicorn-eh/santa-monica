@@ -244,13 +244,14 @@ describe('leaving a party', () => {
     expect((await gql(LEAVE_PARTY, { party: party.id })).errors?.[0]?.message).toBe('UNAUTHENTICATED');
   });
 
-  it('lets the host leave while staying the host', async () => {
+  it('does not let the host leave their own party', async () => {
     const host = await person('host');
     const guest = await person('guest');
     const party = await createParty(host);
     await joinParty(guest, party, 'Guest');
     const left = (await gql(LEAVE_PARTY, { party: party.id }, { token: host.token })).data.parties.leaveParty;
-    expect(left).toMatchObject({ status: 'ok', node: { isHost: true, isJoined: false } });
+    expect(left).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
+    expect((await gql(PARTY, { code: party.code }, { token: host.token })).data.party).toMatchObject({ isHost: true, isJoined: true });
   });
 });
 

@@ -1,7 +1,7 @@
 import { ApolloContext, requireUser } from 'src/apollo/context';
 import { PARTY_CODE_RE, partyViewToNode } from 'src/apollo/resolvers/party';
 import { MutationPayload } from 'src/apollo/types';
-import { PartyResult } from 'src/do/types';
+import { PartyResult, PartyUserError } from 'src/do/types';
 import _ from 'src/utils/graphql/resolvable';
 import { newObjectId } from 'src/utils/ids';
 import { strToNodeId } from 'src/utils/strings/nodeId';
@@ -50,12 +50,12 @@ const partySlug = (party: string): string | null => {
   }
 };
 
-const toPayload = (result: PartyResult) => result.ok
-  ? { node: partyViewToNode(result.view) }
-  : {
-    status: 'error' as const,
-    userErrors: [{ fieldName: result.error.fieldName, messages: [result.error.message] }],
-  };
+const toUserError = ({ fieldName, message }: PartyUserError) => ({
+  status: 'error' as const,
+  userErrors: [{ fieldName, messages: [message] }],
+});
+
+const toPayload = (result: PartyResult) => result.ok ? { node: partyViewToNode(result.view) } : toUserError(result.error);
 
 export default {
   // Every party mutation needs a session; the handlers below can rely on userId and userEmail.
@@ -69,13 +69,13 @@ const partyMutations = {
 
     createParty: _(createPartyInputSchema, 'createParty')(async (input: CreatePartyInput, { env, userEmail }: ApolloContext) => {
       annotate({ 'party.protected': Boolean(input.password) });
-      // One UserDO call reads the host's display name and how many open parties they already host.
-      const user = await env.USER.getByName(userEmail!).hostProfile();
+      // One UserDO call reads the host's display name, checks the open-party limit and holds a slot for this party.
+      const user = await env.USER.getByName(userEmail!).startHosting(MAX_OPEN_HOSTED_PARTIES);
       if (!user) {
         return notLoggedIn('creating');
       }
       annotate({ 'user.open_hosted_parties': user.openHostedParties });
-      if (user.openHostedParties >= MAX_OPEN_HOSTED_PARTIES) {
+      if (!user.allowed) {
         return tooManyOpenParties;
       }
       for (let attempt = 0; attempt < SLUG_ATTEMPTS; attempt++) {
@@ -86,6 +86,7 @@ const partyMutations = {
           name: input.name,
           password: input.password || null,
           host: { id: user.id, email: userEmail!, name: user.name },
+          reservation: user.reservation,
         });
         annotate({ 'party.code_attempts': attempt + 1 });
         if ('conflict' in result) {
@@ -140,8 +141,6 @@ const partyMutations = {
       annotate({ 'party.code': slug });
 
       const result = await env.PARTY.getByName(slug).cancel(userId!);
-      return result.ok
-        ? {}
-        : { status: 'error' as const, userErrors: [{ fieldName: result.error.fieldName, messages: [result.error.message] }] };
+      return result.ok ? {} : toUserError(result.error);
     }),
 };
