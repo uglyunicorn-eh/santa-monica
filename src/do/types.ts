@@ -80,6 +80,9 @@ export type HostingStart = UserRecord & { openHostedParties: number } & (
   | { allowed: false }
 );
 
+/** What `PartyDO.forgetMember` did for a deleted account. */
+export type ForgetMemberResult = 'deleted' | 'left' | 'anonymized' | 'none';
+
 export type CreatePartyInput = {
   name: string;
   password: string | null;

@@ -56,7 +56,7 @@ const sessionToken = (id: string, email: string, ver?: number) =>
   jwt.issueToken<UserToken>('UserToken', { sub: nodeIdToStr({ kind: 'User', id }), email, ...(ver === undefined ? {} : { ver }) }, { ttl: 60 });
 
 const updateName = async (ctx: ApolloContext, name: string) =>
-  await profile(null, {}, ctx).updateName({ input: { name } }, ctx) as any;
+  await profile().updateName({ input: { name } }, ctx) as any;
 
 const createParty = async (ctx: ApolloContext, name = 'Party', password?: string) =>
   await parties(null, {}, ctx).createParty({ input: { name, password } }, ctx) as any;
@@ -436,8 +436,9 @@ describe('party history', () => {
 });
 
 describe('profile mutations', () => {
-  it('needs a session', () => {
-    expect(() => profile(null, {}, context())).toThrow('UNAUTHENTICATED');
+  it('needs a session, checked before the input', async () => {
+    await expect(updateName(context(), 'Nope')).rejects.toThrow('UNAUTHENTICATED');
+    await expect(updateName(context(), '')).rejects.toThrow('UNAUTHENTICATED');
   });
 
   it('sets the profile name and returns the user', async () => {

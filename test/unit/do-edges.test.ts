@@ -434,6 +434,15 @@ describe('PartyDO join session check', () => {
     expect(await stub.view()).toBeNull();
   });
 
+  it('refuses a join when the host deleted their account meanwhile, and takes the party off the user\'s list', async () => {
+    const host = await signedUp('host');
+    const { stub } = await party(host);
+    const guest = await signedUp('racer');
+    await duringUserCall(stub, instance => instance.forgetMember(host.id, host.email));
+    expect(await stub.join(guest, 'Racer', null, {})).toEqual({ ok: false, error: { fieldName: 'party', message: 'Party does not exist.' } });
+    expect(await env.USER.getByName(guest.email).listParties(10)).toEqual([]);
+  });
+
   it('keeps one membership when the same person joined while the user was being updated', async () => {
     const { stub } = await party();
     const guest = await signedUp('twice');

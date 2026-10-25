@@ -1,5 +1,8 @@
 import { Env } from 'src/env';
 
+import * as accountDeletion from './templates/accountDeletion';
+import * as emailChange from './templates/emailChange';
+import * as emailChangeNotice from './templates/emailChangeNotice';
 import * as partyNotification from './templates/partyNotification';
 import * as signIn from './templates/signIn';
 
@@ -39,6 +42,22 @@ export const renderSignIn = ({ magicLink, assetsUrl }: { magicLink: string; asse
 
 export const renderPartyNotification = ({ party, assetsUrl }: { party: { name: string; url: string }; assetsUrl: string }) =>
   render(partyNotification, { 'party.name': party.name, 'party.url': party.url, assetsUrl, assetsVersion });
+
+export const renderAccountDeletion = ({ url, assetsUrl }: { url: string; assetsUrl: string }) =>
+  render(accountDeletion, { ...accountDeletion.vars, url, assetsUrl, assetsVersion });
+
+// The body has placeholders of its own, so it is filled first (as plain text: render escapes it once, in the HTML part).
+const fillBody = (body: string, vars: Record<string, string>) => fill(body, vars, s => s);
+
+export const renderEmailChange = ({ url, oldEmail, newEmail, assetsUrl }: { url: string; oldEmail: string; newEmail: string; assetsUrl: string }) => {
+  const vars = { url, oldEmail, newEmail, assetsUrl, assetsVersion };
+  return render(emailChange, { ...emailChange.vars, ...vars, body: fillBody(emailChange.body, vars) });
+};
+
+export const renderEmailChangeNotice = ({ oldEmail, newEmail, assetsUrl }: { oldEmail: string; newEmail: string; assetsUrl: string }) => {
+  const vars = { oldEmail, newEmail, assetsUrl, assetsVersion };
+  return render(emailChangeNotice, { ...emailChangeNotice.vars, ...vars, body: fillBody(emailChangeNotice.body, vars) });
+};
 
 export const sendMail = async (env: Env, to: string, message: MailMessage) => {
   await env.EMAIL.send({
