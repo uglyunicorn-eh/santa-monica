@@ -8,7 +8,7 @@ import { keyHash, readBody } from 'src/api/input';
 import { bodies, encodeCursor, headers, party as partyJson, partyQuery, partyPage, queries, tokens, user as userJson } from 'src/api/schemas';
 import { authenticate } from 'src/api/session';
 import { EnterRequestToken, UserToken } from 'src/api/types';
-import { PartyDO } from 'src/do/PartyDO';
+import { MAX_PARTY_MEMBERS, PartyDO } from 'src/do/PartyDO';
 import { nodeIdToStr, strToNodeId } from 'src/utils/strings/nodeId';
 
 import { denied, jwt, mailer, request, sessionToken, signIn, testEnv, uniqueEmail } from './helpers';
@@ -757,12 +757,12 @@ describe('PartyDO joins that must check the session on their own', () => {
     warn.mockRestore();
   });
 
-  it('look again after the check: the party may be gone, closed, or already joined by then', async () => {
+  it('look again after the check: the party may be gone, closed, full, or already joined by then', async () => {
     const host = await signIn();
     const other = await signIn();
     const guest = await signIn();
     const outcomes = [];
-    for (const change of ['deleted', 'closed', 'joined'] as const) {
+    for (const change of ['deleted', 'closed', 'filled', 'joined'] as const) {
       const { body: party } = await createParty((change === 'deleted' ? host : other).token, `Race ${change}`);
       if (change === 'closed') {
         const filler = await signIn();
@@ -778,6 +778,11 @@ describe('PartyDO joins that must check the session on their own', () => {
               get: async () => {
                 if (change === 'deleted') state.storage.sql.exec('UPDATE party SET deleted_at = ?', Date.now());
                 if (change === 'closed') state.storage.sql.exec('UPDATE party SET is_closed = 1');
+                if (change === 'filled') {
+                  for (let i = 1; i < MAX_PARTY_MEMBERS; i++) {
+                    state.storage.sql.exec('INSERT INTO memberships (member_id, name, joined_at) VALUES (?, ?, 1)', `stand-in-${i}`, `Stand-in ${i}`);
+                  }
+                }
                 if (change === 'joined') state.storage.sql.exec("INSERT INTO memberships (member_id, member_email, name, joined_at) VALUES (?, ?, 'Guest', 1)", guest.id, guest.email);
                 return await env.USER.getByName(email).get();
               },
@@ -791,7 +796,8 @@ describe('PartyDO joins that must check the session on their own', () => {
         }
       }));
     }
-    expect(outcomes.map(o => (o.ok ? 'ok' : o.error.code))).toEqual(['not_found', 'conflict', 'ok']);
+    expect(outcomes.map(o => (o.ok ? 'ok' : o.error.code))).toEqual(['not_found', 'conflict', 'conflict', 'ok']);
+    expect(outcomes[2]).toMatchObject({ ok: false, error: { message: `This party is full: it already has ${MAX_PARTY_MEMBERS} people.` } });
   });
 });
 

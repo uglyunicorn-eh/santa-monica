@@ -67,6 +67,8 @@ export const PHRASE_GUESS_WINDOW_MS = 15 * 60 * 1000;
  * can be multiplied by signing up many times; this one can't. A correct phrase always gets through it.
  */
 export const MAX_PARTY_PHRASE_GUESSES = 20;
+/** People a party can hold, host included. Keeps its participant list, its emails and the draw a bounded size. */
+export const MAX_PARTY_MEMBERS = 100;
 /** The `phrase_guesses` row that counts the whole party's wrong guesses (member ids are never empty). */
 const WHOLE_PARTY = '';
 
@@ -78,6 +80,7 @@ const notLoggedIn = fail('unauthenticated', 'You must be logged in before joinin
 const tryAgain = fail('unavailable', "We couldn't reach your account. Please try again in a minute.");
 
 const closedToNewMembers = fail('conflict', 'Party is already packed. Sorry, we cannot accept a new participant...', 'party');
+const partyIsFull = fail('conflict', `This party is full: it already has ${MAX_PARTY_MEMBERS} people.`, 'party');
 
 /**
  * One instance per party, addressed by the party slug (`env.PARTY.getByName(slug)`).
@@ -388,6 +391,9 @@ export class PartyDO extends DurableObject<Env> {
       return fail('forbidden', "Hmm... Seems you've got a wrong secret phrase. Please try a different one or ask your friend for a hint.", 'password');
     }
     this.sql.exec('DELETE FROM phrase_guesses WHERE member_id = ?', member.id);
+    if (this.memberCount() >= MAX_PARTY_MEMBERS) {
+      return partyIsFull;
+    }
     const displayName = name || member.name;
     if (!displayName) {
       return fail('invalid', 'We were unable to get your name.', 'name');
@@ -417,6 +423,9 @@ export class PartyDO extends DurableObject<Env> {
       }
       if (current.is_closed) {
         return closedToNewMembers;
+      }
+      if (this.memberCount() >= MAX_PARTY_MEMBERS) {
+        return partyIsFull;
       }
     }
 
@@ -463,11 +472,12 @@ export class PartyDO extends DurableObject<Env> {
       return fail('not_found', 'Party does not exist.', 'party');
     }
     if (!this.membership(member.id)) {
-      if (current.is_closed) {
-        // Too late: take the party back off the user's list.
+      const refusal = current.is_closed ? closedToNewMembers : this.memberCount() >= MAX_PARTY_MEMBERS ? partyIsFull : null;
+      if (refusal) {
+        // Too late (closed or filled up meanwhile): take the party back off the user's list.
         this.enqueue({ kind: 'user.sync', email: member.email });
         await this.deliverUserUpdates();
-        return closedToNewMembers;
+        return refusal;
       }
       this.sql.exec(
         'INSERT INTO memberships (member_id, member_email, name, joined_at) VALUES (?, ?, ?, ?)',

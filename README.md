@@ -72,6 +72,7 @@ JSON in, JSON out. A signed-in request sends `Authorization: Bearer <session tok
 | Wrong secret phrases | 5 per person and 20 per party in 15 minutes; the right phrase always gets in | `src/do/PartyDO.ts` |
 | Emails | 10 a minute per IP, 3 a minute per address, and exactly 6 an hour per address | `ENTER_RATE_LIMIT_*`, `src/api/rateLimit.ts` |
 | Open parties per host | 3 | `src/api/routes/parties.ts` |
+| People per party | 100, host included; a join after that is refused with "This party is full" | `MAX_PARTY_MEMBERS` in `src/do/PartyDO.ts` |
 | New parties per person | 10 a day, deleted ones included (restoring one doesn't count) | `MAX_NEW_PARTIES_PER_DAY`, counted by `UserDO` |
 | Request body | 16 KB | `src/api/limits.ts` |
 
