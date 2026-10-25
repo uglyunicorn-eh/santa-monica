@@ -42,6 +42,9 @@ export function decodeCursor(cursor: string): PartyListCursor {
   return { createdAt: Number(match[1]), slug: match[2] };
 }
 
+/** A stored time (ms since the epoch) as ISO 8601 UTC. */
+const isoTime = (ms: number) => new Date(ms).toISOString();
+
 export function partyViewToNode(view: PartyView | null): Party | null {
   if (!view) {
     return null;
@@ -57,6 +60,8 @@ export function partyViewToNode(view: PartyView | null): Party | null {
     participantCount: view.participantCount,
     participants: view.participants,
     isClosed: view.isClosed,
+    createdAt: isoTime(view.createdAt),
+    rolledAt: view.closedAt === null ? null : isoTime(view.closedAt),
     target: view.target
       ? { id: nodeIdToStr({ kind: 'User', id: view.target.id }), name: view.target.name }
       : null,
@@ -71,7 +76,7 @@ export async function viewParty(env: Env, code: string, userId?: string): Promis
 }
 
 /** A party in the user's list: the summary fields from UserDO. The rest load lazily (see `partyFields`). */
-type PartySummaryNode = Pick<Party, 'id' | 'code' | 'name' | 'isHost' | 'isProtected' | 'isClosed' | 'isJoined'>;
+type PartySummaryNode = Pick<Party, 'id' | 'code' | 'name' | 'isHost' | 'isProtected' | 'isClosed' | 'isJoined' | 'createdAt' | 'rolledAt'>;
 
 const summaryToNode = (summary: UserPartyRecord): PartySummaryNode => ({
   id: nodeIdToStr({ kind: 'Party', id: summary.slug }),
@@ -81,6 +86,8 @@ const summaryToNode = (summary: UserPartyRecord): PartySummaryNode => ({
   isProtected: summary.isProtected,
   isClosed: summary.isClosed,
   isJoined: true,
+  createdAt: isoTime(summary.createdAt),
+  rolledAt: summary.closedAt === null ? null : isoTime(summary.closedAt),
 });
 
 const isComplete = (item: UserPartyListItem): item is UserPartyRecord =>
@@ -130,6 +137,7 @@ async function listParties(context: ApolloContext, userEmail: string, first: num
       party: {
         slug: node.code, name: node.name, isHost: node.isHost, isProtected: node.isProtected, isClosed: node.isClosed,
         createdAt: stale.find(item => item.slug === node.code)!.createdAt,
+        closedAt: node.rolledAt === null ? null : Date.parse(node.rolledAt),
       },
     })));
   }

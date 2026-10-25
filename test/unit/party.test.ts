@@ -1,4 +1,4 @@
-import { env, runInDurableObject } from 'cloudflare:test';
+import { env, evictDurableObject, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 
 import { newObjectId } from 'src/utils/ids';
@@ -115,6 +115,56 @@ describe('PartyDO', () => {
     await drainOutbox('HGFDS');
     expect((await env.USER.getByName('guest6@example.com').get())!.name).toBe('Guest');
     expect(await env.USER.getByName('guest6@example.com').listParties(10)).toEqual([]);
+  });
+
+  it('records when the party was started and when it was drawn, for the party and every member\'s list', async () => {
+    const host = await signIn('host7@example.com', 'Host');
+    const guest = await signIn('guest7@example.com', 'Guest');
+    const before = Date.now();
+    const created = await createParty('MNBVC', host.member);
+    if (!created.ok || 'conflict' in created) throw new Error('unexpected');
+    expect(created.view.createdAt).toBeGreaterThanOrEqual(before);
+    expect(created.view.closedAt).toBeNull();
+    const stub = env.PARTY.getByName('MNBVC');
+    await stub.join(guest.member, 'Guest', null);
+    expect((await env.USER.getByName('guest7@example.com').listParties(10))[0]).toMatchObject({ createdAt: created.view.createdAt, closedAt: null });
+
+    const closing = Date.now();
+    const closed = await stub.close(host.id);
+    if (!closed.ok) throw new Error('unexpected');
+    expect(closed.view.closedAt).toBeGreaterThanOrEqual(closing);
+    expect(await stub.view(guest.id)).toMatchObject({ createdAt: created.view.createdAt, closedAt: closed.view.closedAt });
+    await drainOutbox('MNBVC');
+    for (const email of ['host7@example.com', 'guest7@example.com']) {
+      expect((await env.USER.getByName(email).listParties(10))[0]).toMatchObject({ isClosed: true, closedAt: closed.view.closedAt });
+    }
+  });
+
+  it('adds the drawn-at column to older parties, leaving parties drawn before it without a time', async () => {
+    const host = await signIn('host8@example.com', 'Host');
+    const guest = await signIn('guest8@example.com', 'Guest');
+    const make = async (slug: string, close: boolean) => {
+      await createParty(slug, host.member);
+      const stub = env.PARTY.getByName(slug);
+      await stub.join(guest.member, 'Guest', null);
+      await runInDurableObject(stub, async (_i, state) => {
+        const row = state.storage.sql.exec('SELECT id, slug, name, password, host_id, created_at FROM party').one();
+        state.storage.sql.exec('DROP TABLE party');
+        state.storage.sql.exec('CREATE TABLE party (id TEXT PRIMARY KEY, slug TEXT NOT NULL, name TEXT NOT NULL, password TEXT, host_id TEXT NOT NULL, is_closed INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)');
+        state.storage.sql.exec('INSERT INTO party VALUES (?, ?, ?, ?, ?, ?, ?)', row.id, row.slug, row.name, row.password, row.host_id, close ? 1 : 0, row.created_at);
+      });
+      await evictDurableObject(stub);
+      return stub;
+    };
+
+    const drawnBefore = await make('LKJHF', true);
+    expect(await drawnBefore.view(host.id)).toMatchObject({ isClosed: true, closedAt: null });
+
+    const open = await make('LKJHD', false);
+    const closed = await open.close(host.id);
+    expect(closed).toMatchObject({ ok: true, view: { closedAt: expect.any(Number) } });
+    expect(await open.view(host.id)).toMatchObject({ closedAt: expect.any(Number) });
+    await drainOutbox('LKJHD');
   });
 
 });

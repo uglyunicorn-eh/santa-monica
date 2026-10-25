@@ -21,6 +21,8 @@ export type UserPartyRecord = {
   isHost: boolean;
   isProtected: boolean;
   isClosed: boolean;
+  /** When the host drew the party. Null while it is open, and for parties drawn before this was recorded. */
+  closedAt: number | null;
 };
 
 /** A row of the user's party list. Rows stored before summaries existed have null flags until they are refreshed. */
@@ -58,6 +60,9 @@ export type PartyView = {
   isHost: boolean;
   isJoined: boolean;
   isClosed: boolean;
+  createdAt: number;
+  /** When the host drew the party; null while open, and for parties drawn before this was recorded. */
+  closedAt: number | null;
   participantCount: number | null;
   participants: string[] | null;
   target: { id: string; name: string } | null;
