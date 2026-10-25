@@ -112,7 +112,7 @@ npm test                         # unit + integration
 
 ## CI/CD
 
-- **Pull requests** (`.github/workflows/preview.yml`): CI runs (typecheck, unit tests with 100% coverage, integration tests), then the PR is deployed to its own Worker, `gnomik-api-pr-<number>`, at `https://gnomik-api-pr-<number>.uglyunicorn.workers.dev`, smoke-tested, and the URL is posted on the PR. Each preview has its own empty Durable Objects, never production data. The preview Worker is deleted when the PR is closed.
+- **Pull requests** (`.github/workflows/preview.yml`): CI runs (typecheck, unit tests with 100% coverage, integration tests), then the PR is deployed as a [Worker Preview](https://developers.cloudflare.com/workers/previews/), `pr-<number>`, of the fixed Worker `gnomik-api-preview`, at `https://pr-<number>-gnomik-api-preview.uglyunicorn.workers.dev`, smoke-tested, and the URL is posted on the PR. Each Preview has its own empty Durable Objects, never production data, and is deleted when the PR is closed. Previews take their settings only from the `previews` block of `env.preview` in `wrangler.jsonc`. `gnomik-api-preview` itself serves nothing; it was deployed once (`npx wrangler deploy --env preview`) so a token can be scoped to it. A Preview name answers some requests with error 1101 for a while after it is deleted, so a reopened PR may need a minute.
 - **Merges to main** (`.github/workflows/deploy.yml`): CI runs, then production is deployed to `https://api.gnomik.me` and smoke-tested.
 - `.github/workflows/ci.yml` is the shared test job; it can also be run by hand.
 - Every third-party action is pinned to a commit SHA, with its version in a comment, so a moved or hijacked tag can't change what runs. Dependabot (`.github/dependabot.yml`) proposes updates weekly in one grouped PR, a week after each release.
@@ -120,7 +120,12 @@ npm test                         # unit + integration
 
 Emailed links point at `FRONTEND_URL` (`wrangler.jsonc`): `https://gnomik.me` in production, `http://localhost:4321` for previews, so a local frontend can follow links from a preview.
 
-GitHub secrets: `CLOUDFLARE_API_TOKEN` (a Cloudflare API token from the "Edit Cloudflare Workers" template, with access to the account and the gnomik.me zone), `CLOUDFLARE_ACCOUNT_ID`, and `PREVIEW_JWT_PRIVATE_KEY` (a P-256 private key used to sign preview tokens; a local frontend pointed at a preview needs its public key, see santa-barbara's README).
+GitHub secrets. Pull-request jobs run code from any branch, so they never see the production token:
+
+- `CLOUDFLARE_API_TOKEN`: a secret of the `production` environment, which only `main` can deploy to. An account API token with **Workers Scripts: Edit** on the `gnomik-api` Worker only (the custom domain already exists, so no zone access is needed).
+- `CLOUDFLARE_PREVIEW_API_TOKEN` (repository): the same, on `gnomik-api-preview` only.
+- `CLOUDFLARE_ACCOUNT_ID` (repository).
+- `PREVIEW_JWT_PRIVATE_KEY` (repository): a P-256 private key used to sign preview tokens; a local frontend pointed at a preview needs its public key, see santa-barbara's README.
 
 ## Logs and errors
 
@@ -133,8 +138,9 @@ Unexpected errors return a 500 with an `errorId`; the same id is logged with the
 ## Deploying by hand
 
 ```bash
-npx wrangler deploy --env=""                                  # production (api.gnomik.me)
-npx wrangler deploy --env preview --name gnomik-api-pr-123    # a preview
+npx wrangler deploy --env=""                                                # production (api.gnomik.me)
+npx wrangler preview --env preview --name pr-123 --secrets-file secrets.json   # a Preview (JWT_PRIVATE_KEY in secrets.json)
+npx wrangler preview delete --env preview --name pr-123
 ```
 
 Production secrets are set with `npx wrangler secret put JWT_PRIVATE_KEY`.

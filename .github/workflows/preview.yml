@@ -1,7 +1,9 @@
 name: Preview
 
-# Every pull request gets its own Worker, gnomik-api-pr-<number>, on workers.dev with its own Durable Objects (empty,
-# never production data). It is redeployed on every push and deleted when the pull request is closed.
+# Every pull request gets its own Worker Preview, pr-<number>, of the fixed Worker gnomik-api-preview, with its own
+# URL and its own Durable Objects (empty, never production data). It is redeployed on every push and deleted when the
+# pull request is closed. These jobs only ever see CLOUDFLARE_PREVIEW_API_TOKEN, which can edit gnomik-api-preview and
+# nothing else; the production token lives in the `production` environment, which only main can deploy to.
 on:
   pull_request:
     types: [opened, synchronize, reopened, closed]
@@ -11,9 +13,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  WORKER: gnomik-api-pr-${{ github.event.pull_request.number }}
-  # uglyunicorn is the account's workers.dev subdomain.
-  PREVIEW_URL: https://gnomik-api-pr-${{ github.event.pull_request.number }}.uglyunicorn.workers.dev
+  PREVIEW: pr-${{ github.event.pull_request.number }}
+  # Preview URLs are <preview>-<worker>.<subdomain>.workers.dev; uglyunicorn is the account's subdomain.
+  PREVIEW_URL: https://pr-${{ github.event.pull_request.number }}-gnomik-api-preview.uglyunicorn.workers.dev
 
 jobs:
   ci:
@@ -28,8 +30,10 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+    # One environment for every pull request: each deploy still records its own URL. A name per pull request made
+    # GitHub keep an environment for each one, and the workflow's token can't delete them.
     environment:
-      name: preview-pr-${{ github.event.pull_request.number }}
+      name: preview
       url: ${{ env.PREVIEW_URL }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -46,9 +50,9 @@ jobs:
           PREVIEW_JWT_PRIVATE_KEY: ${{ secrets.PREVIEW_JWT_PRIVATE_KEY }}
       - uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3.15.0
         with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          apiToken: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy --env preview --name ${{ env.WORKER }} --var PUBLIC_URL:${{ env.PREVIEW_URL }} --secrets-file ${{ runner.temp }}/preview-secrets.json
+          command: preview --env preview --name ${{ env.PREVIEW }} --var PUBLIC_URL:${{ env.PREVIEW_URL }} --secrets-file ${{ runner.temp }}/preview-secrets.json
       - name: Smoke test the preview
         run: npm run smoke
         env:
@@ -71,9 +75,11 @@ jobs:
           node-version: 22
           cache: npm
       - run: npx -y npm@11 ci
-      - name: Delete the preview Worker
+      # A Preview's name stays unreliable for a while after it is deleted (some requests fail with error 1101), so a
+      # reopened pull request may need a minute before its Preview answers every request.
+      - name: Delete the Preview
         uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3.15.0
         with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          apiToken: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: delete --name ${{ env.WORKER }} --force
+          command: preview delete --env preview --name ${{ env.PREVIEW }} --skip-confirmation
