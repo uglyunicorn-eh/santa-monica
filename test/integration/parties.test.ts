@@ -46,6 +46,35 @@ describe('creating a party', () => {
   });
 });
 
+describe('open-party limit and cancelling', () => {
+  const CANCEL = `mutation ($party: ID!) { parties { cancelParty(input: { party: $party }) { status userErrors { fieldName messages } } } }`;
+
+  it('caps a host at three open parties, and cancelling an empty one frees a slot', async () => {
+    const host = await person('host');
+    const parties = [];
+    for (let i = 0; i < 3; i++) {
+      parties.push(await createParty(host, `Party ${i}`));
+    }
+    const fourth = await gql(CREATE_PARTY, { name: 'Fourth' }, { token: host.token });
+    expect(fourth.data.parties.createParty.userErrors[0].messages[0]).toMatch(/up to 3 open parties/);
+
+    expect((await gql(CANCEL, { party: parties[0].id }, { token: host.token })).data.parties.cancelParty.status).toBe('ok');
+    expect((await gql(PARTY, { code: parties[0].code }, { token: host.token })).data.party).toBeNull();
+    expect((await gql(PARTIES, {}, { token: host.token })).data.parties.map((p: { code: string }) => p.code))
+      .toEqual(expect.not.arrayContaining([parties[0].code]));
+    expect((await gql(CREATE_PARTY, { name: 'Fourth' }, { token: host.token })).data.parties.createParty.status).toBe('ok');
+  });
+
+  it('cannot cancel once someone has joined', async () => {
+    const host = await person('host');
+    const guest = await person('guest');
+    const party = await createParty(host);
+    await joinParty(guest, party, 'Guest');
+    const res = await gql(CANCEL, { party: party.id }, { token: host.token });
+    expect(res.data.parties.cancelParty).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
+  });
+});
+
 describe('looking up a party', () => {
   it('shows a limited view to anyone with the code, in any case', async () => {
     const host = await person('host');

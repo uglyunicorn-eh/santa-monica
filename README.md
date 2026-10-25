@@ -11,7 +11,7 @@ This is back-end side of the Anonymous Ded Morozes
 
 The API is a Cloudflare Worker (Hono + Apollo Server) with its data in Durable Objects: one `PartyDO` per party and one `UserDO` per user. Mail goes through Cloudflare Email Service. See [docs/MIGRATION_PLAN.md](docs/MIGRATION_PLAN.md) for the design.
 
-One person can host at most 3 open parties at a time (`MAX_OPEN_HOSTED_PARTIES` in `src/apollo/mutations/parties.ts`). Parties joined as a guest don't count, and closing a party frees its slot right away.
+One person can host at most 3 open parties at a time (`MAX_OPEN_HOSTED_PARTIES` in `src/apollo/mutations/parties.ts`). Parties joined as a guest don't count. Closing a party frees its slot right away, and a host can cancel (delete) an open party nobody else has joined with `cancelParty`.
 
 Keeping Durable Object calls low:
 

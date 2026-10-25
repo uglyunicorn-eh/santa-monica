@@ -165,7 +165,7 @@ describe('party mutations', () => {
 
     expect(await createParty(host, 'One too many')).toEqual({
       status: 'error',
-      userErrors: [{ fieldName: null, messages: ['You can host up to 3 open parties at a time. Close one of them to start a new one.'] }],
+      userErrors: [{ fieldName: null, messages: ['You can host up to 3 open parties at a time. Close or cancel one of them to start a new one.'] }],
     });
 
     // Closing one (it needs a second participant) frees a slot.
@@ -183,6 +183,58 @@ describe('party mutations', () => {
       expect((await parties(null, {}, guest).joinParty({ input: { party: node.id, name: 'Guest' } }, guest) as any).status).toBe('ok');
     }
     expect((await createParty(guest, 'Mine')).status).toBe('ok');
+  });
+
+  describe('cancelling a party', () => {
+    const cancel = async (ctx: ApolloContext, id: string) =>
+      await parties(null, {}, ctx).cancelParty({ input: { party: id } }, ctx) as any;
+    const join = async (ctx: ApolloContext, id: string) =>
+      await parties(null, {}, ctx).joinParty({ input: { party: id, name: 'Guest' } }, ctx) as any;
+
+    it('deletes a party only the host is in, removes it from their list and frees the slot', async () => {
+      const host = await signedIn('Host');
+      const created = [];
+      for (let i = 0; i < 3; i++) {
+        created.push((await createParty(host, `Party ${i}`)).node);
+      }
+      expect((await createParty(host, 'Fourth')).status).toBe('error');
+
+      expect(await cancel(host, created[0].id)).toEqual({ status: 'ok', userErrors: null });
+      expect(await party(null, { code: created[0].code }, host)).toBeNull();
+      expect((await listParties(null, { first: 10 }, host))!.map((p: any) => p.code)).not.toContain(created[0].code);
+      expect((await createParty(host, 'Fourth')).status).toBe('ok');
+
+      // Cancelling again: the party is gone.
+      expect(await cancel(host, created[0].id)).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party', messages: ['Party does not exist.'] }] });
+    });
+
+    it('is only for the host, before anyone joins and before the draw', async () => {
+      const host = await signedIn('Host');
+      const guest = await signedIn('Guest');
+      const { node } = await createParty(host, 'Popular');
+
+      expect(await cancel(guest, node.id)).toMatchObject({ status: 'error', userErrors: [{ messages: ['You must be the host to cancel the party.'] }] });
+
+      await join(guest, node.id);
+      expect(await cancel(host, node.id)).toMatchObject({ status: 'error', userErrors: [{ messages: ['Someone has already joined this party, so it can no longer be cancelled.'] }] });
+
+      await parties(null, {}, host).closeParty({ input: { party: node.id } }, host);
+      expect(await cancel(host, node.id)).toMatchObject({ status: 'error', userErrors: [{ messages: ['Party is already closed.'] }] });
+    });
+
+    it('works after the host has left their own party', async () => {
+      const host = await signedIn('Host');
+      const { node } = await createParty(host, 'Abandoned');
+      await parties(null, {}, host).leaveParty({ input: { party: node.id } }, host);
+      expect((await cancel(host, node.id)).status).toBe('ok');
+      expect(await party(null, { code: node.code }, host)).toBeNull();
+    });
+
+    it('rejects ids that are not parties', async () => {
+      const host = await signedIn('Host');
+      expect(await cancel(host, nodeIdToStr({ kind: 'User', id: 'x' }))).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
+      expect(await cancel(host, '')).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
+    });
   });
 
   it('retries on a code collision, and gives up after ten', async () => {

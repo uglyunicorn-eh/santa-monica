@@ -221,6 +221,32 @@ describe('party → user updates', () => {
     }
   });
 
+  it('cancels with one call from the Worker, and one apply from the party to the host', async () => {
+    const host = await person('Host');
+    const { node } = (await gql(env, CREATE, { name: 'Cancelled' }, host.token)).data.parties.createParty;
+    const { applied, done } = recordUserCalls(node.code);
+    await done;
+    const counting = countingEnv();
+    const res = await gql(counting.env, `mutation ($party: ID!) { parties { cancelParty(input: { party: $party }) { status } } }`, { party: node.id }, host.token);
+    expect(res.data.parties.cancelParty.status).toBe('ok');
+    expect(counting.calls).toEqual([{ binding: 'PARTY', name: node.code, method: 'cancel' }]);
+    expect(applied).toEqual([{ email: host.email, updates: [{ type: 'removeParty', slug: node.code }] }]);
+  });
+
+  it('sends nothing for a sync left queued for a party that was cancelled', async () => {
+    const host = await person('Host');
+    const { node } = (await gql(env, CREATE, { name: 'Gone' }, host.token)).data.parties.createParty;
+    await gql(env, `mutation ($party: ID!) { parties { cancelParty(input: { party: $party }) { status } } }`, { party: node.id }, host.token);
+    const { applied, done } = recordUserCalls(node.code);
+    await done;
+    await runInDurableObject(env.PARTY.getByName(node.code), async (instance: PartyDO, state) => {
+      state.storage.sql.exec('INSERT INTO outbox (payload, next_attempt_at) VALUES (?, 0)', JSON.stringify({ kind: 'user.sync', email: host.email }));
+      await instance.alarm();
+      expect(await instance.pendingOutbox()).toBe(0);
+    });
+    expect(applied).toEqual([]);
+  });
+
   it('removes the party from the list of someone who left', async () => {
     const host = await person('Host');
     const guest = await person('Guest');

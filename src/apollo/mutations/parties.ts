@@ -8,8 +8,8 @@ import { strToNodeId } from 'src/utils/strings/nodeId';
 import { randomString } from 'src/utils/strings/random';
 import { annotate } from 'src/utils/tracing';
 
-import { ClosePartyInput, CreatePartyInput, JoinPartyInput, LeavePartyInput } from "./types";
-import { closePartyInputSchema, createPartyInputSchema, joinPartyInputSchema, leavePartyInputSchema } from "./validation";
+import { CancelPartyInput, ClosePartyInput, CreatePartyInput, JoinPartyInput, LeavePartyInput } from "./types";
+import { cancelPartyInputSchema, closePartyInputSchema, createPartyInputSchema, joinPartyInputSchema, leavePartyInputSchema } from "./validation";
 
 const SLUG_ATTEMPTS = 10;
 
@@ -20,7 +20,7 @@ const tooManyOpenParties = {
   status: 'error' as const,
   userErrors: [{
     fieldName: null,
-    messages: [`You can host up to ${MAX_OPEN_HOSTED_PARTIES} open parties at a time. Close one of them to start a new one.`],
+    messages: [`You can host up to ${MAX_OPEN_HOSTED_PARTIES} open parties at a time. Close or cancel one of them to start a new one.`],
   }],
 };
 
@@ -130,5 +130,18 @@ const partyMutations = {
       annotate({ 'party.code': slug });
 
       return toPayload(await env.PARTY.getByName(slug).close(userId!));
+    }),
+
+    cancelParty: _(cancelPartyInputSchema, 'cancelParty')(async ({ party }: CancelPartyInput, { env, userId }: ApolloContext) => {
+      const slug = partySlug(party);
+      if (!slug) {
+        return unknownParty;
+      }
+      annotate({ 'party.code': slug });
+
+      const result = await env.PARTY.getByName(slug).cancel(userId!);
+      return result.ok
+        ? {}
+        : { status: 'error' as const, userErrors: [{ fieldName: result.error.fieldName, messages: [result.error.message] }] };
     }),
 };

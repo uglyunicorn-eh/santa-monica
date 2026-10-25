@@ -61,6 +61,8 @@ export const typeDefs = `#graphql
     joinParty(input: JoinPartyInput!): JoinPartyPayload!
     leaveParty(input: LeavePartyInput!): LeavePartyPayload!
     closeParty(input: ClosePartyInput!): ClosePartyPayload!
+    "Deletes an open party nobody else has joined. Only the host can cancel it."
+    cancelParty(input: CancelPartyInput!): CancelPartyPayload!
   }
 
   input CreatePartyInput {
@@ -104,6 +106,15 @@ export const typeDefs = `#graphql
     status: MutationStatus!
     userErrors: [UserError!]
     node: Party
+  }
+
+  input CancelPartyInput {
+    party: ID!
+  }
+
+  type CancelPartyPayload implements MutationPayload {
+    status: MutationStatus!
+    userErrors: [UserError!]
   }
 
   type AuthOpts {

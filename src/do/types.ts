@@ -58,6 +58,8 @@ export type PartyResult =
   | { ok: true; view: PartyView }
   | { ok: false; error: PartyUserError };
 
+export type CancelResult = { ok: true } | { ok: false; error: PartyUserError };
+
 export type CreatePartyInput = {
   name: string;
   password: string | null;

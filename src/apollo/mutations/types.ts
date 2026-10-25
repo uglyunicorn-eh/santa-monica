@@ -17,6 +17,10 @@ export type ClosePartyInput = {
   party: string;
 }
 
+export type CancelPartyInput = {
+  party: string;
+}
+
 export type EnterRequestInput = {
   email: string;
   party: string;

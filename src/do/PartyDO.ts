@@ -4,7 +4,7 @@ import { Env } from 'src/env';
 import { isPermanentMailError, renderPartyNotification, sendMail } from 'src/mail';
 import santaShuffle from 'src/utils/santaShuffle';
 
-import { CreatePartyInput, Member, PartyResult, PartyView, UserUpdate } from './types';
+import { CancelResult, CreatePartyInput, Member, PartyResult, PartyView, UserUpdate } from './types';
 
 import { baseUrl } from 'src/config.json';
 
@@ -32,6 +32,8 @@ type MembershipRow = {
 type OutboxMessage =
   | { kind: 'user.sync' | 'user.addParty' | 'user.removeParty'; email: string }
   | { kind: 'user.setName'; email: string; name: string }
+  // Sent when the party is cancelled: the party row is gone, so the slug travels with the message.
+  | { kind: 'user.partyCancelled'; email: string; slug: string }
   | { kind: 'mail.partyNotification'; email: string; partyName: string; slug: string };
 
 type OutboxRow = { id: number; payload: string; attempts: number; next_attempt_at: number };
@@ -41,7 +43,7 @@ type OutboxBatch = { key: string; rows: OutboxRow[]; messages: OutboxMessage[] }
 const MAX_ATTEMPTS = 15;
 const MAX_BACKOFF_MS = 60 * 60 * 1000;
 
-const fail = (fieldName: string | null, message: string): PartyResult => ({ ok: false, error: { fieldName, message } });
+const fail = (fieldName: string | null, message: string) => ({ ok: false as const, error: { fieldName, message } });
 
 /**
  * One instance per party, addressed by the party slug (`env.PARTY.getByName(slug)`).
@@ -317,6 +319,38 @@ export class PartyDO extends DurableObject<Env> {
     return { ok: true, view: this.buildView({ ...party, is_closed: 1 }, userId) };
   }
 
+  /**
+   * Deletes an open party nobody else has joined, so a host can take back a party (and its slot in their open-party
+   * limit) when no one came. The host's list is updated before returning.
+   */
+  async cancel(userId: string): Promise<CancelResult> {
+    const party = this.party();
+    if (!party) {
+      return fail('party', 'Party does not exist.');
+    }
+    if (party.host_id !== userId) {
+      return fail('party', 'You must be the host to cancel the party.');
+    }
+    if (party.is_closed) {
+      return fail('party', 'Party is already closed.');
+    }
+    const others = this.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM memberships WHERE member_id != ?', userId).one().n;
+    if (others > 0) {
+      return fail('party', 'Someone has already joined this party, so it can no longer be cancelled.');
+    }
+
+    const hostEmail = this.membership(userId)?.member_email;
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec('DELETE FROM memberships');
+      this.sql.exec('DELETE FROM party');
+      if (hostEmail) {
+        this.enqueue({ kind: 'user.partyCancelled', email: hostEmail, slug: party.slug });
+      }
+    });
+    await this.runOutbox(message => message.kind.startsWith('user.') && message.email === hostEmail);
+    return { ok: true };
+  }
+
 
   /** Delivers a batch: one email, or all queued changes for one user in a single UserDO call. */
   private async deliver({ messages }: OutboxBatch) {
@@ -332,10 +366,17 @@ export class PartyDO extends DurableObject<Env> {
     for (const message of messages) {
       if (message.kind === 'user.setName') {
         updates.push({ type: 'setName', name: message.name });
-      } else if (!synced) {
+      } else if (message.kind === 'user.partyCancelled') {
+        synced = true;
+        updates.push({ type: 'removeParty', slug: message.slug });
+      } else if (!synced && this.party()) {
         synced = true;
         updates.push(this.memberUpdate(first.email));
       }
+    }
+    // A sync queued for a party that has since been cancelled has nothing left to send.
+    if (updates.length === 0) {
+      return;
     }
     return await this.env.USER.getByName(first.email).apply(updates);
   }
