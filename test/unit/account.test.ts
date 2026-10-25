@@ -166,58 +166,32 @@ describe('UserDO account changes', () => {
 });
 
 describe('PartyDO.forgetMember', () => {
-  it('deletes an open party the user hosts: gone at once, off every list, wiped once delivered', async () => {
+  it('deletes an open party the user hosts, whoever joined: gone at once, off every list, its code retired', async () => {
     const host = await signedIn('Host');
     const guest = await signedIn('Guest');
     const { slug, stub } = await partyOf(host, [guest]);
     await stub.join({ id: newObjectId(), email: null, name: 'Legacy' }, 'Legacy', null);
-    // A message waiting for a retry holds the wipe back until it is delivered.
-    await runInDurableObject(stub, async (_i, state) => {
-      state.storage.sql.exec('INSERT INTO outbox (payload, next_attempt_at) VALUES (?, ?)', JSON.stringify({ kind: 'mail.partyNotification', email: 'someone@example.com', partyName: 'P', slug }), Date.now() + 60_000);
-    });
 
     expect(await stub.forgetMember(host.userId!, host.userEmail!)).toBe('deleted');
     expect(await stub.view(guest.userId)).toBeNull();
     expect(await stub.join({ id: newObjectId(), email: uniqueEmail(), name: 'Late' }, 'Late', null)).toMatchObject({ ok: false, error: { message: 'Party does not exist.' } });
     expect(await stub.leave(guest.userId!)).toMatchObject({ ok: false });
-    // Still holds the slug until wiped.
-    expect(await stub.create({ id: newObjectId(), slug, name: 'Reuse', password: null, host: { id: guest.userId!, email: guest.userEmail!, name: 'G' } })).toEqual({ ok: false, conflict: true });
-    expect(await stub.forgetMember(newObjectId(), uniqueEmail('nobody'))).toBe('none');
+    expect(await stub.forgetMember(guest.userId!, guest.userEmail!)).toBe('none');
 
-    await runInDurableObject(stub, async (_i, state) => {
-      state.storage.sql.exec('UPDATE outbox SET next_attempt_at = 0');
-    });
     await drain(slug);
     expect(await slugsOf(guest.userEmail!)).toEqual([]);
     expect(await stub.pendingOutbox()).toBe(0);
-    await runInDurableObject(stub, async (_i, state) => {
-      expect(state.storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'party'").toArray()).toEqual([]);
-      expect(await state.storage.getAlarm()).toBeNull();
-    });
-    // The slug is free again.
-    expect(await stub.create({ id: newObjectId(), slug, name: 'Reuse', password: null, host: { id: guest.userId!, email: guest.userEmail!, name: 'G' } })).toMatchObject({ ok: true });
+    // Like a cancelled party, its code is never handed out again.
+    expect(await stub.create({ id: newObjectId(), slug, name: 'Reuse', password: null, host: { id: guest.userId!, email: guest.userEmail!, name: 'G' } })).toEqual({ ok: false, conflict: true });
   });
 
-  it('wipes a deleted party with no one else to tell', async () => {
-    const host = await signedIn('Host');
-    const { slug, stub } = await partyOf(host, []);
-    expect(await stub.forgetMember(host.userId!, host.userEmail!)).toBe('deleted');
-    await runDurableObjectAlarm(stub);
-    expect(await stub.view()).toBeNull();
-    expect(slug).toHaveLength(5);
-  });
-
-  it('adds the deletion column to parties created before it existed', async () => {
+  it('deletes parties created before cancelling existed', async () => {
     const host = await signedIn('Host');
     const { stub } = await partyOf(host, []);
     await runInDurableObject(stub, async (_i, state) => {
-      const row = state.storage.sql.exec('SELECT id, slug, name, password, host_id, is_closed, created_at FROM party').one();
-      state.storage.sql.exec('DROP TABLE party');
-      state.storage.sql.exec('CREATE TABLE party (id TEXT PRIMARY KEY, slug TEXT NOT NULL, name TEXT NOT NULL, password TEXT, host_id TEXT NOT NULL, is_closed INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)');
-      state.storage.sql.exec('INSERT INTO party VALUES (?, ?, ?, ?, ?, ?, ?)', row.id, row.slug, row.name, row.password, row.host_id, row.is_closed, row.created_at);
+      state.storage.sql.exec('DROP TABLE cancelled');
     });
     await evictDurableObject(stub);
-    expect(await stub.view(host.userId)).toMatchObject({ isHost: true });
     expect(await stub.forgetMember(host.userId!, host.userEmail!)).toBe('deleted');
     expect(await stub.view(host.userId)).toBeNull();
   });

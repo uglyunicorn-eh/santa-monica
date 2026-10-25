@@ -11,6 +11,8 @@ This is back-end side of the Anonymous Ded Morozes
 
 The API is a Cloudflare Worker (Hono + Apollo Server) with its data in Durable Objects: one `PartyDO` per party and one `UserDO` per user. Mail goes through Cloudflare Email Service. See [docs/MIGRATION_PLAN.md](docs/MIGRATION_PLAN.md) for the design.
 
+One person can host at most 3 open parties at a time (`MAX_OPEN_HOSTED_PARTIES` in `src/apollo/mutations/parties.ts`). Parties joined as a guest don't count. Closing a party frees its slot right away, and a host can cancel (delete) an open party nobody else has joined with `cancelParty`; a cancelled party's code is never reused. Hosts can't leave their own party. The check and a slot for the new party are taken in one `UserDO.startHosting` call, so parallel creates can't get past the limit.
+
 Keeping Durable Object calls low:
 
 - Each `UserDO` keeps a summary of the user's parties (name, host, protected, closed), so "my parties" is one call. Fields the summary doesn't have (participants, target, password) are loaded from the party only when a query asks for them, at most once per party per request.
@@ -18,7 +20,7 @@ Keeping Durable Object calls low:
 - The session token is checked once per request. Joining uses the session's email and doesn't read the profile.
 - Party history (`partyHistory`) is paged from the same summaries: one call per page.
 - Deleting an account or changing its email makes one call to each of the user's parties, plus two (deletion) or four (email change) to the user's `UserDO`s.
-- Revoked sessions (deleted accounts, see below) are not checked against the `UserDO` on every request, only where a call to it happens anyway: reading the profile (`user`, `createParty`), `updateName`, and joining, where the party sends the session along with its update to the user, before storing the membership.
+- Revoked sessions (deleted accounts, see below) are not checked against the `UserDO` on every request, only where a call to it happens anyway: reading the profile (`user`), `createParty` (in `UserDO.startHosting`), `updateName`, and joining, where the party sends the session along with its update to the user, before storing the membership.
 - `test/unit/efficiency.test.ts` counts the calls each operation makes.
 
 ```bash
@@ -66,7 +68,7 @@ Session tokens carry the user's token version (`ver`). `UserDO.tombstone()` dele
 
 Deleting an account and changing its email go through a link mailed to the user (`AccountDeletion` and `EmailChange` tokens, single-use, one hour):
 
-- **Deleting** (`profile.requestAccountDeletion` → `<baseUrl>/profile/delete/<token>` → `profile.confirmAccountDeletion`): every party on the user's list is told once (`PartyDO.forgetMember`). An open party they host is deleted: it reads as gone at once, its members' lists are updated through the outbox, and the party's storage is wiped once that is delivered. Open parties they joined are left. In drawn parties their membership is anonymized (new id, no email; the names stay so the draw still works). Then the `UserDO` is tombstoned.
+- **Deleting** (`profile.requestAccountDeletion` → `<baseUrl>/profile/delete/<token>` → `profile.confirmAccountDeletion`): every party on the user's list is told once (`PartyDO.forgetMember`). An open party they host is deleted like a cancelled one, whoever joined: it is gone at once, its code is never handed out again, and its members' lists are updated through the outbox. Open parties they joined are left. In drawn parties their membership is anonymized (new id, no email; the names stay so the draw still works). Then the `UserDO` is tombstoned.
 - **While either runs**, the account is held (up to a minute): it reads as missing, can't join or create parties, and can't start another change. If a party can't be reached, what can be undone is undone and the link works again.
 - **Changing the email** (`profile.requestEmailChange` → `<baseUrl>/profile/email/<token>` to the new address, plus a notice to the old one → `profile.confirmEmailChange`): open parties move the membership and their queued updates to the new email (`PartyDO.changeMemberEmail`). Then the account is copied to the new address's `UserDO` (same id, token version + 1) and the old one is tombstoned. Drawn parties keep the old email; the user still sees them, since membership goes by user id. The confirm returns a session token for the new address.
 

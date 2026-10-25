@@ -97,15 +97,24 @@ describe('updating the profile name', () => {
 
 describe('party history', () => {
   it('pages ten at a time, newest first, with every party exactly once', async () => {
+    // Hosting is limited to 3 open parties, so most of the history is parties joined.
     const me = await person('me');
-    const created = [];
+    const friends = await Promise.all([1, 2, 3, 4].map(i => person(`friend${i}`)));
+    const created: string[] = [];
     for (let i = 0; i < 12; i++) {
-      created.push((await createParty(me, `Party ${i}`)).code);
+      if (i % 6 === 5) {
+        created.push((await createParty(me, `Party ${i}`)).code);
+      } else {
+        const party = await createParty(friends[i % 4], `Party ${i}`);
+        await joinParty(me, party, 'Me');
+        created.push(party.code);
+      }
     }
     const pages = await allPages(me, 10);
     expect(pages.map(p => [p.items.length, p.hasMore])).toEqual([[10, true], [2, false]]);
     expect(pages.flatMap(p => p.items.map((item: any) => item.code))).toEqual(created.reverse());
     expect(pages[0].items[0]).toMatchObject({ name: 'Party 11', isHost: true, isJoined: true });
+    expect(pages[0].items[1]).toMatchObject({ name: 'Party 10', isHost: false, isJoined: true });
   });
 
   it('defaults to ten per page', async () => {

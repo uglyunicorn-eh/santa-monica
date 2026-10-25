@@ -50,7 +50,8 @@ export default defineConfig({
             miniflare: { bindings },
           }),
         ],
-        test: { name: 'unit', include: ['test/unit/**/*.test.ts'] },
+        // Some tests drive a dozen requests through real Durable Objects, which can pass 5s on CI with coverage on.
+        test: { name: 'unit', include: ['test/unit/**/*.test.ts'], testTimeout: 20_000 },
       },
       {
         resolve,

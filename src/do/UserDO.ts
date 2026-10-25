@@ -4,7 +4,7 @@ import { Env } from 'src/env';
 import { newObjectId } from 'src/utils/ids';
 import { Session, sessionMatches } from 'src/utils/session';
 
-import { PartyListCursor, UserPartyListItem, UserPartyRecord, UserRecord, UserUpdate } from './types';
+import { HostingStart, PartyListCursor, UserPartyListItem, UserPartyRecord, UserRecord, UserUpdate } from './types';
 
 type UserRow = {
   id: string;
@@ -49,6 +49,9 @@ const ADDED_COLUMNS: Record<string, Record<string, string>> = {
   },
 };
 
+/** How long a slot held for a party being created lasts if the party never arrives (say, the create failed). */
+const HOST_RESERVATION_TTL_MS = 5 * 60 * 1000;
+
 /**
  * One instance per user, addressed by the lowercased email (`env.USER.getByName(email)`).
  * Holds the profile and the user's party list. The list carries a summary of each party (name, host, protected,
@@ -82,6 +85,10 @@ export class UserDO extends DurableObject<Env> {
           is_host INTEGER,
           is_protected INTEGER,
           is_closed INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS host_reservations (
+          id TEXT PRIMARY KEY,
+          expires_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS used_magic_links (
           jti TEXT PRIMARY KEY,
@@ -240,6 +247,31 @@ export class UserDO extends DurableObject<Env> {
   }
 
   /**
+   * Checks the open-party limit and, when there is room, holds a slot for the party about to be created, in one step:
+   * concurrent creates each see the slots the others hold. The slot is released when the new party lands in the list
+   * (`releaseHostSlot`) or after HOST_RESERVATION_TTL_MS. Returns null when there is no user or the session no longer
+   * belongs to them.
+   */
+  startHosting(limit: number, session: Session): HostingStart | null {
+    const user = this.get();
+    if (!sessionMatches(user, session)) {
+      return null;
+    }
+    const now = Date.now();
+    this.sql.exec('DELETE FROM host_reservations WHERE expires_at < ?', now);
+    const open = this.sql
+      .exec<{ n: number }>('SELECT COUNT(*) AS n FROM parties WHERE is_host = 1 AND NOT COALESCE(is_closed, 0)')
+      .one().n;
+    const held = this.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM host_reservations').one().n;
+    if (open + held >= limit) {
+      return { ...user!, openHostedParties: open + held, allowed: false };
+    }
+    const reservation = newObjectId();
+    this.sql.exec('INSERT INTO host_reservations (id, expires_at) VALUES (?, ?)', reservation, now + HOST_RESERVATION_TTL_MS);
+    return { ...user!, openHostedParties: open + held, allowed: true, reservation };
+  }
+
+  /**
    * Applies a batch of changes from a party, in order, in one transaction. Safe to retry.
    * Writes nothing to a deleted account, and nothing when `session` is given and no longer belongs to this user (or
    * the account is held by an account change), so a party can verify a joining session in the call it makes anyway. Returns the user as it is afterwards (null if
@@ -278,6 +310,9 @@ export class UserDO extends DurableObject<Env> {
               name = update.name;
               this.sql.exec('UPDATE user SET name = ?', name);
             }
+            break;
+          case 'releaseHostSlot':
+            this.sql.exec('DELETE FROM host_reservations WHERE id = ?', update.reservation);
             break;
         }
       }

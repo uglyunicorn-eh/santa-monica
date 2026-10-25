@@ -7,7 +7,7 @@ import { Session, sessionMatches } from 'src/utils/session';
 
 import { newObjectId } from 'src/utils/ids';
 
-import { CreatePartyInput, ForgetMemberResult, Member, PartyResult, PartyView, UserPartyRecord, UserRecord, UserUpdate } from './types';
+import { CancelResult, CreatePartyInput, ForgetMemberResult, Member, PartyResult, PartyView, UserPartyRecord, UserRecord, UserUpdate } from './types';
 
 import { baseUrl } from 'src/config.json';
 
@@ -19,8 +19,6 @@ type PartyRow = {
   host_id: string;
   is_closed: number;
   created_at: number;
-  /** Set when the host deleted their account: the party reads as gone and is wiped once its outbox is delivered. */
-  deleted_at: number | null;
 };
 
 type MembershipRow = {
@@ -34,11 +32,15 @@ type MembershipRow = {
 
 // user.sync sends the member's current view of this party (added, closed, or removed if they left). It is computed at
 // delivery time, so it is always current and safe to repeat. user.addParty / user.removeParty are older forms of it.
+// A sync from creating a party carries the host's slot reservation (see UserDO.startHosting), released on delivery.
 // user.setNameIfEmpty gives a new member's profile the name they joined with, unless they already have one.
 // user.setName is its older form, queued before joining stopped overwriting profile names; it is delivered the same way.
 type OutboxMessage =
-  | { kind: 'user.sync' | 'user.addParty' | 'user.removeParty'; email: string }
+  | { kind: 'user.sync'; email: string; reservation?: string }
+  | { kind: 'user.addParty' | 'user.removeParty'; email: string }
   | { kind: 'user.setNameIfEmpty' | 'user.setName'; email: string; name: string; memberId?: string }
+  // Sent when the party is cancelled: the party row is gone, so the slug travels with the message.
+  | { kind: 'user.partyCancelled'; email: string; slug: string }
   | { kind: 'mail.partyNotification'; email: string; partyName: string; slug: string };
 
 type OutboxRow = { id: number; payload: string; attempts: number; next_attempt_at: number };
@@ -48,15 +50,10 @@ type OutboxBatch = { key: string; rows: OutboxRow[]; messages: OutboxMessage[] }
 /** The joining session's token version, checked against the user's record (see `Session`). */
 export type JoinCheck = Pick<Session, 'tokenVersion'>;
 
-// Columns added after the first release, by table. Parties created before them get the columns on their next start.
-const ADDED_COLUMNS: Record<string, Record<string, string>> = {
-  party: { deleted_at: 'INTEGER' },
-};
-
 const MAX_ATTEMPTS = 15;
 const MAX_BACKOFF_MS = 60 * 60 * 1000;
 
-const fail = (fieldName: string | null, message: string): PartyResult => ({ ok: false, error: { fieldName, message } });
+const fail = (fieldName: string | null, message: string) => ({ ok: false as const, error: { fieldName, message } });
 
 const closedToNewMembers = fail('party', 'Party is already packed. Sorry, we cannot accept a new participant...');
 
@@ -80,26 +77,12 @@ export class PartyDO extends DurableObject<Env> {
 
   // The schema is created on the first write only, so looking up an unknown code does not store anything.
   private hasSchema(): boolean {
-    if (!this.schemaReady && this.sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'party'").toArray().length) {
-      this.schemaReady = true;
-      this.migrate();
-    }
+    this.schemaReady ||= this.sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'party'").toArray().length > 0;
     return this.schemaReady;
   }
 
-  /** Adds columns introduced after a party was created. Runs once per start, when the party is first read. */
-  private migrate() {
-    for (const [table, added] of Object.entries(ADDED_COLUMNS)) {
-      const columns = new Set(this.sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray().map(c => c.name));
-      for (const [column, definition] of Object.entries(added)) {
-        if (!columns.has(column)) {
-          this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-        }
-      }
-    }
-  }
-
   private ensureSchema() {
+    this.schemaReady = true;
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS party (
         id TEXT PRIMARY KEY,
@@ -108,8 +91,7 @@ export class PartyDO extends DurableObject<Env> {
         password TEXT,
         host_id TEXT NOT NULL,
         is_closed INTEGER NOT NULL DEFAULT 0,
-        created_at INTEGER NOT NULL,
-        deleted_at INTEGER
+        created_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS memberships (
         member_id TEXT PRIMARY KEY,
@@ -119,6 +101,11 @@ export class PartyDO extends DurableObject<Env> {
         target_name TEXT,
         joined_at INTEGER NOT NULL
       );
+      -- A row here means the party was cancelled: its code is never handed out again.
+      CREATE TABLE IF NOT EXISTS cancelled (
+        slug TEXT PRIMARY KEY,
+        cancelled_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS outbox (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         payload TEXT NOT NULL,
@@ -126,22 +113,13 @@ export class PartyDO extends DurableObject<Env> {
         next_attempt_at INTEGER NOT NULL
       );
     `);
-    // Also migrates a party that existed before (its tables were left as they were).
-    this.hasSchema();
   }
 
-  /** The party row, deleted or not. */
-  private partyRow(): PartyRow | null {
+  private party(): PartyRow | null {
     if (!this.hasSchema()) {
       return null;
     }
     return this.sql.exec<PartyRow>('SELECT * FROM party LIMIT 1').toArray()[0] ?? null;
-  }
-
-  /** The party, or null when there is none or it was deleted. */
-  private party(): PartyRow | null {
-    const party = this.partyRow();
-    return party && !party.deleted_at ? party : null;
   }
 
   /** Drops queued messages (user updates and mail) addressed to this email. */
@@ -191,10 +169,7 @@ export class PartyDO extends DurableObject<Env> {
 
   /** The party as a member sees it in their list, or its removal if they are no longer a member. */
   private memberUpdate(email: string): UserUpdate {
-    const party = this.partyRow()!;
-    if (party.deleted_at) {
-      return { type: 'removeParty', slug: party.slug };
-    }
+    const party = this.party()!;
     const membership = this.sql
       .exec<{ member_id: string }>('SELECT member_id FROM memberships WHERE member_email = ?', email)
       .toArray()[0];
@@ -248,8 +223,7 @@ export class PartyDO extends DurableObject<Env> {
   /** Creates the party. Returns `conflict` when the slug is already taken, so the caller can pick another one. */
   async create(input: CreatePartyInput & { id: string; slug: string }): Promise<PartyResult | { ok: false; conflict: true }> {
     this.ensureSchema();
-    // A deleted party still holds its slug until it is wiped.
-    if (this.partyRow()) {
+    if (this.party() || this.sql.exec('SELECT 1 FROM cancelled LIMIT 1').toArray().length) {
       return { ok: false, conflict: true };
     }
     const now = Date.now();
@@ -261,7 +235,6 @@ export class PartyDO extends DurableObject<Env> {
       host_id: input.host.id,
       is_closed: 0,
       created_at: now,
-      deleted_at: null,
     };
     this.ctx.storage.transactionSync(() => {
       this.sql.exec(
@@ -273,7 +246,7 @@ export class PartyDO extends DurableObject<Env> {
         input.host.id, input.host.email, input.host.name, now,
       );
       if (input.host.email) {
-        this.enqueue({ kind: 'user.sync', email: input.host.email });
+        this.enqueue({ kind: 'user.sync', email: input.host.email, reservation: input.reservation });
       }
     });
     await this.deliverUserUpdates();
@@ -347,11 +320,12 @@ export class PartyDO extends DurableObject<Env> {
       return fail(null, 'You must be logged in before joining the party.');
     }
 
-    // Other requests may have reached the party while the user was being updated. The host may even have deleted
-    // their account, and with it the party.
+    // Other requests may have reached the party while the user was being updated. The host may even have cancelled it,
+    // or deleted their account and with it the party.
     const current = this.party();
     if (!current) {
-      await this.takeBackSummary(member.email, party.slug);
+      this.enqueue({ kind: 'user.partyCancelled', email: member.email, slug: party.slug });
+      await this.deliverUserUpdates();
       return fail('party', 'Party does not exist.');
     }
     if (!this.membership(member.id)) {
@@ -369,21 +343,6 @@ export class PartyDO extends DurableObject<Env> {
     return { ok: true, view: this.buildView(current, member.id) };
   }
 
-  /** Removes this party from a user's list after it was added by a join that didn't go through. */
-  private async takeBackSummary(email: string, slug: string) {
-    if (this.hasSchema()) {
-      // Deleted but not wiped yet: the outbox sends the removal, with retries.
-      this.enqueue({ kind: 'user.sync', email });
-      await this.deliverUserUpdates();
-      return;
-    }
-    try {
-      await this.env.USER.getByName(email).apply([{ type: 'removeParty', slug }]);
-    } catch (error) {
-      console.warn('Unable to take a wiped party off a user\'s list', { error: String(error) });
-    }
-  }
-
   async leave(userId: string): Promise<PartyResult> {
     const party = this.party();
     if (!party) {
@@ -392,6 +351,10 @@ export class PartyDO extends DurableObject<Env> {
     const membership = this.membership(userId);
     if (!membership) {
       return { ok: true, view: this.buildView(party, userId) };
+    }
+    // The open-party limit counts the parties in the host's list, so leaving would dodge it: hosts cancel instead.
+    if (party.host_id === userId) {
+      return fail('party', "As the host, you can't leave your own party. Cancel it instead, or close it once others have joined.");
     }
     if (party.is_closed) {
       return fail('party', 'Party is already at that stage when you cannot really run away... Sorry but you have to get the gift');
@@ -440,36 +403,86 @@ export class PartyDO extends DurableObject<Env> {
         }
       }
     });
+    // The host's list is updated before returning, so the closed party stops counting towards their open-party
+    // limit right away. Other members and the emails follow on the alarm.
+    const hostEmail = members.find(member => member.member_id === userId)?.member_email;
+    await this.deliverHostNow(hostEmail);
     await this.deliverSoon();
     return { ok: true, view: this.buildView({ ...party, is_closed: 1 }, userId) };
+  }
+
+  /**
+   * Deletes an open party nobody else has joined, so a host can take back a party (and its slot in their open-party
+   * limit) when no one came. The host's list is updated before returning.
+   */
+  async cancel(userId: string): Promise<CancelResult> {
+    const party = this.party();
+    if (!party) {
+      return fail('party', 'Party does not exist.');
+    }
+    if (party.host_id !== userId) {
+      return fail('party', 'You must be the host to cancel the party.');
+    }
+    if (party.is_closed) {
+      return fail('party', 'Party is already closed.');
+    }
+    const others = this.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM memberships WHERE member_id != ?', userId).one().n;
+    if (others > 0) {
+      return fail('party', 'Someone has already joined this party, so it can no longer be cancelled.');
+    }
+
+    const hostEmail = this.membership(userId)?.member_email;
+    this.ensureSchema(); // parties created before tombstones existed have no `cancelled` table yet
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec('DELETE FROM memberships');
+      this.sql.exec('DELETE FROM party');
+      this.sql.exec('INSERT INTO cancelled (slug, cancelled_at) VALUES (?, ?)', party.slug, Date.now());
+      if (hostEmail) {
+        this.enqueue({ kind: 'user.partyCancelled', email: hostEmail, slug: party.slug });
+      }
+    });
+    await this.deliverHostNow(hostEmail);
+    return { ok: true };
+  }
+
+  /**
+   * Delivers everything queued for the host right away, including changes waiting for a retry, so closing or
+   * cancelling frees their open-party slot before the mutation returns. If it fails, the alarm retries as usual.
+   */
+  private async deliverHostNow(email: string | null | undefined) {
+    await this.runOutbox(message => message.kind.startsWith('user.') && message.email === email, true);
   }
 
 
   /**
    * Removes a user whose account is being deleted, and drops everything queued for their email:
-   * - an open party they host is deleted: it reads as gone right away, members get it removed from their lists
-   *   through the outbox, and the party is wiped once that is delivered (by the alarm, not before this returns);
+   * - an open party they host is deleted like a cancelled one (see `cancel`), whoever joined: it is gone at once, its
+   *   code is never handed out again, and the members get it removed from their lists through the outbox;
    * - an open party they joined is left;
    * - in a drawn party their membership stays, so the draw holds, but is anonymized: a new random id (also as the
    *   giver's target and as the host), no email. The names stay, so their Secret Santa still knows who to buy for.
    */
   async forgetMember(userId: string, email: string): Promise<ForgetMemberResult> {
-    const party = this.partyRow();
-    if (!party) {
+    if (!this.hasSchema()) {
       return 'none';
     }
+    const party = this.party();
     const membership = this.membership(userId);
+    this.ensureSchema(); // parties created before cancelling existed have no `cancelled` table yet
     const result = this.ctx.storage.transactionSync((): ForgetMemberResult => {
       this.dropQueued(email);
-      if (party.deleted_at) {
+      if (!party) {
         return 'none';
       }
       if (!party.is_closed && party.host_id === userId) {
-        this.sql.exec('UPDATE party SET deleted_at = ?', Date.now());
-        this.sql.exec('DELETE FROM memberships WHERE member_id = ?', userId);
-        const members = this.sql.exec<{ member_email: string }>('SELECT member_email FROM memberships WHERE member_email IS NOT NULL').toArray();
-        for (const { member_email } of members) {
-          this.enqueue({ kind: 'user.sync', email: member_email });
+        const others = this.sql
+          .exec<{ member_email: string }>('SELECT member_email FROM memberships WHERE member_id != ? AND member_email IS NOT NULL', userId)
+          .toArray();
+        this.sql.exec('DELETE FROM memberships');
+        this.sql.exec('DELETE FROM party');
+        this.sql.exec('INSERT INTO cancelled (slug, cancelled_at) VALUES (?, ?)', party.slug, Date.now());
+        for (const { member_email } of others) {
+          this.enqueue({ kind: 'user.partyCancelled', email: member_email, slug: party.slug });
         }
         return 'deleted';
       }
@@ -528,10 +541,23 @@ export class PartyDO extends DurableObject<Env> {
     for (const message of messages) {
       if (message.kind === 'user.setNameIfEmpty' || message.kind === 'user.setName') {
         updates.push({ type: 'setNameIfEmpty', name: message.name, userId: message.memberId });
-      } else if (!synced) {
+      } else if (message.kind === 'user.partyCancelled') {
+        synced = true;
+        updates.push({ type: 'removeParty', slug: message.slug });
+      } else if (!synced && this.party()) {
         synced = true;
         updates.push(this.memberUpdate(first.email));
       }
+    }
+    // Released after the party is in the list (same UserDO transaction), so the slot is never counted twice or not at all.
+    for (const message of messages) {
+      if (message.kind === 'user.sync' && message.reservation) {
+        updates.push({ type: 'releaseHostSlot', reservation: message.reservation });
+      }
+    }
+    // A sync queued for a party that has since been cancelled has nothing left to send.
+    if (updates.length === 0) {
+      return;
     }
     return await this.env.USER.getByName(first.email).apply(updates);
   }
@@ -540,13 +566,13 @@ export class PartyDO extends DurableObject<Env> {
     await this.runOutbox(() => true);
   }
 
-  private runOutbox(filter: (message: OutboxMessage) => boolean): Promise<void> {
-    const run = this.outboxRun.then(() => this.processOutbox(filter));
+  private runOutbox(filter: (message: OutboxMessage) => boolean, skipRetryWait = false): Promise<void> {
+    const run = this.outboxRun.then(() => this.processOutbox(filter, skipRetryWait));
     this.outboxRun = run.catch(() => undefined);
     return run;
   }
 
-  private async processOutbox(filter: (message: OutboxMessage) => boolean) {
+  private async processOutbox(filter: (message: OutboxMessage) => boolean, skipRetryWait: boolean) {
     if (!this.hasSchema()) {
       return;
     }
@@ -556,16 +582,18 @@ export class PartyDO extends DurableObject<Env> {
       .toArray();
 
     // One batch per user (all their due changes, in order) and one per email. While an earlier change for a user is
-    // waiting for a retry, later ones wait too, so a user never sees changes out of order.
+    // waiting for a retry, later ones wait too, so a user never sees changes out of order. With skipRetryWait, matching
+    // messages go now even if waiting, still together and in order.
     const batches = new Map<string, OutboxBatch>();
     const blocked = new Set<string>();
     for (const row of rows) {
       const message = JSON.parse(row.payload) as OutboxMessage;
       const key = message.kind.startsWith('user.') ? message.email : `mail:${row.id}`;
-      if (blocked.has(key)) {
+      const forced = skipRetryWait && filter(message);
+      if (blocked.has(key) && !forced) {
         continue;
       }
-      if (row.next_attempt_at > now) {
+      if (row.next_attempt_at > now && !forced) {
         blocked.add(key);
         continue;
       }
@@ -603,11 +631,6 @@ export class PartyDO extends DurableObject<Env> {
     const next = this.sql.exec<{ at: number | null }>('SELECT MIN(next_attempt_at) AS at FROM outbox').one().at;
     if (next !== null) {
       await this.ctx.storage.setAlarm(Math.max(next, Date.now()));
-    } else if (this.partyRow()!.deleted_at) {
-      // A deleted party's last updates are out: forget it entirely.
-      await this.ctx.storage.deleteAlarm();
-      await this.ctx.storage.deleteAll();
-      this.schemaReady = false;
     }
   }
 
