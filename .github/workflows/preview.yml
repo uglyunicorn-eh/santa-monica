@@ -37,8 +37,8 @@ jobs:
       name: preview
       url: ${{ env.PREVIEW_URL }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -49,7 +49,7 @@ jobs:
           jq -n --arg key "$PREVIEW_JWT_PRIVATE_KEY" '{JWT_PRIVATE_KEY: $key}' > "$RUNNER_TEMP/preview-secrets.json"
         env:
           PREVIEW_JWT_PRIVATE_KEY: ${{ secrets.PREVIEW_JWT_PRIVATE_KEY }}
-      - uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3.15.0
+      - uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4.1.3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -72,8 +72,8 @@ jobs:
     # CLOUDFLARE_PREVIEW_API_TOKEN is a secret of this environment, so only jobs that name it can read it.
     environment: preview
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -81,7 +81,7 @@ jobs:
       # A Preview's name stays unreliable for a while after it is deleted (some requests fail with error 1101), so a
       # reopened pull request may need a minute before its Preview answers every request.
       - name: Delete the Preview
-        uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3.15.0
+        uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4.1.3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_PREVIEW_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
