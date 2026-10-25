@@ -1,0 +1,16 @@
+# Keeps the GitHub Actions pinned to commit SHAs up to date: Dependabot opens a PR that bumps the SHA and its
+# version comment together.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Wait a week after a release before proposing it, so a hijacked release has time to be caught and pulled.
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ['*']
+    commit-message:
+      prefix: ci

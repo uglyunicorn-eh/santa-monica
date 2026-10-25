@@ -107,7 +107,7 @@ npm test                         # unit + integration
 - **Pull requests** (`.github/workflows/preview.yml`): CI runs (typecheck, unit tests with 100% coverage, integration tests), then the PR is deployed to its own Worker, `gnomik-api-pr-<number>`, at `https://gnomik-api-pr-<number>.uglyunicorn.workers.dev`, smoke-tested, and the URL is posted on the PR. Each preview has its own empty Durable Objects, never production data. The preview Worker is deleted when the PR is closed.
 - **Merges to main** (`.github/workflows/deploy.yml`): CI runs, then production is deployed to `https://api.gnomik.me` and smoke-tested.
 - `.github/workflows/ci.yml` is the shared test job; it can also be run by hand.
-- Every third-party action is pinned to a commit SHA, with its version in a comment. Update them on purpose, never by tag.
+- Every third-party action is pinned to a commit SHA, with its version in a comment, so a moved or hijacked tag can't change what runs. Dependabot (`.github/dependabot.yml`) proposes updates weekly in one grouped PR, a week after each release.
 - `package.json` `overrides` pins `undici` and `zod` (pulled in by the Cloudflare toolchain) to versions without known advisories. Drop an override once the packages that bring them in depend on a fixed version.
 
 Emailed links point at `FRONTEND_URL` (`wrangler.jsonc`): `https://gnomik.me` in production, `http://localhost:4321` for previews, so a local frontend can follow links from a preview.
