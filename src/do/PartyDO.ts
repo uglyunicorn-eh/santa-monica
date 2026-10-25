@@ -477,6 +477,9 @@ export class PartyDO extends DurableObject<Env> {
     if (party.host_id !== userId) {
       return fail('party', 'You must be the host to delete the party.');
     }
+    if (party.is_closed) {
+      return fail('party', 'The dice are already rolled, so this party can no longer be deleted.');
+    }
     const deletedAt = Date.now();
     this.setDeleted(deletedAt);
     // The host's list shows it as deleted (and it stops counting towards their limit) before returning.
