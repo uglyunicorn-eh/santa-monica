@@ -90,6 +90,8 @@ export const typeDefs = `#graphql
   input CreatePartyInput {
     name: String!
     password: String
+    "Makes retries safe: repeating the request with the same id (for ten minutes) returns the party it created instead of making another."
+    requestId: String
   }
 
   type CreatePartyPayload implements MutationPayload {

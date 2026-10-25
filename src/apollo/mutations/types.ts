@@ -1,6 +1,7 @@
 export type CreatePartyInput = {
   name: string;
   password?: string;
+  requestId?: string;
 }
 
 export type JoinPartyInput = {

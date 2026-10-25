@@ -27,6 +27,14 @@ const tooManyOpenParties = (action: string) => ({
   }],
 });
 
+const repeatedRequestFailed = {
+  status: 'error' as const,
+  userErrors: [{
+    fieldName: null,
+    messages: ['This party is no longer available. Please start a new one.'],
+  }],
+};
+
 const notLoggedIn = (action: string) => ({
   status: 'error',
   userErrors: [{
@@ -74,7 +82,14 @@ const partyMutations = {
       annotate({ 'party.protected': Boolean(input.password) });
       // One UserDO call reads the host's display name, checks the open-party limit and holds a slot for this party.
       // It also checks the session is still valid.
-      const user = await env.USER.getByName(userEmail!).startHosting(MAX_OPEN_HOSTED_PARTIES, { userId: userId!, tokenVersion });
+      const userDO = env.USER.getByName(userEmail!);
+      let id = newObjectId();
+      let slug = randomString(PARTY_CODE_LENGTH, PARTY_CODE_ALPHABET);
+      const user = await userDO.startHosting(
+        MAX_OPEN_HOSTED_PARTIES,
+        { userId: userId!, tokenVersion },
+        input.requestId ? { key: input.requestId, id, slug } : undefined,
+      );
       if (!user) {
         return notLoggedIn('creating');
       }
@@ -82,10 +97,22 @@ const partyMutations = {
       if (!user.allowed) {
         return tooManyOpenParties('start a new one');
       }
+      if (user.request) {
+        ({ id, slug } = user.request);
+      }
+      // A repeated request holds no slot. It only gets the party the first one made: on a conflict that party is gone
+      // (deleted) or still being placed under another code by the first request, so a repeat never picks a new code.
+      const repeated = !user.reservation;
+      annotate({ 'party.request_repeated': repeated });
       for (let attempt = 0; attempt < SLUG_ATTEMPTS; attempt++) {
-        const slug = randomString(PARTY_CODE_LENGTH, PARTY_CODE_ALPHABET);
+        if (attempt > 0) {
+          slug = randomString(PARTY_CODE_LENGTH, PARTY_CODE_ALPHABET);
+          if (input.requestId) {
+            await userDO.retargetRequest(input.requestId, slug);
+          }
+        }
         const result = await env.PARTY.getByName(slug).create({
-          id: newObjectId(),
+          id,
           slug,
           name: input.name,
           password: input.password || null,
@@ -94,6 +121,9 @@ const partyMutations = {
         });
         annotate({ 'party.code_attempts': attempt + 1 });
         if ('conflict' in result) {
+          if (repeated) {
+            return repeatedRequestFailed;
+          }
           continue;
         }
         annotate({ 'party.code': slug });

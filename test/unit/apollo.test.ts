@@ -59,8 +59,8 @@ const sessionToken = (id: string, email: string, ver?: number) =>
 const updateName = async (ctx: ApolloContext, name: string) =>
   await profile().updateName({ input: { name } }, ctx) as any;
 
-const createParty = async (ctx: ApolloContext, name = 'Party', password?: string) =>
-  await parties(null, {}, ctx).createParty({ input: { name, password } }, ctx) as any;
+const createParty = async (ctx: ApolloContext, name = 'Party', password?: string, requestId?: string) =>
+  await parties(null, {}, ctx).createParty({ input: { name, password, requestId } }, ctx) as any;
 
 describe('auth mutations', () => {
   it('sends a magic link for a valid email', async () => {
@@ -433,6 +433,84 @@ describe('party mutations', () => {
 
     const alwaysCollide = { ...env, PARTY: { getByName: () => ({ create: async () => ({ ok: false, conflict: true }) }) } } as unknown as typeof env;
     await expect(createParty({ ...host, env: alwaysCollide })).rejects.toThrow('Unable to generate a unique party code.');
+  });
+
+  describe('createParty with a request id', () => {
+    const codes = async (ctx: ApolloContext) => (await listParties(null, { first: 10 }, ctx))!.map((p: any) => p.code);
+
+    it('returns the same party when repeated, one after another or at once', async () => {
+      const host = await signedIn('Host');
+      const first = await createParty(host, 'Once', undefined, 'req-1');
+      const again = await createParty(host, 'Once', undefined, 'req-1');
+      expect(again).toEqual(first);
+      const [a, b] = await Promise.all([createParty(host, 'Twice', undefined, 'req-2'), createParty(host, 'Twice', undefined, 'req-2')]);
+      expect(a.node.code).toBe(b.node.code);
+      expect(await codes(host)).toHaveLength(2);
+    });
+
+    it('makes a new party for a new request id, and for none', async () => {
+      const host = await signedIn('Host');
+      await createParty(host, 'A', undefined, 'req-a');
+      await createParty(host, 'B', undefined, 'req-b');
+      await createParty(host, 'C');
+      expect(await codes(host)).toHaveLength(3);
+    });
+
+    it('does not count a repeat against the open-party limit', async () => {
+      const host = await signedIn('Host');
+      for (let i = 0; i < 2; i++) {
+        await createParty(host, `Party ${i}`);
+      }
+      const last = await createParty(host, 'Last', undefined, 'req-last');
+      expect(await createParty(host, 'Last', undefined, 'req-last')).toEqual(last);
+    });
+
+    it('forgets the request after ten minutes', async () => {
+      const host = await signedIn('Host');
+      vi.useFakeTimers();
+      try {
+        const first = await createParty(host, 'Old', undefined, 'req-old');
+        vi.advanceTimersByTime(11 * 60 * 1000);
+        const later = await createParty(host, 'Old', undefined, 'req-old');
+        expect(later.node.code).not.toBe(first.node.code);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not make a new party when the request is repeated after its party was deleted', async () => {
+      const host = await signedIn('Host');
+      const { node } = await createParty(host, 'Gone', undefined, 'req-gone');
+      expect((await parties(null, {}, host).deleteParty({ input: { party: node.id } }, host) as any).status).toBe('ok');
+      expect(await createParty(host, 'Gone', undefined, 'req-gone')).toEqual({
+        status: 'error',
+        userErrors: [{ fieldName: null, messages: ['This party is no longer available. Please start a new one.'] }],
+      });
+      expect(await codes(host)).toEqual([node.code]); // still listed as deleted, restorable
+    });
+
+    it('does not pick a new code for a repeat that hits a collision', async () => {
+      const host = await signedIn('Host');
+      await createParty(host, 'First', undefined, 'req-x');
+      let calls = 0;
+      const collide = {
+        ...env,
+        PARTY: { getByName: () => (++calls, { create: async () => ({ ok: false, conflict: true }) }) },
+      } as unknown as typeof env;
+      expect(await createParty({ ...host, env: collide }, 'First', undefined, 'req-x')).toMatchObject({ status: 'error' });
+      expect(calls).toBe(1);
+    });
+
+    it('keeps the request on the new code after a collision', async () => {
+      const host = await signedIn('Host');
+      let calls = 0;
+      const collideOnce = {
+        ...env,
+        PARTY: { getByName: (slug: string) => (++calls === 1 ? { create: async () => ({ ok: false, conflict: true }) } : env.PARTY.getByName(slug)) },
+      } as typeof env;
+      const first = await createParty({ ...host, env: collideOnce }, 'Collided', undefined, 'req-c');
+      expect(await createParty(host, 'Collided', undefined, 'req-c')).toEqual(first);
+    });
   });
 
   it('joins, leaves and closes through party node ids', async () => {

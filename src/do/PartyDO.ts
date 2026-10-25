@@ -307,7 +307,12 @@ export class PartyDO extends DurableObject<Env> {
   /** Creates the party. Returns `conflict` when the slug is already taken, so the caller can pick another one. */
   async create(input: CreatePartyInput & { id: string; slug: string }): Promise<PartyResult | { ok: false; conflict: true }> {
     this.ensureSchema();
-    if (this.party() || this.sql.exec('SELECT 1 FROM cancelled LIMIT 1').toArray().length) {
+    const existing = this.party();
+    if (existing && existing.id === input.id && !existing.deleted_at && this.membership(input.host.id)) {
+      // A repeat of a request that already created this party.
+      return { ok: true, view: this.buildView(existing, input.host.id) };
+    }
+    if (existing || this.sql.exec('SELECT 1 FROM cancelled LIMIT 1').toArray().length) {
       return { ok: false, conflict: true };
     }
     const now = Date.now();
