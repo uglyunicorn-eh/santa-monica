@@ -37,12 +37,41 @@ describe('creating a party', () => {
   });
 
   it('gives every party its own code', async () => {
-    const host = await person('host');
+    // A host per party: one person can only have three open at a time.
     const codes = new Set<string>();
     for (let i = 0; i < 10; i++) {
-      codes.add((await createParty(host, `Party ${i}`)).code);
+      codes.add((await createParty(await person(`host${i}`), `Party ${i}`)).code);
     }
     expect(codes.size).toBe(10);
+  });
+});
+
+describe('open-party limit and cancelling', () => {
+  const CANCEL = `mutation ($party: ID!) { parties { cancelParty(input: { party: $party }) { status userErrors { fieldName messages } } } }`;
+
+  it('caps a host at three open parties, and cancelling an empty one frees a slot', async () => {
+    const host = await person('host');
+    const parties = [];
+    for (let i = 0; i < 3; i++) {
+      parties.push(await createParty(host, `Party ${i}`));
+    }
+    const fourth = await gql(CREATE_PARTY, { name: 'Fourth' }, { token: host.token });
+    expect(fourth.data.parties.createParty.userErrors[0].messages[0]).toMatch(/up to 3 open parties/);
+
+    expect((await gql(CANCEL, { party: parties[0].id }, { token: host.token })).data.parties.cancelParty.status).toBe('ok');
+    expect((await gql(PARTY, { code: parties[0].code }, { token: host.token })).data.party).toBeNull();
+    expect((await gql(PARTIES, {}, { token: host.token })).data.parties.map((p: { code: string }) => p.code))
+      .toEqual(expect.not.arrayContaining([parties[0].code]));
+    expect((await gql(CREATE_PARTY, { name: 'Fourth' }, { token: host.token })).data.parties.createParty.status).toBe('ok');
+  });
+
+  it('cannot cancel once someone has joined', async () => {
+    const host = await person('host');
+    const guest = await person('guest');
+    const party = await createParty(host);
+    await joinParty(guest, party, 'Guest');
+    const res = await gql(CANCEL, { party: party.id }, { token: host.token });
+    expect(res.data.parties.cancelParty).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
   });
 });
 
@@ -215,13 +244,14 @@ describe('leaving a party', () => {
     expect((await gql(LEAVE_PARTY, { party: party.id })).errors?.[0]?.message).toBe('UNAUTHENTICATED');
   });
 
-  it('lets the host leave while staying the host', async () => {
+  it('does not let the host leave their own party', async () => {
     const host = await person('host');
     const guest = await person('guest');
     const party = await createParty(host);
     await joinParty(guest, party, 'Guest');
     const left = (await gql(LEAVE_PARTY, { party: party.id }, { token: host.token })).data.parties.leaveParty;
-    expect(left).toMatchObject({ status: 'ok', node: { isHost: true, isJoined: false } });
+    expect(left).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
+    expect((await gql(PARTY, { code: party.code }, { token: host.token })).data.party).toMatchObject({ isHost: true, isJoined: true });
   });
 });
 
