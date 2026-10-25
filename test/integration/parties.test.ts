@@ -37,10 +37,10 @@ describe('creating a party', () => {
   });
 
   it('gives every party its own code', async () => {
-    const host = await person('host');
+    // A host per party: one person can only have three open at a time.
     const codes = new Set<string>();
     for (let i = 0; i < 10; i++) {
-      codes.add((await createParty(host, `Party ${i}`)).code);
+      codes.add((await createParty(await person(`host${i}`), `Party ${i}`)).code);
     }
     expect(codes.size).toBe(10);
   });

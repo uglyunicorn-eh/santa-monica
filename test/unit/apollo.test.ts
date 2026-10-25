@@ -150,8 +150,39 @@ describe('party mutations', () => {
   });
 
   it('needs a user to create a party', async () => {
-    const ctx = await signedIn('Ghost', { retrieveUser: async () => null });
+    // A valid session for an email that has no profile.
+    const ctx = context({ userId: 'ghost', userEmail: uniqueEmail() });
     expect(await createParty(ctx)).toMatchObject({ status: 'error', userErrors: [{ fieldName: null }] });
+  });
+
+  it('lets one person host up to three open parties', async () => {
+    const host = await signedIn('Host');
+    const created = [];
+    for (let i = 0; i < 3; i++) {
+      created.push(await createParty(host, `Party ${i}`));
+    }
+    expect(created.map(c => c.status)).toEqual(['ok', 'ok', 'ok']);
+
+    expect(await createParty(host, 'One too many')).toEqual({
+      status: 'error',
+      userErrors: [{ fieldName: null, messages: ['You can host up to 3 open parties at a time. Close one of them to start a new one.'] }],
+    });
+
+    // Closing one (it needs a second participant) frees a slot.
+    const guest = await signedIn('Guest');
+    await parties(null, {}, guest).joinParty({ input: { party: created[0].node.id, name: 'Guest' } }, guest);
+    expect((await parties(null, {}, host).closeParty({ input: { party: created[0].node.id } }, host) as any).status).toBe('ok');
+    expect((await createParty(host, 'Replacement')).status).toBe('ok');
+  });
+
+  it('does not count parties joined as a guest towards the limit', async () => {
+    const guest = await signedIn('Guest');
+    for (let i = 0; i < 3; i++) {
+      const other = await signedIn('Other');
+      const { node } = await createParty(other, `Other ${i}`);
+      expect((await parties(null, {}, guest).joinParty({ input: { party: node.id, name: 'Guest' } }, guest) as any).status).toBe('ok');
+    }
+    expect((await createParty(guest, 'Mine')).status).toBe('ok');
   });
 
   it('retries on a code collision, and gives up after ten', async () => {

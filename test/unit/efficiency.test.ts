@@ -70,13 +70,18 @@ describe('Durable Object calls per operation', () => {
   it('lists my parties with one call, however many parties there are', async () => {
     const me = await person('Me');
     const counting = countingEnv();
-    for (let i = 0; i < 6; i++) {
+    // Three hosted (the most one person can have open) and three joined as a guest.
+    for (let i = 0; i < 3; i++) {
       await gql(env, CREATE, { name: `Party ${i}` }, me.token);
+      const other = await person('Other');
+      const { node } = (await gql(env, CREATE, { name: `Other ${i}` }, other.token)).data.parties.createParty;
+      await gql(env, JOIN, { party: node.id, name: 'Me' }, me.token);
     }
 
     const list = await gql(counting.env, `{ parties { code name isHost isClosed isProtected isJoined } }`, {}, me.token);
     expect(list.data.parties).toHaveLength(6);
-    expect(list.data.parties.every((p: any) => p.isHost && p.isJoined && !p.isClosed && !p.isProtected)).toBe(true);
+    expect(list.data.parties.filter((p: any) => p.isHost)).toHaveLength(3);
+    expect(list.data.parties.every((p: any) => p.isJoined && !p.isClosed && !p.isProtected)).toBe(true);
     expect(counting.calls).toEqual([{ binding: 'USER', name: me.email, method: 'listParties' }]);
   });
 
@@ -114,7 +119,7 @@ describe('Durable Object calls per operation', () => {
     const host = await person('Host');
     const counting = countingEnv();
     await gql(counting.env, CREATE, { name: 'Create' }, host.token);
-    expect(counting.calls.map(c => `${c.binding}.${c.method}`)).toEqual(['USER.get', 'PARTY.create']);
+    expect(counting.calls.map(c => `${c.binding}.${c.method}`)).toEqual(['USER.hostProfile', 'PARTY.create']);
   });
 
   it('reads my profile with one call, and none without a session', async () => {

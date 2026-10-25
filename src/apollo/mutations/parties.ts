@@ -13,6 +13,17 @@ import { closePartyInputSchema, createPartyInputSchema, joinPartyInputSchema, le
 
 const SLUG_ATTEMPTS = 10;
 
+/** How many open (not closed) parties one person can host at a time. */
+export const MAX_OPEN_HOSTED_PARTIES = 3;
+
+const tooManyOpenParties = {
+  status: 'error' as const,
+  userErrors: [{
+    fieldName: null,
+    messages: [`You can host up to ${MAX_OPEN_HOSTED_PARTIES} open parties at a time. Close one of them to start a new one.`],
+  }],
+};
+
 const notLoggedIn = (action: string) => ({
   status: 'error',
   userErrors: [{
@@ -56,12 +67,16 @@ export default {
 
 const partyMutations = {
 
-    createParty: _(createPartyInputSchema, 'createParty')(async (input: CreatePartyInput, { env, userEmail, retrieveUser }: ApolloContext) => {
+    createParty: _(createPartyInputSchema, 'createParty')(async (input: CreatePartyInput, { env, userEmail }: ApolloContext) => {
       annotate({ 'party.protected': Boolean(input.password) });
-      // The host's display name lives in their profile, so creating a party reads it (one UserDO call).
-      const user = await retrieveUser();
+      // One UserDO call reads the host's display name and how many open parties they already host.
+      const user = await env.USER.getByName(userEmail!).hostProfile();
       if (!user) {
         return notLoggedIn('creating');
+      }
+      annotate({ 'user.open_hosted_parties': user.openHostedParties });
+      if (user.openHostedParties >= MAX_OPEN_HOSTED_PARTIES) {
+        return tooManyOpenParties;
       }
       for (let attempt = 0; attempt < SLUG_ATTEMPTS; attempt++) {
         const slug = randomString(5, 'QWERTYUIPASDFGHJKLZXCVBNMO');

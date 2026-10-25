@@ -91,6 +91,18 @@ export class UserDO extends DurableObject<Env> {
     return this.row();
   }
 
+  /** The profile plus how many open parties the user hosts, for creating a party in one call. */
+  hostProfile(): (UserRecord & { openHostedParties: number }) | null {
+    const user = this.row();
+    if (!user) {
+      return null;
+    }
+    const { count } = this.sql
+      .exec<{ count: number }>('SELECT COUNT(*) AS count FROM parties WHERE is_host = 1 AND NOT COALESCE(is_closed, 0)')
+      .one();
+    return { ...user, openHostedParties: count };
+  }
+
   /** Applies a batch of changes from a party, in order, in one transaction. Safe to retry. */
   apply(updates: UserUpdate[]): void {
     this.ctx.storage.transactionSync(() => {

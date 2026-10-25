@@ -309,6 +309,10 @@ export class PartyDO extends DurableObject<Env> {
         }
       }
     });
+    // The host's list is updated before returning, so the closed party stops counting towards their open-party
+    // limit right away. Other members and the emails follow on the alarm.
+    const hostEmail = members.find(member => member.member_id === userId)?.member_email;
+    await this.runOutbox(message => message.kind.startsWith('user.') && message.email === hostEmail);
     await this.deliverSoon();
     return { ok: true, view: this.buildView({ ...party, is_closed: 1 }, userId) };
   }
