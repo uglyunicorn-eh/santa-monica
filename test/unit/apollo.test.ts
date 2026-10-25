@@ -1,4 +1,4 @@
-import { env, runInDurableObject } from 'cloudflare:test';
+import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
 import * as yup from 'yup';
 
@@ -6,6 +6,7 @@ import { ApolloContext, authenticate, makeContext, requireUser } from 'src/apoll
 import mutations from 'src/apollo/mutations';
 import resolvers from 'src/apollo/resolvers';
 import { decodeCursor, encodeCursor, partyViewToNode } from 'src/apollo/resolvers/party';
+import { PartyDO } from 'src/do/PartyDO';
 import { EnterRequestToken, UserToken } from 'src/apollo/types';
 import { MailMessage } from 'src/mail';
 import resolvable from 'src/utils/graphql/resolvable';
@@ -175,7 +176,7 @@ describe('party mutations', () => {
 
     expect(await createParty(host, 'One too many')).toEqual({
       status: 'error',
-      userErrors: [{ fieldName: null, messages: ['You can host up to 3 open parties at a time. Close or cancel one of them to start a new one.'] }],
+      userErrors: [{ fieldName: null, messages: ['You can host up to 3 open parties at a time. Close or delete one of them to start a new one.'] }],
     });
 
     // Closing one (it needs a second participant) frees a slot.
@@ -195,86 +196,222 @@ describe('party mutations', () => {
     expect((await createParty(guest, 'Mine')).status).toBe('ok');
   });
 
-  describe('cancelling a party', () => {
-    const cancel = async (ctx: ApolloContext, id: string) =>
-      await parties(null, {}, ctx).cancelParty({ input: { party: id } }, ctx) as any;
+  describe('deleting and restoring a party', () => {
+    const del = async (ctx: ApolloContext, id: string) =>
+      await parties(null, {}, ctx).deleteParty({ input: { party: id } }, ctx) as any;
+    const restore = async (ctx: ApolloContext, id: string) =>
+      await parties(null, {}, ctx).restoreParty({ input: { party: id } }, ctx) as any;
     const join = async (ctx: ApolloContext, id: string) =>
       await parties(null, {}, ctx).joinParty({ input: { party: id, name: 'Guest' } }, ctx) as any;
-
-    it('deletes a party only the host is in, removes it from their list and frees the slot', async () => {
-      const host = await signedIn('Host');
-      const created = [];
-      for (let i = 0; i < 3; i++) {
-        created.push((await createParty(host, `Party ${i}`)).node);
-      }
-      expect((await createParty(host, 'Fourth')).status).toBe('error');
-
-      expect(await cancel(host, created[0].id)).toEqual({ status: 'ok', userErrors: null });
-      expect(await party(null, { code: created[0].code }, host)).toBeNull();
-      expect((await listParties(null, { first: 10 }, host))!.map((p: any) => p.code)).not.toContain(created[0].code);
-      expect((await createParty(host, 'Fourth')).status).toBe('ok');
-
-      // Cancelling again: the party is gone.
-      expect(await cancel(host, created[0].id)).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party', messages: ['Party does not exist.'] }] });
+    const codes = async (ctx: ApolloContext) => (await listParties(null, { first: 10 }, ctx))!.map((p: any) => p.code);
+    const DAY = 24 * 60 * 60 * 1000;
+    /**
+     * Waits until every queued list update for the party has been delivered (other members' lists update on its
+     * alarm), running the alarm now rather than racing the real one.
+     */
+    const settle = (code: string) => vi.waitFor(async () => {
+      const stub = env.PARTY.getByName(code);
+      await runDurableObjectAlarm(stub);
+      expect(await runInDurableObject(stub, async (_i, state) =>
+        state.storage.sql.exec(`SELECT COUNT(*) AS n FROM outbox WHERE payload LIKE '%"user.%'`).one().n)).toBe(0);
+    });
+    /** Moves the deletion back in time, as if it happened `ms` ago. */
+    const deletedAgo = (code: string, ms: number) => runInDurableObject(env.PARTY.getByName(code), async (_i, state) => {
+      state.storage.sql.exec('UPDATE party SET deleted_at = ?', Date.now() - ms);
     });
 
-    it('is only for the host, before anyone joins and before the draw', async () => {
+    it('hides a deleted party from everyone but the host, who sees when it can be restored until', async () => {
       const host = await signedIn('Host');
       const guest = await signedIn('Guest');
-      const { node } = await createParty(host, 'Popular');
-
-      expect(await cancel(guest, node.id)).toMatchObject({ status: 'error', userErrors: [{ messages: ['You must be the host to cancel the party.'] }] });
-
+      const stranger = await signedIn('Stranger');
+      const { node } = await createParty(host, 'Gone soon');
       await join(guest, node.id);
-      expect(await cancel(host, node.id)).toMatchObject({ status: 'error', userErrors: [{ messages: ['Someone has already joined this party, so it can no longer be cancelled.'] }] });
 
-      await parties(null, {}, host).closeParty({ input: { party: node.id } }, host);
-      expect(await cancel(host, node.id)).toMatchObject({ status: 'error', userErrors: [{ messages: ['Party is already closed.'] }] });
+      const before = Date.now();
+      const deleted = await del(host, node.id);
+      await settle(node.code);
+      expect(deleted).toMatchObject({ status: 'ok', node: { code: node.code, isHost: true } });
+      const deletedAt = Date.parse(deleted.node.deletedAt);
+      expect(deletedAt).toBeGreaterThanOrEqual(before);
+      expect(Date.parse(deleted.node.restorableUntil)).toBe(deletedAt + DAY);
+
+      expect(await party(null, { code: node.code }, guest)).toBeNull();
+      expect(await party(null, { code: node.code }, stranger)).toBeNull();
+      expect((await party(null, { code: node.code }, host) as any).deletedAt).toBe(deleted.node.deletedAt);
+      expect(await codes(guest)).toEqual([]);
+      expect((await listParties(null, { first: 10 }, host))!).toMatchObject([{ code: node.code, deletedAt: deleted.node.deletedAt }]);
+
+      const gone = { status: 'error', userErrors: [{ fieldName: 'party', messages: ['Party does not exist.'] }] };
+      expect(await join(stranger, node.id)).toMatchObject(gone);
+      expect(await parties(null, {}, guest).leaveParty({ input: { party: node.id } }, guest)).toMatchObject(gone);
+      expect(await parties(null, {}, host).closeParty({ input: { party: node.id } }, host)).toMatchObject(gone);
+      expect(await del(host, node.id)).toMatchObject(gone);
     });
 
-    it('does not let the host leave their own party (they cancel it instead)', async () => {
+    it('restores the party for everyone, exactly as it was', async () => {
+      const host = await signedIn('Host');
+      const guest = await signedIn('Guest');
+      const { node } = await createParty(host, 'Back again');
+      await join(guest, node.id);
+      await parties(null, {}, host).closeParty({ input: { party: node.id } }, host);
+      const target = (await party(null, { code: node.code }, guest) as any).target;
+
+      await del(host, node.id);
+      await settle(node.code);
+      expect(await restore(host, node.id)).toMatchObject({ status: 'ok', node: { code: node.code, deletedAt: null, restorableUntil: null, isClosed: true } });
+      await settle(node.code);
+      expect(await party(null, { code: node.code }, guest)).toMatchObject({ isJoined: true, isClosed: true, target });
+      expect(await codes(guest)).toEqual([node.code]);
+      expect(await restore(host, node.id)).toMatchObject({ status: 'error', userErrors: [{ messages: ['There is no deleted party to restore.'] }] });
+    });
+
+    it('is only for the host', async () => {
+      const host = await signedIn('Host');
+      const guest = await signedIn('Guest');
+      const { node } = await createParty(host, 'Mine');
+      await join(guest, node.id);
+      expect(await del(guest, node.id)).toMatchObject({ status: 'error', userErrors: [{ messages: ['You must be the host to delete the party.'] }] });
+      await del(host, node.id);
+      expect(await restore(guest, node.id)).toMatchObject({ status: 'error', userErrors: [{ messages: ['There is no deleted party to restore.'] }] });
+    });
+
+    it('frees the slot, and restoring an open party needs one again (a closed party does not)', async () => {
+      const host = await signedIn('Host');
+      const guest = await signedIn('Guest');
+      const open = [];
+      for (let i = 0; i < 3; i++) {
+        open.push((await createParty(host, `Party ${i}`)).node);
+      }
+      await del(host, open[0].id);
+      const replacement = (await createParty(host, 'Replacement')).node;
+      expect(replacement).toBeTruthy();
+      expect(await restore(host, open[0].id)).toEqual({
+        status: 'error',
+        userErrors: [{ fieldName: null, messages: ['You can host up to 3 open parties at a time. Close or delete one of them to restore this one.'] }],
+      });
+
+      // Close one (with a guest), delete and restore it while at the limit: closed parties don't count.
+      await join(guest, open[1].id);
+      await parties(null, {}, host).closeParty({ input: { party: open[1].id } }, host);
+      await createParty(host, 'Fills the freed slot');
+      await del(host, open[1].id);
+      expect((await restore(host, open[1].id)).status).toBe('ok');
+    });
+
+    it('cannot be restored after a day, and the alarm then erases it for good', async () => {
+      const host = await signedIn('Host');
+      const { node } = await createParty(host, 'Too late');
+      await del(host, node.id);
+      await settle(node.code);
+      await deletedAgo(node.code, DAY + 1000);
+
+      expect(await restore(host, node.id)).toMatchObject({ status: 'error', userErrors: [{ messages: ['This party was deleted more than a day ago and can no longer be restored.'] }] });
+      expect(await party(null, { code: node.code }, host)).toBeNull();
+
+      await runInDurableObject(env.PARTY.getByName(node.code), async (instance: PartyDO) => { await instance.alarm(); });
+      expect(await codes(host)).toEqual([]);
+      expect(await env.PARTY.getByName(node.code).create({
+        id: 'x', slug: node.code, name: 'Twice', password: null, host: { id: 'h', email: null, name: 'H' },
+      })).toEqual({ ok: false, conflict: true });
+    });
+
+    it('schedules the erase for when the restore window ends, and leaves a party within it alone', async () => {
+      const host = await signedIn('Host');
+      const { node } = await createParty(host, 'Scheduled');
+      const { deletedAt } = (await del(host, node.id)).node;
+      await settle(node.code); // runs early: nothing is due, so it only reschedules
+      await vi.waitFor(() => runInDurableObject(env.PARTY.getByName(node.code), async (_i, state) => {
+        expect(await state.storage.getAlarm()).toBe(Date.parse(deletedAt) + DAY);
+      }));
+      expect((await party(null, { code: node.code }, host) as any).deletedAt).toBe(deletedAt);
+    });
+
+    it('erases parties made before tombstones or whose host had left', async () => {
+      const host = await signedIn('Host');
+      const { node } = await createParty(host, 'Old one');
+      await del(host, node.id);
+      await settle(node.code);
+      await deletedAgo(node.code, DAY + 1000);
+      await runInDurableObject(env.PARTY.getByName(node.code), async (instance: PartyDO, state) => {
+        state.storage.sql.exec('DROP TABLE cancelled');
+        state.storage.sql.exec('DELETE FROM memberships');
+        await instance.alarm();
+        expect(state.storage.sql.exec('SELECT COUNT(*) AS n FROM party').one().n).toBe(0);
+      });
+    });
+
+    it('adds the deleted_at column to parties made before deletion existed', async () => {
+      const host = await signedIn('Host');
+      // A party stored with the old schema, in an object that has not looked at its tables yet.
+      await runInDurableObject(env.PARTY.getByName('OLDPA'), async (_i, state) => {
+        state.storage.sql.exec(`
+          CREATE TABLE party (id TEXT PRIMARY KEY, slug TEXT NOT NULL, name TEXT NOT NULL, password TEXT, host_id TEXT NOT NULL, is_closed INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+          CREATE TABLE memberships (member_id TEXT PRIMARY KEY, member_email TEXT, name TEXT NOT NULL, target_id TEXT, target_name TEXT, joined_at INTEGER NOT NULL);
+          CREATE TABLE outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL);
+        `);
+        state.storage.sql.exec("INSERT INTO party VALUES ('p', 'OLDPA', 'Old schema', NULL, ?, 0, 1)", host.userId);
+        // A member imported without an email gets no list update.
+        state.storage.sql.exec("INSERT INTO memberships VALUES (?, ?, 'Host', NULL, NULL, 1), ('m', NULL, 'No email', NULL, NULL, 2)", host.userId, host.userEmail);
+      });
+      const id = nodeIdToStr({ kind: 'Party', id: 'OLDPA' });
+      expect(await del(host, id)).toMatchObject({ status: 'ok', node: { code: 'OLDPA', deletedAt: expect.any(String) } });
+      expect((await restore(host, id)).status).toBe('ok');
+    });
+
+    it('fills in an old list row for a deleted party, keeping it marked deleted', async () => {
+      const host = await signedIn('Host');
+      const { node } = await createParty(host, 'Stale row');
+      const { deletedAt } = (await del(host, node.id)).node;
+      await runInDurableObject(env.USER.getByName(host.userEmail!), async (_i, state) => {
+        state.storage.sql.exec('UPDATE parties SET is_host = NULL, deleted_at = NULL');
+      });
+      expect(await listParties(null, { first: 10 }, host)).toMatchObject([{ code: node.code, deletedAt }]);
+      expect(await env.USER.getByName(host.userEmail!).listParties(10)).toMatchObject([{ slug: node.code, deletedAt: Date.parse(deletedAt) }]);
+    });
+
+    it('needs a current session to restore an open party', async () => {
+      const host = await signedIn('Host');
+      const { node } = await createParty(host, 'Revoked');
+      await del(host, node.id);
+      const stale = { ...host, tokenVersion: 7 }; // the token predates a sign-out everywhere
+      expect(await restore(stale, node.id)).toMatchObject({ status: 'error', userErrors: [{ fieldName: null, messages: ['You must be logged in before restoring the party.'] }] });
+      expect((await party(null, { code: node.code }, host) as any).deletedAt).not.toBeNull();
+    });
+
+    it('moves a deleted party to a new email without putting it back in a guest\'s list', async () => {
+      const host = await signedIn('Host');
+      const guest = await signedIn('Guest');
+      const { node } = await createParty(host, 'Moving');
+      await join(guest, node.id);
+      await del(host, node.id);
+      const stub = env.PARTY.getByName(node.code);
+      expect(await stub.changeMemberEmail(guest.userId!, guest.userEmail!, 'moved-guest@example.com')).toBeNull();
+      expect(await stub.changeMemberEmail(host.userId!, host.userEmail!, 'moved-host@example.com')).toMatchObject({ slug: node.code, deletedAt: expect.any(Number) });
+    });
+
+    it('does nothing on an alarm for a code that was never used', async () => {
+      await runInDurableObject(env.PARTY.getByName('ZZZZZ'), async (instance: PartyDO, state) => {
+        await instance.alarm();
+        expect(state.storage.sql.exec("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'party'").one().n).toBe(0);
+      });
+    });
+
+    it('does not let the host leave their own party (they delete it instead)', async () => {
       const host = await signedIn('Host');
       const { node } = await createParty(host, 'Mine');
       expect(await parties(null, {}, host).leaveParty({ input: { party: node.id } }, host)).toMatchObject({
         status: 'error',
-        userErrors: [{ fieldName: 'party', messages: ["As the host, you can't leave your own party. Cancel it instead, or close it once others have joined."] }],
+        userErrors: [{ fieldName: 'party', messages: ["As the host, you can't leave your own party. Delete it instead, or close it once others have joined."] }],
       });
-      expect((await listParties(null, { first: 10 }, host))!.map((p: any) => p.code)).toEqual([node.code]);
-    });
-
-    it('works for a host who left their party before hosts were kept from leaving', async () => {
-      const host = await signedIn('Host');
-      const { node } = await createParty(host, 'Abandoned');
-      await runInDurableObject(env.PARTY.getByName(node.code), async (_i, state) => {
-        state.storage.sql.exec('DELETE FROM memberships');
-      });
-      expect((await cancel(host, node.id)).status).toBe('ok');
-      expect(await party(null, { code: node.code }, host)).toBeNull();
-    });
-
-    it('never hands out a cancelled code again', async () => {
-      const host = await signedIn('Host');
-      const { node } = await createParty(host, 'Once');
-      await cancel(host, node.id);
-      const again = await env.PARTY.getByName(node.code).create({
-        id: 'x', slug: node.code, name: 'Twice', password: null, host: { id: 'h', email: null, name: 'H' },
-      });
-      expect(again).toEqual({ ok: false, conflict: true });
-    });
-
-    it('cancels a party created before tombstones existed', async () => {
-      const host = await signedIn('Host');
-      const { node } = await createParty(host, 'Old');
-      await runInDurableObject(env.PARTY.getByName(node.code), async (_i, state) => {
-        state.storage.sql.exec('DROP TABLE cancelled');
-      });
-      expect((await cancel(host, node.id)).status).toBe('ok');
+      expect(await codes(host)).toEqual([node.code]);
     });
 
     it('rejects ids that are not parties', async () => {
       const host = await signedIn('Host');
-      expect(await cancel(host, nodeIdToStr({ kind: 'User', id: 'x' }))).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
-      expect(await cancel(host, '')).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
+      for (const action of [del, restore]) {
+        expect(await action(host, nodeIdToStr({ kind: 'User', id: 'x' }))).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
+        expect(await action(host, '')).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
+      }
     });
   });
 
@@ -373,7 +510,7 @@ describe('queries', () => {
     const view = {
       id: 'x', slug: 'QWERT', name: 'P', password: null, isProtected: false, isHost: false, isJoined: true,
       isClosed: true, createdAt: Date.UTC(2026, 11, 1, 18, 30), closedAt: Date.UTC(2026, 11, 20, 9, 0, 5, 250),
-      participantCount: 2, participants: ['A'], target: { id: 'a'.repeat(24), name: 'A' },
+      deletedAt: null, participantCount: 2, participants: ['A'], target: { id: 'a'.repeat(24), name: 'A' },
     };
     expect(partyViewToNode(view)).toMatchObject({
       id: nodeIdToStr({ kind: 'Party', id: 'QWERT' }), target: { id: nodeIdToStr({ kind: 'User', id: 'a'.repeat(24) }), name: 'A' },

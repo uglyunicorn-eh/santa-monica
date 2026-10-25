@@ -23,6 +23,8 @@ export type UserPartyRecord = {
   isClosed: boolean;
   /** When the host drew the party. Null while it is open, and for parties drawn before this was recorded. */
   closedAt: number | null;
+  /** When the host deleted the party (it can be restored for a day). Only the host keeps a deleted party in their list. */
+  deletedAt?: number | null;
 };
 
 /** A row of the user's party list. Rows stored before summaries existed have null flags until they are refreshed. */
@@ -30,6 +32,7 @@ export type UserPartyListItem = Omit<UserPartyRecord, 'isHost' | 'isProtected' |
   isHost: boolean | null;
   isProtected: boolean | null;
   isClosed: boolean | null;
+  deletedAt: number | null;
 };
 
 /** Changes PartyDO sends to a UserDO. Each one is idempotent, so a batch can be retried as a whole. */
@@ -63,6 +66,8 @@ export type PartyView = {
   createdAt: number;
   /** When the host drew the party; null while open, and for parties drawn before this was recorded. */
   closedAt: number | null;
+  /** Set when the host deleted the party; only the host can see a deleted party. */
+  deletedAt: number | null;
   participantCount: number | null;
   participants: string[] | null;
   target: { id: string; name: string } | null;
@@ -77,7 +82,6 @@ export type PartyResult =
   | { ok: true; view: PartyView }
   | { ok: false; error: PartyUserError };
 
-export type CancelResult = { ok: true } | { ok: false; error: PartyUserError };
 
 /** UserDO.startHosting: whether the user may host another party, holding a slot for it when they may. */
 export type HostingStart = UserRecord & { openHostedParties: number } & (

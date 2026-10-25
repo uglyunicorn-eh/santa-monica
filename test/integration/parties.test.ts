@@ -47,10 +47,13 @@ describe('creating a party', () => {
   });
 });
 
-describe('open-party limit and cancelling', () => {
-  const CANCEL = `mutation ($party: ID!) { parties { cancelParty(input: { party: $party }) { status userErrors { fieldName messages } } } }`;
+describe('open-party limit, deleting and restoring', () => {
+  const DELETE = `mutation ($party: ID!) { parties { deleteParty(input: { party: $party }) { status userErrors { fieldName messages } node { deletedAt restorableUntil } } } }`;
+  const RESTORE = `mutation ($party: ID!) { parties { restoreParty(input: { party: $party }) { status userErrors { fieldName messages } node { deletedAt } } } }`;
+  const codes = async (who: { token: string }) =>
+    (await gql(PARTIES, {}, { token: who.token })).data.parties.map((p: { code: string }) => p.code);
 
-  it('caps a host at three open parties, and cancelling an empty one frees a slot', async () => {
+  it('caps a host at three open parties, and deleting one frees a slot', async () => {
     const host = await person('host');
     const parties = [];
     for (let i = 0; i < 3; i++) {
@@ -59,20 +62,40 @@ describe('open-party limit and cancelling', () => {
     const fourth = await gql(CREATE_PARTY, { name: 'Fourth' }, { token: host.token });
     expect(fourth.data.parties.createParty.userErrors[0].messages[0]).toMatch(/up to 3 open parties/);
 
-    expect((await gql(CANCEL, { party: parties[0].id }, { token: host.token })).data.parties.cancelParty.status).toBe('ok');
-    expect((await gql(PARTY, { code: parties[0].code }, { token: host.token })).data.party).toBeNull();
-    expect((await gql(PARTIES, {}, { token: host.token })).data.parties.map((p: { code: string }) => p.code))
-      .toEqual(expect.not.arrayContaining([parties[0].code]));
+    const deleted = (await gql(DELETE, { party: parties[0].id }, { token: host.token })).data.parties.deleteParty;
+    expect(deleted.status).toBe('ok');
+    expect(Date.parse(deleted.node.restorableUntil) - Date.parse(deleted.node.deletedAt)).toBe(24 * 60 * 60 * 1000);
     expect((await gql(CREATE_PARTY, { name: 'Fourth' }, { token: host.token })).data.parties.createParty.status).toBe('ok');
+
+    // Back at three open parties, the deleted one can't come back until another goes.
+    const refused = (await gql(RESTORE, { party: parties[0].id }, { token: host.token })).data.parties.restoreParty;
+    expect(refused.userErrors[0].messages[0]).toMatch(/to restore this one/);
   });
 
-  it('cannot cancel once someone has joined', async () => {
+  it('hides a deleted party from its guests, and restoring brings it back for them', async () => {
     const host = await person('host');
     const guest = await person('guest');
     const party = await createParty(host);
     await joinParty(guest, party, 'Guest');
-    const res = await gql(CANCEL, { party: party.id }, { token: host.token });
-    expect(res.data.parties.cancelParty).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
+
+    expect((await gql(DELETE, { party: party.id }, { token: host.token })).data.parties.deleteParty.status).toBe('ok');
+    expect((await gql(PARTY, { code: party.code }, { token: guest.token })).data.party).toBeNull();
+    await expect.poll(() => codes(guest)).toEqual([]);
+    expect(await codes(host)).toEqual([party.code]);
+
+    const restored = (await gql(RESTORE, { party: party.id }, { token: host.token })).data.parties.restoreParty;
+    expect(restored).toMatchObject({ status: 'ok', node: { deletedAt: null } });
+    expect((await gql(PARTY, { code: party.code }, { token: guest.token })).data.party).toMatchObject({ isJoined: true });
+    await expect.poll(() => codes(guest)).toEqual([party.code]);
+  });
+
+  it('lets only the host delete', async () => {
+    const host = await person('host');
+    const guest = await person('guest');
+    const party = await createParty(host);
+    await joinParty(guest, party, 'Guest');
+    const res = await gql(DELETE, { party: party.id }, { token: guest.token });
+    expect(res.data.parties.deleteParty).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
   });
 });
 

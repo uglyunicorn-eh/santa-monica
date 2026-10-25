@@ -7,7 +7,7 @@ import { Session, sessionMatches } from 'src/utils/session';
 
 import { newObjectId } from 'src/utils/ids';
 
-import { CancelResult, CreatePartyInput, ForgetMemberResult, Member, PartyResult, PartyView, UserPartyRecord, UserRecord, UserUpdate } from './types';
+import { CreatePartyInput, ForgetMemberResult, Member, PartyResult, PartyView, UserPartyRecord, UserRecord, UserUpdate } from './types';
 
 import { baseUrl } from 'src/config.json';
 
@@ -21,6 +21,7 @@ type PartyRow = {
   created_at: number;
   /** When the host drew the party. Parties drawn before this column existed have null. */
   closed_at: number | null;
+  deleted_at: number | null;
 };
 
 type MembershipRow = {
@@ -41,8 +42,9 @@ type OutboxMessage =
   | { kind: 'user.sync'; email: string; reservation?: string }
   | { kind: 'user.addParty' | 'user.removeParty'; email: string }
   | { kind: 'user.setNameIfEmpty' | 'user.setName'; email: string; name: string; memberId?: string }
-  // Sent when the party is cancelled: the party row is gone, so the slug travels with the message.
-  | { kind: 'user.partyCancelled'; email: string; slug: string }
+  // Sent when the party is gone for good (erased after deletion, or its host's account was deleted): the party row is
+  // gone, so the slug travels with the message. user.partyCancelled is the earlier name.
+  | { kind: 'user.partyPurged' | 'user.partyCancelled'; email: string; slug: string }
   | { kind: 'mail.partyNotification'; email: string; partyName: string; slug: string };
 
 type OutboxRow = { id: number; payload: string; attempts: number; next_attempt_at: number };
@@ -52,10 +54,13 @@ type OutboxBatch = { key: string; rows: OutboxRow[]; messages: OutboxMessage[] }
 /** The joining session's token version, checked against the user's record (see `Session`). */
 export type JoinCheck = Pick<Session, 'tokenVersion'>;
 
+/** How long a deleted party can be restored. After that it is erased for good. */
+export const RESTORE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 // Columns added after the first release, by table. Parties created before them get the columns on their next start
 // (none are backfilled).
 const ADDED_COLUMNS: Record<string, Record<string, string>> = {
-  party: { closed_at: 'INTEGER' },
+  party: { closed_at: 'INTEGER', deleted_at: 'INTEGER' },
 };
 
 const MAX_ATTEMPTS = 15;
@@ -114,7 +119,8 @@ export class PartyDO extends DurableObject<Env> {
         host_id TEXT NOT NULL,
         is_closed INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
-        closed_at INTEGER
+        closed_at INTEGER,
+        deleted_at INTEGER
       );
       CREATE TABLE IF NOT EXISTS memberships (
         member_id TEXT PRIMARY KEY,
@@ -124,7 +130,7 @@ export class PartyDO extends DurableObject<Env> {
         target_name TEXT,
         joined_at INTEGER NOT NULL
       );
-      -- A row here means the party was cancelled: its code is never handed out again.
+      -- A row here means the party is gone for good: its code is never handed out again.
       CREATE TABLE IF NOT EXISTS cancelled (
         slug TEXT PRIMARY KEY,
         cancelled_at INTEGER NOT NULL
@@ -190,6 +196,7 @@ export class PartyDO extends DurableObject<Env> {
       isProtected: Boolean(party.password),
       isClosed: Boolean(party.is_closed),
       closedAt: party.closed_at,
+      deletedAt: party.deleted_at,
     };
   }
 
@@ -199,7 +206,8 @@ export class PartyDO extends DurableObject<Env> {
     const membership = this.sql
       .exec<{ member_id: string }>('SELECT member_id FROM memberships WHERE member_email = ?', email)
       .toArray()[0];
-    if (!membership) {
+    // A deleted party leaves everyone's list but the host's, where it waits to be restored.
+    if (!membership || (party.deleted_at && membership.member_id !== party.host_id)) {
       return { type: 'removeParty', slug: party.slug };
     }
     return { type: 'addParty', party: this.summary(party, membership.member_id) };
@@ -237,15 +245,30 @@ export class PartyDO extends DurableObject<Env> {
       isClosed,
       createdAt: party.created_at,
       closedAt: party.closed_at,
+      deletedAt: party.deleted_at,
       participantCount: isJoined ? this.memberCount() : null,
       participants,
       target,
     };
   }
 
+  /** The party as this user sees it. A deleted party is visible only to its host, until it can't be restored. */
   view(userId?: string): PartyView | null {
     const party = this.party();
-    return party ? this.buildView(party, userId) : null;
+    if (!party || (party.deleted_at && (party.host_id !== userId || this.restoreExpired(party)))) {
+      return null;
+    }
+    return this.buildView(party, userId);
+  }
+
+  private restoreExpired(party: PartyRow) {
+    return Boolean(party.deleted_at && Date.now() >= party.deleted_at + RESTORE_WINDOW_MS);
+  }
+
+  /** The party unless it was deleted: joining, leaving and closing treat a deleted party as gone. */
+  private liveParty(): PartyRow | null {
+    const party = this.party();
+    return party && !party.deleted_at ? party : null;
   }
 
   /** Creates the party. Returns `conflict` when the slug is already taken, so the caller can pick another one. */
@@ -264,6 +287,7 @@ export class PartyDO extends DurableObject<Env> {
       is_closed: 0,
       created_at: now,
       closed_at: null,
+      deleted_at: null,
     };
     this.ctx.storage.transactionSync(() => {
       this.sql.exec(
@@ -290,7 +314,7 @@ export class PartyDO extends DurableObject<Env> {
    * would reorder them), the join goes through the outbox unchecked, as joins without `check` do.
    */
   async join(member: Member, name: string, password: string | null, check?: JoinCheck): Promise<PartyResult> {
-    const party = this.party();
+    const party = this.liveParty();
     if (!party) {
       return fail('party', 'Party does not exist.');
     }
@@ -349,11 +373,11 @@ export class PartyDO extends DurableObject<Env> {
       return fail(null, 'You must be logged in before joining the party.');
     }
 
-    // Other requests may have reached the party while the user was being updated. The host may even have cancelled it,
+    // Other requests may have reached the party while the user was being updated. The host may even have deleted it,
     // or deleted their account and with it the party.
-    const current = this.party();
+    const current = this.liveParty();
     if (!current) {
-      this.enqueue({ kind: 'user.partyCancelled', email: member.email, slug: party.slug });
+      this.enqueue({ kind: 'user.partyPurged', email: member.email, slug: party.slug });
       await this.deliverUserUpdates();
       return fail('party', 'Party does not exist.');
     }
@@ -373,7 +397,7 @@ export class PartyDO extends DurableObject<Env> {
   }
 
   async leave(userId: string): Promise<PartyResult> {
-    const party = this.party();
+    const party = this.liveParty();
     if (!party) {
       return fail('party', 'Party does not exist.');
     }
@@ -381,9 +405,9 @@ export class PartyDO extends DurableObject<Env> {
     if (!membership) {
       return { ok: true, view: this.buildView(party, userId) };
     }
-    // The open-party limit counts the parties in the host's list, so leaving would dodge it: hosts cancel instead.
+    // The open-party limit counts the parties in the host's list, so leaving would dodge it: hosts delete instead.
     if (party.host_id === userId) {
-      return fail('party', "As the host, you can't leave your own party. Cancel it instead, or close it once others have joined.");
+      return fail('party', "As the host, you can't leave your own party. Delete it instead, or close it once others have joined.");
     }
     if (party.is_closed) {
       return fail('party', 'Party is already at that stage when you cannot really run away... Sorry but you have to get the gift');
@@ -400,7 +424,7 @@ export class PartyDO extends DurableObject<Env> {
   }
 
   async close(userId: string): Promise<PartyResult> {
-    const party = this.party();
+    const party = this.liveParty();
     if (!party) {
       return fail('party', 'Party does not exist.');
     }
@@ -442,42 +466,80 @@ export class PartyDO extends DurableObject<Env> {
   }
 
   /**
-   * Deletes an open party nobody else has joined, so a host can take back a party (and its slot in their open-party
-   * limit) when no one came. The host's list is updated before returning.
+   * Deletes the party, whether or not anyone has joined: it leaves every member's list but the host's, and its link
+   * stops working. The host can restore it within RESTORE_WINDOW_MS; after that the alarm erases it for good.
    */
-  async cancel(userId: string): Promise<CancelResult> {
-    const party = this.party();
+  async delete(userId: string): Promise<PartyResult> {
+    const party = this.liveParty();
     if (!party) {
       return fail('party', 'Party does not exist.');
     }
     if (party.host_id !== userId) {
-      return fail('party', 'You must be the host to cancel the party.');
+      return fail('party', 'You must be the host to delete the party.');
     }
-    if (party.is_closed) {
-      return fail('party', 'Party is already closed.');
-    }
-    const others = this.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM memberships WHERE member_id != ?', userId).one().n;
-    if (others > 0) {
-      return fail('party', 'Someone has already joined this party, so it can no longer be cancelled.');
-    }
+    const deletedAt = Date.now();
+    this.setDeleted(deletedAt);
+    // The host's list shows it as deleted (and it stops counting towards their limit) before returning.
+    await this.deliverHostNow(this.membership(userId)?.member_email);
+    await this.deliverSoon();
+    return { ok: true, view: this.buildView({ ...party, deleted_at: deletedAt }, userId) };
+  }
 
-    const hostEmail = this.membership(userId)?.member_email;
-    this.ensureSchema(); // parties created before tombstones existed have no `cancelled` table yet
+  /**
+   * Brings back a deleted party exactly as it was, for everyone. An open party counts towards the host's limit
+   * again, so the caller holds a slot for it first and passes the reservation.
+   */
+  async restore(userId: string, reservation?: string): Promise<PartyResult> {
+    const party = this.party();
+    if (!party || !party.deleted_at || party.host_id !== userId) {
+      return fail('party', 'There is no deleted party to restore.');
+    }
+    if (this.restoreExpired(party)) {
+      return fail('party', 'This party was deleted more than a day ago and can no longer be restored.');
+    }
+    this.setDeleted(null, reservation);
+    await this.deliverHostNow(this.membership(userId)?.member_email);
+    await this.deliverSoon();
+    return { ok: true, view: this.buildView({ ...party, deleted_at: null }, userId) };
+  }
+
+  /** Marks the party deleted (or restored) and queues an update for every member's list. */
+  private setDeleted(deletedAt: number | null, reservation?: string) {
+    const hostId = this.party()!.host_id;
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec('UPDATE party SET deleted_at = ?', deletedAt);
+      for (const member of this.sql.exec<MembershipRow>('SELECT * FROM memberships').toArray()) {
+        if (member.member_email) {
+          this.enqueue({
+            kind: 'user.sync',
+            email: member.member_email,
+            ...(member.member_id === hostId && reservation ? { reservation } : {}),
+          });
+        }
+      }
+    });
+  }
+
+  /** Erases a party whose restore window has passed, leaving a tombstone so its code is never reused. */
+  private purgeIfExpired() {
+    const party = this.party();
+    if (!party || !this.restoreExpired(party)) {
+      return;
+    }
+    const hostEmail = this.membership(party.host_id)?.member_email;
     this.ctx.storage.transactionSync(() => {
       this.sql.exec('DELETE FROM memberships');
       this.sql.exec('DELETE FROM party');
-      this.sql.exec('INSERT INTO cancelled (slug, cancelled_at) VALUES (?, ?)', party.slug, Date.now());
+      this.sql.exec('INSERT OR IGNORE INTO cancelled (slug, cancelled_at) VALUES (?, ?)', party.slug, Date.now());
       if (hostEmail) {
-        this.enqueue({ kind: 'user.partyCancelled', email: hostEmail, slug: party.slug });
+        this.enqueue({ kind: 'user.partyPurged', email: hostEmail, slug: party.slug });
       }
     });
-    await this.deliverHostNow(hostEmail);
-    return { ok: true };
   }
 
   /**
    * Delivers everything queued for the host right away, including changes waiting for a retry, so closing or
-   * cancelling frees their open-party slot before the mutation returns. If it fails, the alarm retries as usual.
+   * deleting frees their open-party slot before the mutation returns. If it fails, the alarm retries as usual.
    */
   private async deliverHostNow(email: string | null | undefined) {
     await this.runOutbox(message => message.kind.startsWith('user.') && message.email === email, true);
@@ -486,8 +548,8 @@ export class PartyDO extends DurableObject<Env> {
 
   /**
    * Removes a user whose account is being deleted, and drops everything queued for their email:
-   * - an open party they host is deleted like a cancelled one (see `cancel`), whoever joined: it is gone at once, its
-   *   code is never handed out again, and the members get it removed from their lists through the outbox;
+   * - an open party they host is erased at once, whoever joined (even one they had deleted): its code is never handed
+   *   out again, and the members get it removed from their lists through the outbox;
    * - an open party they joined is left;
    * - in a drawn party their membership stays, so the draw holds, but is anonymized: a new random id (also as the
    *   giver's target and as the host), no email. The names stay, so their Secret Santa still knows who to buy for.
@@ -512,7 +574,7 @@ export class PartyDO extends DurableObject<Env> {
         this.sql.exec('DELETE FROM party');
         this.sql.exec('INSERT INTO cancelled (slug, cancelled_at) VALUES (?, ?)', party.slug, Date.now());
         for (const { member_email } of others) {
-          this.enqueue({ kind: 'user.partyCancelled', email: member_email, slug: party.slug });
+          this.enqueue({ kind: 'user.partyPurged', email: member_email, slug: party.slug });
         }
         return 'deleted';
       }
@@ -539,7 +601,8 @@ export class PartyDO extends DurableObject<Env> {
    * Moves a member to a new email. In a party not drawn yet, the membership and everything queued for the old email
    * move to the new one, so later updates reach the moved account. A drawn party keeps the old email: the member still
    * sees it, since membership goes by user id. Returns the party's summary for the member's list, or null when they
-   * are not a member (or there is no party).
+   * are not a member (or there is no party), or when the party is deleted and they are not its host (it is not in
+   * their list; a restore reaches the new email).
    */
   changeMemberEmail(userId: string, oldEmail: string, newEmail: string): UserPartyRecord | null {
     const party = this.party();
@@ -554,7 +617,7 @@ export class PartyDO extends DurableObject<Env> {
         );
       });
     }
-    return this.summary(party, userId);
+    return party.deleted_at && party.host_id !== userId ? null : this.summary(party, userId);
   }
 
   /** Delivers a batch: one email, or all queued changes for one user in a single UserDO call. */
@@ -571,7 +634,7 @@ export class PartyDO extends DurableObject<Env> {
     for (const message of messages) {
       if (message.kind === 'user.setNameIfEmpty' || message.kind === 'user.setName') {
         updates.push({ type: 'setNameIfEmpty', name: message.name, userId: message.memberId });
-      } else if (message.kind === 'user.partyCancelled') {
+      } else if (message.kind === 'user.partyPurged' || message.kind === 'user.partyCancelled') {
         synced = true;
         updates.push({ type: 'removeParty', slug: message.slug });
       } else if (!synced && this.party()) {
@@ -585,7 +648,7 @@ export class PartyDO extends DurableObject<Env> {
         updates.push({ type: 'releaseHostSlot', reservation: message.reservation });
       }
     }
-    // A sync queued for a party that has since been cancelled has nothing left to send.
+    // A sync queued for a party that has since been erased has nothing left to send.
     if (updates.length === 0) {
       return;
     }
@@ -593,6 +656,10 @@ export class PartyDO extends DurableObject<Env> {
   }
 
   async alarm() {
+    if (this.hasSchema()) {
+      this.ensureSchema(); // parties created before tombstones existed have no `cancelled` table yet
+      this.purgeIfExpired();
+    }
     await this.runOutbox(() => true);
   }
 
@@ -658,9 +725,13 @@ export class PartyDO extends DurableObject<Env> {
       }
     }));
 
-    const next = this.sql.exec<{ at: number | null }>('SELECT MIN(next_attempt_at) AS at FROM outbox').one().at;
-    if (next !== null) {
-      await this.ctx.storage.setAlarm(Math.max(next, Date.now()));
+    // The next alarm: the earliest retry, or when a deleted party's restore window ends (it is erased then).
+    const retry = this.sql.exec<{ at: number | null }>('SELECT MIN(next_attempt_at) AS at FROM outbox').one().at;
+    const deletedAt = this.party()?.deleted_at;
+    const purge = deletedAt ? deletedAt + RESTORE_WINDOW_MS : null;
+    const next = [retry, purge].filter((at): at is number => at !== null);
+    if (next.length) {
+      await this.ctx.storage.setAlarm(Math.max(Math.min(...next), Date.now()));
     }
   }
 

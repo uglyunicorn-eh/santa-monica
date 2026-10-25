@@ -11,7 +11,9 @@ This is back-end side of the Anonymous Ded Morozes
 
 The API is a Cloudflare Worker (Hono + Apollo Server) with its data in Durable Objects: one `PartyDO` per party and one `UserDO` per user. Mail goes through Cloudflare Email Service. See [docs/MIGRATION_PLAN.md](docs/MIGRATION_PLAN.md) for the design.
 
-One person can host at most 3 open parties at a time (`MAX_OPEN_HOSTED_PARTIES` in `src/apollo/mutations/parties.ts`). Parties joined as a guest don't count. Closing a party frees its slot right away, and a host can cancel (delete) an open party nobody else has joined with `cancelParty`; a cancelled party's code is never reused. Hosts can't leave their own party. The check and a slot for the new party are taken in one `UserDO.startHosting` call, so parallel creates can't get past the limit.
+One person can host at most 3 open parties at a time (`MAX_OPEN_HOSTED_PARTIES` in `src/apollo/mutations/parties.ts`). Parties joined as a guest don't count. Closing or deleting a party frees its slot right away. Hosts can't leave their own party.
+
+The host can delete a party at any time (`deleteParty`): it leaves every member's list but the host's and its link stops working. For 24 hours (`RESTORE_WINDOW_MS` in `src/do/PartyDO.ts`) the host can bring it back exactly as it was with `restoreParty`; restoring an open party needs a free slot. After that the party's alarm erases it, and its code is never reused. The check and a slot for the new party are taken in one `UserDO.startHosting` call, so parallel creates can't get past the limit.
 
 Keeping Durable Object calls low:
 
@@ -68,7 +70,7 @@ Session tokens carry the user's token version (`ver`). `UserDO.tombstone()` dele
 
 Deleting an account and changing its email go through a link mailed to the user (`AccountDeletion` and `EmailChange` tokens, single-use, one hour):
 
-- **Deleting** (`profile.requestAccountDeletion` → `<baseUrl>/profile/delete/<token>` → `profile.confirmAccountDeletion`): every party on the user's list is told once (`PartyDO.forgetMember`). An open party they host is deleted like a cancelled one, whoever joined: it is gone at once, its code is never handed out again, and its members' lists are updated through the outbox. Open parties they joined are left. In drawn parties their membership is anonymized (new id, no email; the names stay so the draw still works). Then the `UserDO` is tombstoned.
+- **Deleting** (`profile.requestAccountDeletion` → `<baseUrl>/profile/delete/<token>` → `profile.confirmAccountDeletion`): every party on the user's list is told once (`PartyDO.forgetMember`). An open party they host is erased at once, whoever joined (even one they had deleted): it is gone right away, its code is never handed out again, and its members' lists are updated through the outbox. Open parties they joined are left. In drawn parties their membership is anonymized (new id, no email; the names stay so the draw still works). Then the `UserDO` is tombstoned.
 - **While either runs**, the account is held (up to a minute): it reads as missing, can't join or create parties, and can't start another change. If a party can't be reached, what can be undone is undone and the link works again.
 - **Changing the email** (`profile.requestEmailChange` → `<baseUrl>/profile/email/<token>` to the new address, plus a notice to the old one → `profile.confirmEmailChange`): open parties move the membership and their queued updates to the new email (`PartyDO.changeMemberEmail`). Then the account is copied to the new address's `UserDO` (same id, token version + 1) and the old one is tombstoned. Drawn parties keep the old email; the user still sees them, since membership goes by user id. The confirm returns a session token for the new address.
 

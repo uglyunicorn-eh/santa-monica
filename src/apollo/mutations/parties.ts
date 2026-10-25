@@ -8,21 +8,24 @@ import { strToNodeId } from 'src/utils/strings/nodeId';
 import { randomString } from 'src/utils/strings/random';
 import { annotate } from 'src/utils/tracing';
 
-import { CancelPartyInput, ClosePartyInput, CreatePartyInput, JoinPartyInput, LeavePartyInput } from "./types";
-import { cancelPartyInputSchema, closePartyInputSchema, createPartyInputSchema, joinPartyInputSchema, leavePartyInputSchema } from "./validation";
+import { ClosePartyInput, CreatePartyInput, DeletePartyInput, JoinPartyInput, LeavePartyInput, RestorePartyInput } from "./types";
+import {
+  closePartyInputSchema, createPartyInputSchema, deletePartyInputSchema, joinPartyInputSchema, leavePartyInputSchema,
+  restorePartyInputSchema,
+} from "./validation";
 
 const SLUG_ATTEMPTS = 10;
 
 /** How many open (not closed) parties one person can host at a time. */
 export const MAX_OPEN_HOSTED_PARTIES = 3;
 
-const tooManyOpenParties = {
+const tooManyOpenParties = (action: string) => ({
   status: 'error' as const,
   userErrors: [{
     fieldName: null,
-    messages: [`You can host up to ${MAX_OPEN_HOSTED_PARTIES} open parties at a time. Close or cancel one of them to start a new one.`],
+    messages: [`You can host up to ${MAX_OPEN_HOSTED_PARTIES} open parties at a time. Close or delete one of them to ${action}.`],
   }],
-};
+});
 
 const notLoggedIn = (action: string) => ({
   status: 'error',
@@ -77,7 +80,7 @@ const partyMutations = {
       }
       annotate({ 'user.open_hosted_parties': user.openHostedParties });
       if (!user.allowed) {
-        return tooManyOpenParties;
+        return tooManyOpenParties('start a new one');
       }
       for (let attempt = 0; attempt < SLUG_ATTEMPTS; attempt++) {
         const slug = randomString(5, 'QWERTYUIPASDFGHJKLZXCVBNMO');
@@ -136,14 +139,38 @@ const partyMutations = {
       return toPayload(await env.PARTY.getByName(slug).close(userId!));
     }),
 
-    cancelParty: _(cancelPartyInputSchema, 'cancelParty')(async ({ party }: CancelPartyInput, { env, userId }: ApolloContext) => {
+    deleteParty: _(deletePartyInputSchema, 'deleteParty')(async ({ party }: DeletePartyInput, { env, userId }: ApolloContext) => {
       const slug = partySlug(party);
       if (!slug) {
         return unknownParty;
       }
       annotate({ 'party.code': slug });
 
-      const result = await env.PARTY.getByName(slug).cancel(userId!);
-      return result.ok ? {} : toUserError(result.error);
+      return toPayload(await env.PARTY.getByName(slug).delete(userId!));
+    }),
+
+    restoreParty: _(restorePartyInputSchema, 'restoreParty')(async ({ party }: RestorePartyInput, { env, userId, userEmail, tokenVersion }: ApolloContext) => {
+      const slug = partySlug(party);
+      if (!slug) {
+        return unknownParty;
+      }
+      annotate({ 'party.code': slug });
+
+      const stub = env.PARTY.getByName(slug);
+      // A restored open party counts towards the host's limit again, so hold a slot for it first (like creating one).
+      // A closed party doesn't count, and a party that can't be restored gets its error from restore() below.
+      const view = await stub.view(userId);
+      let reservation: string | undefined;
+      if (view?.deletedAt && !view.isClosed) {
+        const hosting = await env.USER.getByName(userEmail!).startHosting(MAX_OPEN_HOSTED_PARTIES, { userId: userId!, tokenVersion });
+        if (!hosting) {
+          return notLoggedIn('restoring');
+        }
+        if (!hosting.allowed) {
+          return tooManyOpenParties('restore this one');
+        }
+        reservation = hosting.reservation;
+      }
+      return toPayload(await stub.restore(userId!, reservation));
     }),
 };

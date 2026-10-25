@@ -2,7 +2,7 @@ import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject } fr
 import { describe, expect, it } from 'vitest';
 
 import { UserToken } from 'src/apollo/types';
-import { PartyDO } from 'src/do/PartyDO';
+import { PartyDO, RESTORE_WINDOW_MS } from 'src/do/PartyDO';
 import { UserUpdate } from 'src/do/types';
 import { app } from 'src/index';
 import { createJwtHelpers } from 'src/utils/jwt';
@@ -58,6 +58,8 @@ async function gql(bindings: typeof env, query: string, variables: Record<string
 const CREATE = `mutation ($name: String!) { parties { createParty(input: { name: $name }) { status node { id code } } } }`;
 const JOIN = `mutation ($party: ID!, $name: String!) { parties { joinParty(input: { party: $party, name: $name }) { status } } }`;
 const LEAVE = `mutation ($party: ID!) { parties { leaveParty(input: { party: $party }) { status } } }`;
+const DELETE = `mutation ($party: ID!) { parties { deleteParty(input: { party: $party }) { status } } }`;
+const RESTORE = `mutation ($party: ID!) { parties { restoreParty(input: { party: $party }) { status userErrors { messages } } } }`;
 const CLOSE = `mutation ($party: ID!) { parties { closeParty(input: { party: $party }) { status } } }`;
 
 /** Delivers a party's queued messages (user updates and mail) right away. */
@@ -325,22 +327,57 @@ describe('party → user updates', () => {
     }
   });
 
-  it('cancels with one call from the Worker, and one apply from the party to the host', async () => {
+  it("deletes with one call from the Worker: the host's list updates before it returns, the guests' on the alarm", async () => {
     const host = await person('Host');
-    const { node } = (await gql(env, CREATE, { name: 'Cancelled' }, host.token)).data.parties.createParty;
+    const guest = await person('Guest');
+    const { node } = (await gql(env, CREATE, { name: 'Deleted' }, host.token)).data.parties.createParty;
+    await gql(env, JOIN, { party: node.id, name: 'G' }, guest.token);
     const { applied, done } = recordUserCalls(node.code);
     await done;
     const counting = countingEnv();
-    const res = await gql(counting.env, `mutation ($party: ID!) { parties { cancelParty(input: { party: $party }) { status } } }`, { party: node.id }, host.token);
-    expect(res.data.parties.cancelParty.status).toBe('ok');
-    expect(counting.calls).toEqual([{ binding: 'PARTY', name: node.code, method: 'cancel' }]);
-    expect(applied).toEqual([{ email: host.email, updates: [{ type: 'removeParty', slug: node.code }] }]);
+    const res = await gql(counting.env, DELETE, { party: node.id }, host.token);
+    expect(res.data.parties.deleteParty.status).toBe('ok');
+    expect(counting.calls).toEqual([{ binding: 'PARTY', name: node.code, method: 'delete' }]);
+    expect(applied).toEqual([{ email: host.email, updates: [{ type: 'addParty', party: expect.objectContaining({ slug: node.code, deletedAt: expect.any(Number) }) }] }]);
+
+    await runInDurableObject(env.PARTY.getByName(node.code), async (instance: PartyDO) => { await instance.alarm(); });
+    expect(applied.slice(1)).toEqual([{ email: guest.email, updates: [{ type: 'removeParty', slug: node.code }] }]);
   });
 
-  it('sends nothing for a sync left queued for a party that was cancelled', async () => {
+  it('restores an open party with three calls (it needs a slot), a closed one with two', async () => {
+    const host = await person('Host');
+    const guest = await person('Guest');
+    const open = (await gql(env, CREATE, { name: 'Open' }, host.token)).data.parties.createParty.node;
+    const closed = (await gql(env, CREATE, { name: 'Closed' }, host.token)).data.parties.createParty.node;
+    await gql(env, JOIN, { party: closed.id, name: 'G' }, guest.token);
+    await gql(env, CLOSE, { party: closed.id }, host.token);
+    for (const p of [open, closed]) {
+      await gql(env, DELETE, { party: p.id }, host.token);
+    }
+
+    const counting = countingEnv();
+    expect((await gql(counting.env, RESTORE, { party: open.id }, host.token)).data.parties.restoreParty.status).toBe('ok');
+    expect(counting.calls.map(c => `${c.binding}.${c.method}`)).toEqual(['PARTY.view', 'USER.startHosting', 'PARTY.restore']);
+
+    counting.reset();
+    expect((await gql(counting.env, RESTORE, { party: closed.id }, host.token)).data.parties.restoreParty.status).toBe('ok');
+    expect(counting.calls.map(c => `${c.binding}.${c.method}`)).toEqual(['PARTY.view', 'PARTY.restore']);
+
+    // The slot held for the open party was released when it came back to the host's list.
+    expect(await runInDurableObject(env.USER.getByName(host.email), async (_i, state) =>
+      state.storage.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM host_reservations').one().n)).toBe(0);
+  });
+
+  it('sends nothing for a sync left queued for a party that was erased', async () => {
     const host = await person('Host');
     const { node } = (await gql(env, CREATE, { name: 'Gone' }, host.token)).data.parties.createParty;
-    await gql(env, `mutation ($party: ID!) { parties { cancelParty(input: { party: $party }) { status } } }`, { party: node.id }, host.token);
+    await gql(env, DELETE, { party: node.id }, host.token);
+    await runInDurableObject(env.PARTY.getByName(node.code), async (instance: PartyDO, state) => {
+      state.storage.sql.exec('UPDATE party SET deleted_at = ?', Date.now() - RESTORE_WINDOW_MS - 1000);
+      await instance.alarm();
+    });
+    expect(await env.USER.getByName(host.email).listParties(10)).toEqual([]);
+
     const { applied, done } = recordUserCalls(node.code);
     await done;
     await runInDurableObject(env.PARTY.getByName(node.code), async (instance: PartyDO, state) => {
@@ -375,7 +412,7 @@ describe('party → user updates', () => {
     expect(await reservations()).toBe(1);
   });
 
-  it('frees the slot on cancel and close even while an earlier update to the host waits for a retry', async () => {
+  it('frees the slot on delete and close even while an earlier update to the host waits for a retry', async () => {
     const host = await person('Host');
     const guest = await person('Guest');
     const waiting = (code: string) => runInDurableObject(env.PARTY.getByName(code), async (_i, state) => {
@@ -383,10 +420,10 @@ describe('party → user updates', () => {
     });
     const outbox = (code: string) => runInDurableObject(env.PARTY.getByName(code), async (instance: PartyDO) => await instance.pendingOutbox());
 
-    const cancelled = (await gql(env, CREATE, { name: 'To cancel' }, host.token)).data.parties.createParty.node;
-    await waiting(cancelled.code);
-    await gql(env, `mutation ($party: ID!) { parties { cancelParty(input: { party: $party }) { status } } }`, { party: cancelled.id }, host.token);
-    expect(await outbox(cancelled.code)).toBe(0);
+    const deleted = (await gql(env, CREATE, { name: 'To delete' }, host.token)).data.parties.createParty.node;
+    await waiting(deleted.code);
+    await gql(env, DELETE, { party: deleted.id }, host.token);
+    expect(await outbox(deleted.code)).toBe(0);
 
     const closed = (await gql(env, CREATE, { name: 'To close' }, host.token)).data.parties.createParty.node;
     await gql(env, JOIN, { party: closed.id, name: 'G' }, guest.token);
@@ -394,8 +431,8 @@ describe('party → user updates', () => {
     await gql(env, CLOSE, { party: closed.id }, host.token);
 
     const list = await env.USER.getByName(host.email).listParties(10);
-    expect(list.map((p: any) => p.slug)).toEqual([closed.code]);
-    expect(list[0].isClosed).toBe(true);
+    expect(list.find((p: any) => p.slug === deleted.code)!.deletedAt).toEqual(expect.any(Number));
+    expect(list.find((p: any) => p.slug === closed.code)!.isClosed).toBe(true);
   });
 
   it('removes the party from the list of someone who left', async () => {
@@ -461,7 +498,7 @@ describe('party lists saved before summaries existed', () => {
     });
     await evictDurableObject(stub);
     expect(await env.USER.getByName(email).listParties(10)).toEqual([
-      { slug: 'QQQQY', name: 'Before', createdAt: 5, isHost: null, isProtected: null, isClosed: null, closedAt: null },
+      { slug: 'QQQQY', name: 'Before', createdAt: 5, isHost: null, isProtected: null, isClosed: null, closedAt: null, deletedAt: null },
     ]);
   });
 });
