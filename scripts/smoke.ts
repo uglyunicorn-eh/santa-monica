@@ -33,7 +33,7 @@ const checks: Check[] = [
   {
     name: 'unknown party is 404',
     run: async () => {
-      const { status, body } = await api('/v1/parties/QQQQQ');
+      const { status, body } = await api('/v1/parties?code=QQQQQ');
       assert(status === 404 && body?.error?.code === 'not_found', `unexpected response ${status} ${JSON.stringify(body)}`);
     },
   },
@@ -91,7 +91,7 @@ const READY_TIMEOUT_MS = 60_000;
 const startedAt = Date.now();
 const ready = async () => {
   const home = await fetch(new URL('/', base)).then(res => res.status, () => 0);
-  return home === 200 ? await fetch(new URL('/v1/parties/READYZZZ', base)).then(res => res.status, () => 0) : home;
+  return home === 200 ? await fetch(new URL('/v1/parties?code=READYZZZ', base)).then(res => res.status, () => 0) : home;
 };
 while (true) {
   const status = await ready();

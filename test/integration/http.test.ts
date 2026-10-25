@@ -52,6 +52,24 @@ describe('HTTP surface', () => {
     }
   });
 
+  it('never takes the party code from the path, so request logs never record it: writes take it in the body', async () => {
+    const host = await signIn(uniqueEmail('host'));
+    const party = (await call('POST', '/v1/parties', { token: host.token, body: { name: 'Query' } })).body;
+    expect((await call('GET', `/v1/parties?code=${party.code.toLowerCase()}`)).body).toMatchObject({ code: party.code });
+    expect(await call('GET', '/v1/parties')).toEqual({ status: 404, body: apiError('not_found', 'Party does not exist.', 'party') });
+    // The old routes with the code in the path are gone.
+    for (const [method, path] of [['GET', ''], ['POST', '/join'], ['POST', '/draw'], ['DELETE', '']]) {
+      const res = await call(method, `/v1/parties/${party.code}${path}`, { token: host.token, body: method === 'POST' ? {} : undefined });
+      expect([method, path, res.status, res.body.error.code]).toEqual([method, path, 404, 'not_found']);
+    }
+    expect((await call('DELETE', `/v1/parties?code=${party.code}`, { token: host.token })).status).toBe(404);
+    // A code in the query string of a write is not read: the body must carry it.
+    expect(await call('POST', `/v1/parties/draw?code=${party.code}`, { token: host.token, body: {} })).toMatchObject({
+      status: 400, body: apiError('invalid', 'Invalid party code', 'code'),
+    });
+    expect((await call('POST', '/v1/parties/delete', { token: host.token, body: { code: party.code.toLowerCase() } })).status).toBe(200);
+  });
+
   it('accepts a trailing slash on the routes', async () => {
     const person = await signIn(uniqueEmail());
     expect((await call('GET', '/v1/me/', { token: person.token })).status).toBe(200);
@@ -96,8 +114,9 @@ describe('HTTP surface', () => {
       ['POST', '/v1/me/deletion/confirm', { token: long(2049) }],
       ['POST', '/v1/parties', { name: long(101) }],
       ['POST', '/v1/parties', { name: 'Ok', password: long(101) }],
-      ['POST', '/v1/parties/QWERTYUI/join', { name: long(101) }],
-      ['POST', '/v1/parties/QWERTYUI/join', { name: 'Ok', password: long(101) }],
+      ['POST', '/v1/parties/join', { code: 'QWERTYUI', name: long(101) }],
+      ['POST', '/v1/parties/join', { code: 'QWERTYUI', name: 'Ok', password: long(101) }],
+      ['POST', '/v1/parties/leave', { code: 'Q'.repeat(101) }],
     ];
     for (const [method, path, body] of cases) {
       const res = await call(method, path, { token: person.token, body });
@@ -110,7 +129,7 @@ describe('HTTP surface', () => {
     for (const query of ['?first=0', '?first=101', '?first=abc', '?first=1000', `?after=${'x'.repeat(101)}`, '?after=', '?after=bm9wZQ']) {
       expect((await call('GET', `/v1/me/parties${query}`, { token: person.token })).status).toBe(400);
     }
-    expect((await call('GET', `/v1/parties/${'Q'.repeat(500)}`)).status).toBe(404);
+    expect((await call('GET', `/v1/parties?code=${'Q'.repeat(500)}`)).status).toBe(404);
     expect((await call('GET', '/v1/me', { headers: { authorization: `Bearer ${'a'.repeat(3000)}.b.c` } })).status).toBe(401);
     expect((await call('GET', '/v1/me', { headers: { authorization: 'Basic abc' } })).status).toBe(401);
   });
@@ -126,9 +145,9 @@ describe('HTTP surface', () => {
   it('allows ten lookups of old 5-letter codes a minute from one address; 8-letter codes have their own limit', async () => {
     const ip = uniqueIp();
     for (let i = 0; i < 10; i++) {
-      expect((await call('GET', '/v1/parties/QWERT', { ip })).status).toBe(404);
+      expect((await call('GET', '/v1/parties?code=QWERT', { ip })).status).toBe(404);
     }
-    expect(await call('GET', '/v1/parties/QWERT', { ip })).toEqual({ status: 429, body: apiError('rate_limited', expect.any(String)) });
-    expect((await call('GET', '/v1/parties/QWERTYUI', { ip })).status).toBe(404);
+    expect(await call('GET', '/v1/parties?code=QWERT', { ip })).toEqual({ status: 429, body: apiError('rate_limited', expect.any(String)) });
+    expect((await call('GET', '/v1/parties?code=QWERTYUI', { ip })).status).toBe(404);
   });
 });

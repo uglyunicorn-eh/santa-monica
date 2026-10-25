@@ -90,7 +90,9 @@ export const bodies = {
   profile: body({ name: required(words('Name', MAX_NAME_LENGTH)) }),
   emailChange: v.pipe(body({ email: required(typedEmail) }), v.transform(normalizeEmail)),
   createParty: body({ name: required(words('Party name', MAX_NAME_LENGTH)), password: optional(phrase) }),
-  joinParty: body({ name: required(words('Name', MAX_NAME_LENGTH)), password: optional(phrase) }),
+  // Party codes travel in the body of every write, never in the URL: see `partyQuery`.
+  joinParty: body({ code: required(partyCode), name: required(words('Name', MAX_NAME_LENGTH)), password: optional(phrase) }),
+  partyAction: body({ code: required(partyCode) }),
   empty: body({}),
 };
 
@@ -137,10 +139,13 @@ export const queries = {
   }),
 };
 
-export const params = {
-  /** `:code`: anything that isn't a party code reads as a party that doesn't exist. */
-  party: v.object({ code: v.pipe(v.string(), v.toUpperCase(), v.regex(PARTY_CODE_RE)) }),
-};
+/**
+ * `GET /v1/parties?code=`: the one party route that can't take the code in a body. A party code lets anyone into a
+ * party without a secret phrase, and Cloudflare's request logs and traces record request URLs, so it travels in the
+ * query string, which they drop (`redact_query_string` in wrangler.jsonc), never in the path. Writes take it in the
+ * body. Anything that isn't a party code reads as a party that doesn't exist.
+ */
+export const partyQuery = v.object({ code: v.pipe(v.string(), v.toUpperCase(), v.regex(PARTY_CODE_RE)) });
 
 export const headers = {
   /** `Idempotency-Key`: optional, and refused when malformed rather than ignored. */

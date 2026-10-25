@@ -122,7 +122,7 @@ describe('API action spans', () => {
     const { body: party } = await request('POST', '/v1/parties', { token: who.token, body: { name: 'Query spans' } });
     const spans = captureSpans();
 
-    await request('GET', `/v1/parties/${party.code}`, { token: who.token });
+    await request('GET', `/v1/parties?code=${party.code}`, { token: who.token });
     await request('GET', '/v1/me/parties', { token: who.token });
     await request('GET', '/v1/me', { token: who.token });
 

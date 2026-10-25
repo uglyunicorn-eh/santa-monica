@@ -169,7 +169,7 @@ describe('joining a party', () => {
   it('needs a session', async () => {
     const host = await person('host');
     const party = await createParty(host);
-    expect((await call('POST', `/v1/parties/${party.code}/join`, { body: { name: 'Anon' } })).status).toBe(401);
+    expect((await call('POST', '/v1/parties/join', { body: { code: party.code, name: 'Anon' } })).status).toBe(401);
   });
 
   it('checks the secret phrase, ignoring case', async () => {
@@ -205,9 +205,9 @@ describe('joining a party', () => {
     expect(await joinParty(guest, party, 'Guest again')).toMatchObject({ status: 200, body: { participantCount: 2 } });
   });
 
-  it('answers 404 for codes that are not parties', async () => {
+  it('refuses a malformed code, and answers 404 for codes that are not parties', async () => {
     const guest = await person('guest');
-    expect(await joinParty(guest, { code: 'not-a-code' }, 'Guest')).toMatchObject({ status: 404, body: apiError('not_found', undefined, 'party') });
+    expect(await joinParty(guest, { code: 'not-a-code' }, 'Guest')).toMatchObject({ status: 400, body: apiError('invalid', 'Invalid party code', 'code') });
     expect(await joinParty(guest, { code: 'QQQQQ' }, 'Guest')).toMatchObject({ status: 404, body: apiError('not_found', 'Party does not exist.', 'party') });
   });
 
@@ -296,7 +296,7 @@ describe('leaving a party', () => {
   it('needs a session', async () => {
     const host = await person('host');
     const party = await createParty(host);
-    expect((await call('POST', `/v1/parties/${party.code}/leave`)).status).toBe(401);
+    expect((await call('POST', '/v1/parties/leave', { body: { code: party.code } })).status).toBe(401);
   });
 
   it('does not let the host leave their own party', async () => {
@@ -313,7 +313,7 @@ describe('rolling the dice', () => {
   it('needs a session', async () => {
     const host = await person('host');
     const party = await createParty(host);
-    expect((await call('POST', `/v1/parties/${party.code}/draw`)).status).toBe(401);
+    expect((await call('POST', '/v1/parties/draw', { body: { code: party.code } })).status).toBe(401);
   });
 
   it('can only be done by the host', async () => {

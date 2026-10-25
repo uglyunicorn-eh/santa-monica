@@ -5,7 +5,7 @@ import * as v from 'valibot';
 import { makeSession } from 'src/api/context';
 import { ApiError, fail } from 'src/api/errors';
 import { keyHash, readBody } from 'src/api/input';
-import { bodies, encodeCursor, headers, params, party as partyJson, partyPage, queries, tokens, user as userJson } from 'src/api/schemas';
+import { bodies, encodeCursor, headers, party as partyJson, partyQuery, partyPage, queries, tokens, user as userJson } from 'src/api/schemas';
 import { authenticate } from 'src/api/session';
 import { EnterRequestToken, UserToken } from 'src/api/types';
 import { PartyDO } from 'src/do/PartyDO';
@@ -23,7 +23,7 @@ const createParty = (token: string, name = 'Party', options: { password?: string
   request('POST', '/v1/parties', { token, key: options.key, env: options.env, body: { name, ...(options.password ? { password: options.password } : {}) } });
 
 const join = (token: string, code: string, name = 'Guest', password?: string) =>
-  request('POST', `/v1/parties/${code}/join`, { token, body: { name, ...(password ? { password } : {}) } });
+  request('POST', '/v1/parties/join', { token, body: { code: code, name, ...(password ? { password } : {}) } });
 
 describe('POST /v1/auth/magic-link', () => {
   it('emails a link with a fresh id each time, to the lowercased address, carrying a valid party code', async () => {
@@ -147,7 +147,7 @@ describe('GET /v1/me/parties', () => {
   it('fills in old rows from their parties once, keeps going past parties that are gone, and keeps deleted ones marked', async () => {
     const host = await signIn(uniqueEmail(), 'Host');
     const { body: party } = await createParty(host.token, 'Stale');
-    const { body: deleted } = await request('DELETE', `/v1/parties/${party.code}`, { token: host.token });
+    const { body: deleted } = await request('POST', '/v1/parties/delete', { body: { code: party.code }, token: host.token });
     await addParties(host.email, [['QQQDA', 1]]);
     await runInDurableObject(env.USER.getByName(host.email), async (_i, state) => {
       state.storage.sql.exec('UPDATE parties SET is_host = NULL, deleted_at = NULL');
@@ -235,7 +235,7 @@ describe('POST /v1/me/deletion/confirm', () => {
     expect(error).toHaveBeenCalledWith('Unable to remove a deleted account from a party', 'Error: down');
     expect(await env.USER.getByName(who.email).get()).not.toBeNull();
     expect((await request('POST', '/v1/me/deletion/confirm', { body: { token } })).status).toBe(200);
-    expect((await request('GET', `/v1/parties/${party.code}`)).status).toBe(404);
+    expect((await request('GET', `/v1/parties?code=${party.code}`)).status).toBe(404);
     error.mockRestore();
   });
 
@@ -415,31 +415,31 @@ describe('POST /v1/me/email-change/confirm', () => {
   });
 });
 
-describe('GET /v1/parties/:code', () => {
+describe('GET /v1/parties?code=', () => {
   it('shows members more than anyone else, and a revoked token only what anyone sees', async () => {
     const host = await signIn(uniqueEmail(), 'Host');
     const { body: party } = await createParty(host.token, 'Mine', { password: 'pw' });
-    expect((await request('GET', `/v1/parties/${party.code.toLowerCase()}`, { token: host.token })).body).toMatchObject({ isHost: true, password: 'pw', participants: ['Host'] });
-    const anonymous = (await request('GET', `/v1/parties/${party.code}`)).body;
+    expect((await request('GET', `/v1/parties?code=${party.code.toLowerCase()}`, { token: host.token })).body).toMatchObject({ isHost: true, password: 'pw', participants: ['Host'] });
+    const anonymous = (await request('GET', `/v1/parties?code=${party.code}`)).body;
     expect(anonymous).toMatchObject({ isHost: false, isJoined: false, password: null, participants: null });
 
     await env.USER.getByName(host.email).tombstone();
-    expect((await request('GET', `/v1/parties/${party.code}`, { token: host.token })).body).toEqual(anonymous);
+    expect((await request('GET', `/v1/parties?code=${party.code}`, { token: host.token })).body).toEqual(anonymous);
   });
 
   it('hides a deleted party from everyone but its host, revoked or not', async () => {
     const host = await signIn();
     const { body: party } = await createParty(host.token);
-    await request('DELETE', `/v1/parties/${party.code}`, { token: host.token });
-    expect((await request('GET', `/v1/parties/${party.code}`, { token: host.token })).body.deletedAt).toEqual(expect.any(String));
-    expect((await request('GET', `/v1/parties/${party.code}`)).status).toBe(404);
+    await request('POST', '/v1/parties/delete', { body: { code: party.code }, token: host.token });
+    expect((await request('GET', `/v1/parties?code=${party.code}`, { token: host.token })).body.deletedAt).toEqual(expect.any(String));
+    expect((await request('GET', `/v1/parties?code=${party.code}`)).status).toBe(404);
     await env.USER.getByName(host.email).tombstone();
-    expect((await request('GET', `/v1/parties/${party.code}`, { token: host.token })).status).toBe(404);
+    expect((await request('GET', `/v1/parties?code=${party.code}`, { token: host.token })).status).toBe(404);
   });
 
   it('answers 404 for codes that aren\'t codes and 429 over the lookup limit', async () => {
-    expect(await request('GET', '/v1/parties/nope!')).toMatchObject({ status: 404, body: { error: { code: 'not_found', field: 'party' } } });
-    expect(await request('GET', '/v1/parties/QWERT', { env: testEnv({ PARTY_LOOKUP_RATE_LIMIT_IP: denied }) })).toMatchObject({ status: 429 });
+    expect(await request('GET', '/v1/parties?code=nope!')).toMatchObject({ status: 404, body: { error: { code: 'not_found', field: 'party' } } });
+    expect(await request('GET', '/v1/parties?code=QWERT', { env: testEnv({ PARTY_LOOKUP_RATE_LIMIT_IP: denied }) })).toMatchObject({ status: 429 });
   });
 });
 
@@ -486,7 +486,7 @@ describe('POST /v1/parties', () => {
     expect(await createParty(host.token, 'Once', { key: k, env: collide })).toMatchObject({ status: 409 });
     expect(calls).toBe(1);
 
-    await request('DELETE', `/v1/parties/${first.body.code}`, { token: host.token });
+    await request('POST', '/v1/parties/delete', { body: { code: first.body.code }, token: host.token });
     expect(await createParty(host.token, 'Once', { key: k })).toMatchObject({
       status: 409, body: { error: { message: 'This party is no longer available. Please start a new one.' } },
     });
@@ -503,7 +503,7 @@ describe('POST /v1/parties', () => {
   });
 });
 
-describe('POST /v1/parties/:code/join', () => {
+describe('POST /v1/parties/join?code=', () => {
   it('joins with the phrase and the name from the form, filling an empty profile name only', async () => {
     const host = await signIn(uniqueEmail(), 'Host');
     const { body: party } = await createParty(host.token, 'P', { password: 'pw' });
@@ -520,26 +520,26 @@ describe('POST /v1/parties/:code/join', () => {
     const host = await signIn();
     const { body: party } = await createParty(host.token);
     const guest = await signIn();
-    expect(await request('POST', `/v1/parties/${party.code}/join`, { token: guest.token, body: { name: 'G' }, env: testEnv({ JOIN_RATE_LIMIT_USER: denied }) }))
+    expect(await request('POST', '/v1/parties/join', { token: guest.token, body: { code: party.code, name: 'G' }, env: testEnv({ JOIN_RATE_LIMIT_USER: denied }) }))
       .toMatchObject({ status: 429, body: { error: { field: 'party' } } });
     await env.USER.getByName(guest.email).tombstone();
     expect(await join(guest.token, party.code)).toMatchObject({ status: 401, body: { error: { message: 'You must be logged in before joining the party.' } } });
-    expect((await request('GET', `/v1/parties/${party.code}`, { token: host.token })).body.participantCount).toBe(1);
+    expect((await request('GET', `/v1/parties?code=${party.code}`, { token: host.token })).body.participantCount).toBe(1);
   });
 });
 
 describe('leave, draw, delete and restore', () => {
-  const act = (method: string, code: string, path: string, token: string) => request(method, `/v1/parties/${code}${path}`, { token });
+  const act = (code: string, action: string, token: string) => request('POST', `/v1/parties/${action}`, { token, body: { code } });
 
   it('need a session that still holds', async () => {
     const host = await signIn();
     const { body: party } = await createParty(host.token);
     const stale = await sessionToken(host.id, host.email, 7);
-    for (const [method, path] of [['POST', '/leave'], ['POST', '/draw'], ['DELETE', ''], ['POST', '/restore']]) {
-      expect((await act(method, party.code, path, stale)).status).toBe(401);
+    for (const action of ['leave', 'draw', 'delete', 'restore']) {
+      expect((await act(party.code, action, stale)).status).toBe(401);
     }
-    await act('DELETE', party.code, '', host.token);
-    expect(await act('POST', party.code, '/restore', stale)).toMatchObject({ status: 401, body: { error: { message: 'You must be logged in before restoring the party.' } } });
+    await act(party.code, 'delete', host.token);
+    expect(await act(party.code, 'restore', stale)).toMatchObject({ status: 401, body: { error: { message: 'You must be logged in before restoring the party.' } } });
   });
 
   it('restore an open party only with a free slot, and a closed one without needing one', async () => {
@@ -549,18 +549,18 @@ describe('leave, draw, delete and restore', () => {
     for (let i = 0; i < 3; i++) {
       parties.push((await createParty(host.token, `P${i}`)).body);
     }
-    await act('DELETE', parties[0].code, '', host.token);
+    await act(parties[0].code, 'delete', host.token);
     await createParty(host.token, 'Replacement');
-    expect(await act('POST', parties[0].code, '/restore', host.token)).toMatchObject({
+    expect(await act(parties[0].code, 'restore', host.token)).toMatchObject({
       status: 409, body: { error: { message: 'You can host up to 3 open parties at a time. Close or delete one of them to restore this one.' } },
     });
 
     await join(guest.token, parties[1].code);
-    expect((await act('POST', parties[1].code, '/draw', host.token)).status).toBe(200);
+    expect((await act(parties[1].code, 'draw', host.token)).status).toBe(200);
     await runInDurableObject(env.PARTY.getByName(parties[1].code), async (instance: PartyDO) => {
       (instance as any).setDeleted(Date.now());
     });
-    expect(await act('POST', parties[1].code, '/restore', host.token)).toMatchObject({ status: 200, body: { isClosed: true, deletedAt: null } });
+    expect(await act(parties[1].code, 'restore', host.token)).toMatchObject({ status: 200, body: { isClosed: true, deletedAt: null } });
   });
 });
 
@@ -586,7 +586,10 @@ describe('schemas', () => {
     expect(issue(bodies.magicLink, { email: 'nope' })).toEqual({ message: 'Must be a valid email', field: 'email' });
     expect(issue(bodies.magicLink, { email: 'a@example.com', party: 'abc' })).toEqual({ message: 'Invalid party code', field: 'party' });
     expect(issue(bodies.session, { token: 'x'.repeat(2049) })).toMatchObject({ field: 'token' });
-    expect(issue(bodies.joinParty, { name: 'x', password: 'p'.repeat(101) })).toMatchObject({ field: 'password' });
+    expect(issue(bodies.joinParty, { code: 'QWERTYUI', name: 'x', password: 'p'.repeat(101) })).toMatchObject({ field: 'password' });
+    expect(issue(bodies.joinParty, { name: 'x' })).toEqual({ message: 'Invalid party code', field: 'code' });
+    expect(issue(bodies.partyAction, { code: 'qwertyui', extra: 1 })).toMatchObject({ field: 'extra' });
+    expect(v.parse(bodies.partyAction, { code: ' qwertyui ' })).toEqual({ code: 'QWERTYUI' });
   });
 
   it('read page sizes and cursors from the query string', () => {
@@ -603,8 +606,8 @@ describe('schemas', () => {
   });
 
   it('read party codes, keys and bearer tokens', () => {
-    expect(v.parse(params.party, { code: 'qwertyui' })).toEqual({ code: 'QWERTYUI' });
-    expect(issue(params.party, { code: 'nope!' })).not.toBe('ok');
+    expect(v.parse(partyQuery, { code: 'qwertyui' })).toEqual({ code: 'QWERTYUI' });
+    expect(issue(partyQuery, { code: 'nope!' })).not.toBe('ok');
     expect(v.parse(headers.idempotency, { 'idempotency-key': undefined })).toEqual({});
     expect(issue(headers.idempotency, { 'idempotency-key': 'short' })).toMatchObject({ field: 'idempotency-key' });
     expect(v.parse(headers.bearer, 'Bearer a.b.c')).toBe('a.b.c');
@@ -736,7 +739,7 @@ describe('PartyDO joins that must check the session on their own', () => {
       });
       expect(result).toMatchObject({ ok: false, error: { code: 'unavailable' } });
     }
-    expect((await request('GET', `/v1/parties/${party.code}`, { token: host.token })).body.participantCount).toBe(1);
+    expect((await request('GET', `/v1/parties?code=${party.code}`, { token: host.token })).body.participantCount).toBe(1);
     warn.mockRestore();
   });
 
@@ -839,7 +842,7 @@ describe('the remaining refusals', () => {
       expect(await request('POST', '/v1/auth/magic-link', { raw })).toMatchObject({ status: 400, body: { error: { message: 'The request body must be a JSON object.' } } });
     }
     expect(await request('POST', '/v1/auth/magic-link', { key: 'bad key', body: { email: uniqueEmail() } })).toMatchObject({ status: 400, body: { error: { field: 'Idempotency-Key' } } });
-    const res = await (await import('src/index')).app.request('/v1/parties/QWERT', {}, testEnv());
+    const res = await (await import('src/index')).app.request('/v1/parties?code=QWERT', {}, testEnv());
     expect(res.status).toBe(404);
   });
 
@@ -902,14 +905,14 @@ describe('PartyDO with older data', () => {
       state.storage.sql.exec("INSERT INTO party VALUES ('p', 'OLDPA', 'Old schema', NULL, ?, 0, 1)", host.id);
       state.storage.sql.exec("INSERT INTO memberships VALUES (?, ?, 'Host', NULL, NULL, 1), ('m', NULL, 'No email', NULL, NULL, 2)", host.id, host.email);
     });
-    expect(await request('DELETE', '/v1/parties/OLDPA', { token: host.token })).toMatchObject({ status: 200, body: { code: 'OLDPA', deletedAt: expect.any(String) } });
-    expect((await request('POST', '/v1/parties/OLDPA/restore', { token: host.token })).status).toBe(200);
+    expect(await request('POST', '/v1/parties/delete', { body: { code: 'OLDPA' }, token: host.token })).toMatchObject({ status: 200, body: { code: 'OLDPA', deletedAt: expect.any(String) } });
+    expect((await request('POST', '/v1/parties/restore', { body: { code: 'OLDPA' }, token: host.token })).status).toBe(200);
   });
 
   it('erases a deleted party for good after a day, even one whose host had left or that predates tombstones', async () => {
     const host = await signIn();
     const { body: party } = await createParty(host.token, 'Old one');
-    await request('DELETE', `/v1/parties/${party.code}`, { token: host.token });
+    await request('POST', '/v1/parties/delete', { body: { code: party.code }, token: host.token });
     await runDurableObjectAlarm(env.PARTY.getByName(party.code));
     await runInDurableObject(env.PARTY.getByName(party.code), async (instance: PartyDO, state) => {
       state.storage.sql.exec('UPDATE party SET deleted_at = ?', Date.now() - DAY - 1000);
@@ -925,7 +928,7 @@ describe('PartyDO with older data', () => {
     const guest = await signIn();
     const { body: party } = await createParty(host.token, 'Moving');
     await join(guest.token, party.code);
-    await request('DELETE', `/v1/parties/${party.code}`, { token: host.token });
+    await request('POST', '/v1/parties/delete', { body: { code: party.code }, token: host.token });
     const stub = env.PARTY.getByName(party.code);
     expect(await stub.changeMemberEmail(guest.id, guest.email, 'moved-guest@example.com')).toBeNull();
     expect(await stub.changeMemberEmail(host.id, host.email, 'moved-host@example.com')).toMatchObject({ slug: party.code, deletedAt: expect.any(Number) });

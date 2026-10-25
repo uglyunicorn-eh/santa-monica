@@ -10,7 +10,7 @@ import { denied, request, signIn, testEnv, uniqueEmail } from './helpers';
 const create = async (token: string, password?: string) =>
   (await request('POST', '/v1/parties', { token, body: { name: 'Limits', ...(password ? { password } : {}) } })).body;
 const join = (token: string, code: string, password?: string, e = testEnv()) =>
-  request('POST', `/v1/parties/${code}/join`, { token, env: e, body: { name: 'Guest', ...(password ? { password } : {}) } });
+  request('POST', '/v1/parties/join', { token, env: e, body: { code: code, name: 'Guest', ...(password ? { password } : {}) } });
 
 describe('party codes', () => {
   it('gives new parties 8-letter codes and still accepts 5-letter ones', async () => {
@@ -143,10 +143,10 @@ describe('old 5-letter party codes', () => {
     const host = await signIn();
     const { code } = await create(host.token);
     const guest = await signIn();
-    expect(await request('GET', '/v1/parties/QWERT', { env: legacy })).toMatchObject({ status: 429, body: { error: { code: 'rate_limited' } } });
+    expect(await request('GET', '/v1/parties?code=QWERT', { env: legacy })).toMatchObject({ status: 429, body: { error: { code: 'rate_limited' } } });
     expect(await join(guest.token, 'QWERT', undefined, legacy)).toMatchObject({ status: 429, body: { error: { field: 'party' } } });
     expect(await request('POST', '/v1/auth/magic-link', { body: { email: uniqueEmail(), party: 'QWERT' }, env: legacy })).toMatchObject({ status: 429, body: { error: { field: 'party' } } });
-    expect((await request('GET', `/v1/parties/${code}`, { env: legacy })).status).toBe(200);
+    expect((await request('GET', `/v1/parties?code=${code}`, { env: legacy })).status).toBe(200);
     expect((await join(guest.token, code, undefined, legacy)).status).toBe(200);
   });
 });
