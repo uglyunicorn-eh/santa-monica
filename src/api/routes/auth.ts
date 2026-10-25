@@ -1,15 +1,18 @@
 import { Hono } from 'hono';
 import * as v from 'valibot';
 
+import { adoptTypedAccount } from 'src/api/account';
 import { action } from 'src/api/action';
 import { ApiEnv, clientIp, jwtFor } from 'src/api/context';
 import { fail } from 'src/api/errors';
 import { idempotencyKey, keyHash, readBody, send } from 'src/api/input';
-import { emailRateLimit } from 'src/api/rateLimit';
+import { admitLegacyCode, emailRateLimit } from 'src/api/rateLimit';
 import { accepted, bodies, session, tokens } from 'src/api/schemas';
 import { EnterRequestToken } from 'src/api/types';
 import { issueSession, sendRequestedMail } from 'src/api/users';
 import { renderSignIn } from 'src/mail';
+import { canonicalEmail } from 'src/utils/email';
+import { partyRef } from 'src/utils/logRef';
 import { annotate } from 'src/utils/tracing';
 
 /** Magic links work for five minutes. */
@@ -24,11 +27,11 @@ export const auth = new Hono<ApiEnv>();
  */
 auth.post('/magic-link', action('enterRequest', async c => {
   const { env } = c;
-  const { email, party } = await readBody(c, bodies.magicLink);
+  const { email, typed, party } = await readBody(c, bodies.magicLink);
   const key = idempotencyKey(c);
   const detail = party ?? '';
   const recipient = env.USER.getByName(email);
-  annotate({ 'party.code': party });
+  annotate({ 'party.ref': party && await partyRef(env, party) });
 
   if (key && await recipient.seenMailRequest(key, detail)) {
     annotate({ 'mail.request_repeated': true });
@@ -38,6 +41,9 @@ auth.post('/magic-link', action('enterRequest', async c => {
   annotate({ 'auth.rate_limited': rateLimited ?? false });
   if (rateLimited) {
     throw fail('rate_limited', "Whoa, that's a lot of magic links! Please wait a minute and try again.", 'email');
+  }
+  if (party) {
+    await admitLegacyCode(env, clientIp(c), party, 'party');
   }
   if (party && !await env.PARTY.getByName(party).view()) {
     throw fail('not_found', 'Invalid party code.', 'party');
@@ -49,7 +55,7 @@ auth.post('/magic-link', action('enterRequest', async c => {
 
   const jwt = jwtFor(env);
   const token = await jwt.issueToken<EnterRequestToken>('EnterRequest', {
-    email, jti: crypto.randomUUID(), ...(party ? { party } : {}),
+    email, ...(typed === email ? {} : { typed }), jti: crypto.randomUUID(), ...(party ? { party } : {}),
   }, { ttl: MAGIC_LINK_TTL });
   try {
     await sendRequestedMail(env, email, renderSignIn({ magicLink: `${env.FRONTEND_URL}/enter/${token}`, assetsUrl: env.PUBLIC_URL }), 'email', 'the magic link');
@@ -64,7 +70,8 @@ auth.post('/magic-link', action('enterRequest', async c => {
 
 /**
  * Signs in with a magic link. Each link works once; repeating the same request (same Idempotency-Key) signs in
- * again, so a retry after a dropped response doesn't strand the person.
+ * again, so a retry after a dropped response doesn't strand the person. An account still kept under the address as
+ * typed moves to the normalized one first (`adoptTypedAccount`).
  */
 auth.post('/session', action('enter', async c => {
   const { env } = c;
@@ -84,7 +91,12 @@ auth.post('/session', action('enter', async c => {
     throw fail('invalid_link', 'Invalid request token.', 'token');
   }
 
-  const { email, jti, exp } = link.output;
+  // Links sent before addresses were normalized carry the address as typed in `email`.
+  const { jti, exp, typed = link.output.email } = link.output;
+  const email = canonicalEmail(link.output.email);
+  if (typed !== email) {
+    annotate({ 'auth.typed_account': await adoptTypedAccount(env, typed, email, jti, exp * 1000, key) });
+  }
   const user = await env.USER.getByName(email).redeemMagicLink(email, jti, exp * 1000, key);
   annotate({ 'auth.magic_link': user ? 'redeemed' : 'already_used', 'user.id': user?.id });
   if (!user) {

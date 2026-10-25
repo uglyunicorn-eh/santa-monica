@@ -59,14 +59,18 @@ const checks: Check[] = [
     },
   },
   {
-    name: 'CORS preflight',
+    name: 'CORS allows only the listed origins',
     run: async () => {
-      const res = await fetch(new URL('/v1/parties', base), {
+      const preflight = (origin: string) => fetch(new URL('/v1/parties', base), {
         method: 'OPTIONS',
-        headers: { origin: 'https://gnomik.me', 'access-control-request-method': 'POST', 'access-control-request-headers': 'authorization,content-type,idempotency-key' },
+        headers: { origin, 'access-control-request-method': 'POST', 'access-control-request-headers': 'authorization,content-type,idempotency-key' },
       });
+      const res = await preflight('https://gnomik.me');
       const allowed = res.headers.get('access-control-allow-headers') ?? '';
-      assert(res.status === 204 && res.headers.get('access-control-allow-origin') === '*' && allowed.includes('idempotency-key'), `preflight answered HTTP ${res.status} (${allowed})`);
+      const origin = res.headers.get('access-control-allow-origin');
+      assert(res.status === 204 && origin === 'https://gnomik.me' && allowed.includes('idempotency-key'), `preflight answered HTTP ${res.status} (${origin}; ${allowed})`);
+      const other = (await preflight('https://evil.example')).headers.get('access-control-allow-origin');
+      assert(other === null, `another origin was allowed (${other})`);
     },
   },
   {

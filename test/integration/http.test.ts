@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import { MAX_BODY_BYTES } from 'src/api/limits';
 
-import { api, apiError, call, signIn, uniqueEmail } from './support';
+import { api, apiError, call, signIn, uniqueEmail, uniqueIp } from './support';
 
 describe('HTTP surface', () => {
   it('serves the app info with the usual headers', async () => {
@@ -27,9 +27,19 @@ describe('HTTP surface', () => {
       },
     });
     expect(res.status).toBe(204);
-    expect(res.headers.get('access-control-allow-origin')).toBe('*');
+    expect(res.headers.get('access-control-allow-origin')).toBe('https://gnomik.me');
     expect(res.headers.get('access-control-allow-methods')).toContain('PATCH');
     expect(res.headers.get('access-control-allow-headers')).toBe('authorization,content-type,idempotency-key');
+  });
+
+  it('lets only the listed origins read the answers', async () => {
+    const from = (origin: string) => api('/', { headers: { origin } });
+    expect((await from('https://gnomik.me')).headers.get('access-control-allow-origin')).toBe('https://gnomik.me');
+    expect((await from('https://pr-12.gnomik-me.pages.dev')).headers.get('access-control-allow-origin')).toBe('https://pr-12.gnomik-me.pages.dev');
+    for (const origin of ['https://evil.example', 'https://gnomik.me.evil.example', 'null']) {
+      const res = await from(origin);
+      expect([origin, res.status, res.headers.get('access-control-allow-origin')]).toEqual([origin, 200, null]);
+    }
   });
 
   it('answers 404 with the error shape for unknown routes, including the old GraphQL one', async () => {
@@ -109,5 +119,14 @@ describe('HTTP surface', () => {
       const res = await assets.fetch(`https://api.test/email/${file}`);
       expect([res.status, res.headers.get('content-type')]).toEqual([200, type]);
     }
+  });
+
+  it('allows ten lookups of old 5-letter codes a minute from one address; 8-letter codes have their own limit', async () => {
+    const ip = uniqueIp();
+    for (let i = 0; i < 10; i++) {
+      expect((await call('GET', '/v1/parties/QWERT', { ip })).status).toBe(404);
+    }
+    expect(await call('GET', '/v1/parties/QWERT', { ip })).toEqual({ status: 429, body: apiError('rate_limited', expect.any(String)) });
+    expect((await call('GET', '/v1/parties/QWERTYUI', { ip })).status).toBe(404);
   });
 });

@@ -1,6 +1,7 @@
 import { createExecutionContext, env, waitOnExecutionContext } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
 
+import { originAllowed } from 'src/api/cors';
 import { fail } from 'src/api/errors';
 import worker, { app } from 'src/index';
 
@@ -49,5 +50,34 @@ describe('Worker entry point', () => {
     await waitOnExecutionContext(ctx);
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ status: 'ok', name: 'santa-monica' });
+  });
+});
+
+describe('CORS', () => {
+  const allowed = 'https://gnomik.me, https://*.gnomik-me.pages.dev,,';
+
+  it('allows the listed origins and one-label subdomains of a wildcard', () => {
+    for (const origin of ['https://gnomik.me', 'https://abc123.gnomik-me.pages.dev', 'https://my-branch.gnomik-me.pages.dev']) {
+      expect([origin, originAllowed(origin, allowed)]).toEqual([origin, true]);
+    }
+  });
+
+  it('refuses everything else', () => {
+    for (const origin of [
+      'https://evil.example', 'http://gnomik.me', 'https://gnomik.me.evil.example', 'https://gnomik-me.pages.dev',
+      'https://a.b.gnomik-me.pages.dev', 'http://abc.gnomik-me.pages.dev', 'https://evil.com/.gnomik-me.pages.dev',
+      'https://.gnomik-me.pages.dev', 'null', '',
+    ]) {
+      expect([origin, originAllowed(origin, allowed)]).toEqual([origin, false]);
+    }
+  });
+
+  it('answers a preflight only for allowed origins', async () => {
+    const preflight = (origin: string) => app.request('/v1/parties', {
+      method: 'OPTIONS',
+      headers: { origin, 'access-control-request-method': 'POST', 'access-control-request-headers': 'idempotency-key' },
+    }, env);
+    expect((await preflight('https://gnomik.me')).headers.get('access-control-allow-origin')).toBe('https://gnomik.me');
+    expect((await preflight('https://evil.example')).headers.get('access-control-allow-origin')).toBeNull();
   });
 });

@@ -34,9 +34,16 @@ Plain JSON routes under `/v1` (`src/api/`). A signed-in request sends `Authoriza
 | `DELETE /v1/parties/:code` | yes | Deletes an open party (host only); restorable for a day |
 | `POST /v1/parties/:code/restore` | yes | Restores it |
 
+- **CORS**: only the origins in `ALLOWED_ORIGINS` (`wrangler.jsonc`) may call the API from a browser. Production allows `https://gnomik.me` and the Cloudflare Pages previews (`https://*.gnomik-me.pages.dev`; a `*` matches exactly one label); previews also allow `http://localhost:4321`–`4323`. Other origins get no CORS headers, so browsers keep the answers from them.
 - **Errors** always answer `{ "error": { "code", "message", "field" } }` with a matching status: 400 `invalid` (with the `field`), 400 `invalid_link`, 401 `unauthenticated`, 403 `forbidden`, 404 `not_found`, 409 `conflict` / `link_used` / `account_busy`, 429 `rate_limited`, 503 `unavailable` / `not_finished`, and 500 `internal` with an `errorId` (the error itself is only logged). **401 only ever means the session is missing, invalid or revoked**: the frontend signs out on it, so a bad emailed link never does that.
-- **Every input and output is a [valibot](https://valibot.dev) schema** (`src/api/schemas.ts`). Request bodies are strict objects of text fields, each trimmed and length-limited (names and phrases 100, emails 128 and lowercased, tokens 2048, party codes uppercased and checked); unknown fields, non-text values and anything over a limit are refused by name. Query strings (`first`, `after`), path params (`:code`), the `Idempotency-Key` and `Authorization` headers, and the payload of every token the API verifies have schemas too. The body as a whole is capped at 16 KB (`src/api/limits.ts`, the same numbers as santa-barbara's `src/limits.ts`). Responses are shaped from stored records by output schemas, which also check them on the way out: anything that doesn't fit, or isn't part of the answer, never leaves the Worker.
+- **Every input and output is a [valibot](https://valibot.dev) schema** (`src/api/schemas.ts`). Request bodies are strict objects of text fields, each trimmed and length-limited (names and phrases 100, emails 128 and normalized (see Email addresses below), tokens 2048, party codes uppercased and checked); unknown fields, non-text values and anything over a limit are refused by name. Query strings (`first`, `after`), path params (`:code`), the `Idempotency-Key` and `Authorization` headers, and the payload of every token the API verifies have schemas too. The body as a whole is capped at 16 KB (`src/api/limits.ts`, the same numbers as santa-barbara's `src/limits.ts`). Responses are shaped from stored records by output schemas, which also check them on the way out: anything that doesn't fit, or isn't part of the answer, never leaves the Worker.
 - **Every signed-in route checks the session's token version**, so tokens revoked by an email change or an account deletion stop working everywhere. The token's signature is checked once per request with no DO call; then either the route's own DO call checks the session (`updateName`, `startHosting`, `listParties`, the party's join, `beginMailRequest`), or `session.verify()` reads the user once (party view, leave, draw, delete). A revoked token looking up a party sees what anyone sees. `test/integration/revocation.test.ts` calls every route with a revoked token, and fails if a route is added without a row there.
+
+### Email addresses
+
+Accounts are keyed by the normalized address (`canonicalEmail` in `src/utils/email.ts`): trimmed and lowercased, and for Gmail also without dots or a `+tag` before the `@`, with `googlemail.com` read as `gmail.com`. Gmail delivers every such spelling to the same mailbox, so `John.Doe+santa@googlemail.com` and `johndoe@gmail.com` are one account, share one per-address rate limit, and get their mail at `johndoe@gmail.com`. Other providers' addresses are only lowercased.
+
+Accounts made before this are kept under the address as typed (lowercased), and the `UserDO`s can't be listed to move them up front. So they move on their owner's next sign-in: when the normalized address has no account and the typed one does, the account moves over the same way an email change moves it (`adoptTypedAccount` in `src/api/account.ts`), parties and all, and older session tokens stop working. Asking to change to an address whose account is still kept under the typed spelling answers that the address is taken.
 
 ### Idempotency
 
@@ -51,9 +58,10 @@ Every write is safe to repeat (a retry, a double click, a reload):
 A party code is the key to a party without a secret phrase, so codes are hard to guess and slow to try:
 
 - New parties get 8-letter codes (about 2·10^11 possibilities); parties created before keep their 5-letter codes.
-- Each client IP can look up 60 codes a minute (`PARTY_LOOKUP_RATE_LIMIT_IP`).
+- Each client IP can look up 60 codes a minute (`PARTY_LOOKUP_RATE_LIMIT_IP`), and only 10 of the old 5-letter codes (`LEGACY_CODE_LOOKUP_RATE_LIMIT_IP`). The stricter limit also covers joining a 5-letter party and asking for a sign-in link to one.
 - Each user can try to join 10 times a minute (`JOIN_RATE_LIMIT_USER`).
 - After 5 wrong secret phrases for a party within 15 minutes, that person has to wait out the 15 minutes (`MAX_PHRASE_GUESSES` in `src/do/PartyDO.ts`). This one is counted by the party itself, so it holds everywhere; Cloudflare's rate limits are counted per location.
+- After 20 wrong secret phrases for a party within 15 minutes from everyone together (`MAX_PARTY_PHRASE_GUESSES`), more wrong guesses are refused until the window passes, so many accounts can't share the guessing. The right phrase always gets in. Refused guesses aren't counted, so the window can't be kept open forever.
 
 One person can host at most 3 open parties at a time (`MAX_OPEN_HOSTED_PARTIES` in `src/api/routes/parties.ts`). Parties joined as a guest don't count. Closing or deleting a party frees its slot right away. Hosts can't leave their own party. The check and a slot for the new party are taken in one `UserDO.startHosting` call, so parallel creates can't get past the limit.
 
@@ -67,7 +75,7 @@ The host can delete a party until its dice are rolled: it leaves every member's 
 |---|---|---|
 | `POST /v1/auth/magic-link` | 0, or 2 with an `Idempotency-Key` | 0, or 1 with a party code |
 | `POST /v1/auth/session`, `GET /v1/me`, `PATCH /v1/me`, `GET /v1/me/parties`, `POST /v1/me/deletion` | 1 | 0 |
-| `POST /v1/me/email-change` | 2 | 0 |
+| `POST /v1/me/email-change` | 2, or 3 for a Gmail address typed differently from its normalized form | 0 |
 | `POST /v1/me/deletion/confirm` | 2 | 1 per party |
 | `POST /v1/me/email-change/confirm` | 4 | 1 per party |
 | `GET /v1/parties/:code` | 0 anonymous, 1 signed in (in parallel) | 1 |
@@ -76,6 +84,7 @@ The host can delete a party until its dice are rolled: it leaves every member's 
 | `leave`, `draw`, `DELETE` | 1 | 1 |
 | `restore` | 1 | 2 |
 
+- Signing in with a Gmail address typed differently from its normalized form costs 2 more `UserDO` calls, to look for an account kept under the typed address; moving one, once, costs what an email change does.
 - Each `UserDO` keeps a summary of the user's parties, so "my parties" is one call for any page size. Rows saved before summaries existed are filled in from their parties once.
 - A party updates its members' summaries through its outbox. All of a user's queued changes go out in one `UserDO.apply` call, built from the party's current state when it's sent.
 
@@ -98,6 +107,8 @@ npm test                         # unit + integration
 - **Pull requests** (`.github/workflows/preview.yml`): CI runs (typecheck, unit tests with 100% coverage, integration tests), then the PR is deployed to its own Worker, `gnomik-api-pr-<number>`, at `https://gnomik-api-pr-<number>.uglyunicorn.workers.dev`, smoke-tested, and the URL is posted on the PR. Each preview has its own empty Durable Objects, never production data. The preview Worker is deleted when the PR is closed.
 - **Merges to main** (`.github/workflows/deploy.yml`): CI runs, then production is deployed to `https://api.gnomik.me` and smoke-tested.
 - `.github/workflows/ci.yml` is the shared test job; it can also be run by hand.
+- Every third-party action is pinned to a commit SHA, with its version in a comment, so a moved or hijacked tag can't change what runs. Dependabot (`.github/dependabot.yml`) proposes updates weekly in one grouped PR, a week after each release.
+- `package.json` `overrides` pins `undici` and `zod` (pulled in by the Cloudflare toolchain) to versions without known advisories. Drop an override once the packages that bring them in depend on a fixed version.
 
 Emailed links point at `FRONTEND_URL` (`wrangler.jsonc`): `https://gnomik.me` in production, `http://localhost:4321` for previews, so a local frontend can follow links from a preview.
 
@@ -107,7 +118,7 @@ GitHub secrets: `CLOUDFLARE_API_TOKEN` (a Cloudflare API token from the "Edit Cl
 
 Production logs (every `console.*` call plus Cloudflare's invocation logs) and request traces are kept in Workers Logs and exported to Better Stack, source `gnomik-api`, by Cloudflare's OpenTelemetry export. No SDK is involved: the destinations `betterstack-logs` and `betterstack-traces` are defined in the Cloudflare dashboard (Workers & Pages → Observability → Telemetry) and referenced by name in `wrangler.jsonc`. Previews keep their logs in Workers Logs only.
 
-Every API route runs in its own span, `api.<action>` (for example `api.createParty`, `api.joinParty`, `api.party`), created with Workers' `tracing.enterSpan` (`src/utils/tracing.ts`). Spans record the action, the internal user id, the outcome (`api.status`, `api.error_code`, `api.user_error_fields`) and action details such as `party.code` or `auth.magic_link`, never emails or names. Durable Object calls made during an action show up as its child spans.
+Every API route runs in its own span, `api.<action>` (for example `api.createParty`, `api.joinParty`, `api.party`), created with Workers' `tracing.enterSpan` (`src/utils/tracing.ts`). Spans record the action, the internal user id, the outcome (`api.status`, `api.error_code`, `api.user_error_fields`) and action details such as `party.ref` or `auth.magic_link`, never emails, names or party codes. A party code lets anyone into a party without a secret phrase, so logs carry `party.ref` instead: the first 12 hex digits of an HMAC of the code (`src/utils/logRef.ts`), keyed by HKDF from `JWT_PRIVATE_KEY`. The same party always has the same ref, so its requests can be followed in the logs, but the code can't be worked out from it. Durable Object calls made during an action show up as its child spans.
 
 Unexpected errors return a 500 with an `errorId`; the same id is logged with the error (`message: "Unhandled error"`), so a reported error can be looked up in Better Stack.
 
