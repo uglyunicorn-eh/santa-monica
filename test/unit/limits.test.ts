@@ -1,46 +1,21 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 
-import { ApolloContext } from 'src/apollo/context';
-import mutations from 'src/apollo/mutations';
-import resolvers from 'src/apollo/resolvers';
-import { MAX_PARTY_LOOKUPS, PARTY_CODE_RE } from 'src/apollo/resolvers/party';
+import { MAX_BODY_BYTES, MAX_NAME_LENGTH } from 'src/api/limits';
+import { PARTY_CODE_RE } from 'src/api/schemas';
 import { MAX_PHRASE_GUESSES, PHRASE_GUESS_WINDOW_MS } from 'src/do/PartyDO';
-import { app } from 'src/index';
-import { createJwtHelpers } from 'src/utils/jwt';
 
-import { domain } from 'src/config.json';
+import { denied, request, signIn, testEnv, uniqueEmail } from './helpers';
 
-const jwt = createJwtHelpers({ privateKey: env.JWT_PRIVATE_KEY, issuer: domain });
-let counter = 0;
-
-const allow = { limit: async () => ({ success: true }) };
-const deny = { limit: async () => ({ success: false }) };
-
-async function signedIn(name = 'Person', overrides: Partial<ApolloContext> = {}): Promise<ApolloContext> {
-  const email = `limits-${Date.now().toString(36)}-${++counter}@example.com`;
-  const user = await env.USER.getByName(email).ensure(email);
-  await env.USER.getByName(email).apply([{ type: 'setName', name }]);
-  return {
-    env, clientIp: `203.0.113.${++counter % 250}`, userId: user.id, userEmail: email,
-    retrieveUser: async () => await env.USER.getByName(email).get(),
-    sendMail: async () => undefined,
-    ...jwt,
-    ...overrides,
-  };
-}
-
-const { parties } = mutations.Mutation;
-const { party } = resolvers.Query;
-const create = async (ctx: ApolloContext, password?: string) =>
-  (await parties(null, {}, ctx).createParty({ input: { name: 'Limits', password } }, ctx) as any).node;
-const join = async (ctx: ApolloContext, id: string, password?: string) =>
-  await parties(null, {}, ctx).joinParty({ input: { party: id, name: 'Guest', password } }, ctx) as any;
+const create = async (token: string, password?: string) =>
+  (await request('POST', '/v1/parties', { token, body: { name: 'Limits', ...(password ? { password } : {}) } })).body;
+const join = (token: string, code: string, password?: string, e = testEnv()) =>
+  request('POST', `/v1/parties/${code}/join`, { token, env: e, body: { name: 'Guest', ...(password ? { password } : {}) } });
 
 describe('party codes', () => {
   it('gives new parties 8-letter codes and still accepts 5-letter ones', async () => {
-    const host = await signedIn('Host');
-    const { code } = await create(host);
+    const host = await signIn();
+    const { code } = await create(host.token);
     expect(code).toMatch(/^[A-Z]{8}$/);
     expect(PARTY_CODE_RE.test(code)).toBe(true);
     expect(PARTY_CODE_RE.test('QWERT')).toBe(true);
@@ -50,52 +25,36 @@ describe('party codes', () => {
   });
 });
 
-describe('looking up parties', () => {
-  type LookupResult = { data: Record<string, unknown> | null; errors?: { message: string; extensions: { code: string } }[] };
-  const lookup = async (codes: string[], ip: string): Promise<LookupResult> => await (await app.request('/graph/', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'cf-connecting-ip': ip },
-    body: JSON.stringify({ query: `{ ${codes.map((code, i) => `p${i}: party(code: "${code}") { code }`).join(' ')} }` }),
-  }, env)).json() as LookupResult;
-
-  it(`answers at most ${MAX_PARTY_LOOKUPS} different codes per request`, async () => {
-    const codes = Array.from({ length: MAX_PARTY_LOOKUPS + 2 }, (_, i) => `QQQQ${'WERTYUIPASDF'[i]}`);
-    const res = await lookup(codes, '198.51.100.201');
-    expect(res.errors).toHaveLength(2);
-    expect(res.errors!.every(e => e.extensions.code === 'BAD_USER_INPUT' && /At most 10 parties/.test(e.message))).toBe(true);
+describe('request size', () => {
+  it('refuses a body over the limit, and takes one at the limit to validation', async () => {
+    const over = await request('POST', '/v1/auth/magic-link', { raw: 'x'.repeat(MAX_BODY_BYTES + 1) });
+    expect(over).toMatchObject({ status: 413, body: { error: { code: 'invalid', message: 'The request is too large.' } } });
+    const at = await request('POST', '/v1/auth/magic-link', { raw: 'x'.repeat(MAX_BODY_BYTES) });
+    expect(at).toMatchObject({ status: 400, body: { error: { message: 'The request body must be JSON.' } } });
   });
 
-  it('counts the same code asked for twice once', async () => {
-    const res = await lookup(Array.from({ length: MAX_PARTY_LOOKUPS * 2 }, () => 'QQQQQ'), '198.51.100.202');
-    expect(res.errors).toBeUndefined();
-  });
-
-  it('refuses lookups once the client is over its rate limit', async () => {
-    const ctx = await signedIn('Scanner', { env: { ...env, PARTY_LOOKUP_RATE_LIMIT_IP: deny } as typeof env });
-    await expect(party(null, { code: 'QQQQQ' }, ctx)).rejects.toMatchObject({
-      message: 'Too many party lookups. Please wait a minute and try again.',
-      extensions: { code: 'RATE_LIMITED' },
-    });
+  it('bounds names at the shared limit', async () => {
+    const who = await signIn();
+    expect((await request('PATCH', '/v1/me', { token: who.token, body: { name: 'x'.repeat(MAX_NAME_LENGTH) } })).status).toBe(200);
+    expect((await request('PATCH', '/v1/me', { token: who.token, body: { name: 'x'.repeat(MAX_NAME_LENGTH + 1) } })).status).toBe(400);
   });
 });
 
 describe('joining', () => {
   it('refuses joins once the user is over their rate limit', async () => {
-    const host = await signedIn('Host');
-    const { id } = await create(host);
-    const guest = await signedIn('Guest', { env: { ...env, JOIN_RATE_LIMIT_USER: deny } as typeof env });
-    expect(await join(guest, id)).toEqual({
-      status: 'error',
-      userErrors: [{ fieldName: 'party', messages: ["Whoa, that's a lot of tries! Please wait a minute and try again."] }],
+    const host = await signIn();
+    const { code } = await create(host.token);
+    const guest = await signIn();
+    expect(await join(guest.token, code, undefined, testEnv({ JOIN_RATE_LIMIT_USER: denied }))).toMatchObject({
+      status: 429, body: { error: { field: 'party', message: "Whoa, that's a lot of tries! Please wait a minute and try again." } },
     });
   });
 
   describe('secret phrase guesses', () => {
-    const guestWithoutRateLimit = () => signedIn('Guesser', { env: { ...env, JOIN_RATE_LIMIT_USER: allow } as typeof env });
-    const wrong = { status: 'error', userErrors: [{ fieldName: 'password', messages: [expect.stringMatching(/wrong secret phrase/)] }] };
+    const wrong = { status: 403, body: { error: { code: 'forbidden', field: 'password', message: expect.stringMatching(/wrong secret phrase/) } } };
     const locked = (minutes: number) => ({
-      status: 'error',
-      userErrors: [{ fieldName: 'password', messages: [`That's a lot of wrong guesses! Please ask your friend for the secret phrase and try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`] }],
+      status: 429,
+      body: { error: { code: 'rate_limited', field: 'password', message: `That's a lot of wrong guesses! Please ask your friend for the secret phrase and try again in ${minutes} minute${minutes === 1 ? '' : 's'}.` } },
     });
     /** Moves this person's first wrong guess back in time. */
     const firstGuessAgo = (code: string, memberId: string, ms: number) => runInDurableObject(env.PARTY.getByName(code), async (_i, state) => {
@@ -103,45 +62,45 @@ describe('joining', () => {
     });
 
     it(`allows ${MAX_PHRASE_GUESSES} wrong guesses, then makes the guesser wait, even with the right phrase`, async () => {
-      const host = await signedIn('Host');
-      const { id } = await create(host, 'mistletoe');
-      const guest = await guestWithoutRateLimit();
+      const host = await signIn();
+      const { code } = await create(host.token, 'mistletoe');
+      const guest = await signIn();
       for (let i = 0; i < MAX_PHRASE_GUESSES; i++) {
-        expect(await join(guest, id, `guess ${i}`)).toMatchObject(wrong);
+        expect(await join(guest.token, code, `guess ${i}`)).toMatchObject(wrong);
       }
-      expect(await join(guest, id, 'mistletoe')).toEqual(locked(15));
+      expect(await join(guest.token, code, 'mistletoe')).toMatchObject(locked(15));
 
       // Another person is not affected.
-      expect((await join(await guestWithoutRateLimit(), id, 'mistletoe')).status).toBe('ok');
+      expect((await join((await signIn()).token, code, 'mistletoe')).status).toBe(200);
     });
 
     it('lets the guesser try again once the window has passed, and forgets their guesses when they get it right', async () => {
-      const host = await signedIn('Host');
-      const { id, code } = await create(host, 'mistletoe');
-      const guest = await guestWithoutRateLimit();
+      const host = await signIn();
+      const { code } = await create(host.token, 'mistletoe');
+      const guest = await signIn(uniqueEmail());
       for (let i = 0; i < MAX_PHRASE_GUESSES; i++) {
-        await join(guest, id, `guess ${i}`);
+        await join(guest.token, code, `guess ${i}`);
       }
-      await firstGuessAgo(code, guest.userId!, PHRASE_GUESS_WINDOW_MS - 30_000);
-      expect(await join(guest, id, 'mistletoe')).toEqual(locked(1));
+      await firstGuessAgo(code, guest.id, PHRASE_GUESS_WINDOW_MS - 30_000);
+      expect(await join(guest.token, code, 'mistletoe')).toMatchObject(locked(1));
 
-      await firstGuessAgo(code, guest.userId!, PHRASE_GUESS_WINDOW_MS + 1000);
-      expect((await join(guest, id, 'mistletoe')).status).toBe('ok');
+      await firstGuessAgo(code, guest.id, PHRASE_GUESS_WINDOW_MS + 1000);
+      expect((await join(guest.token, code, 'mistletoe')).status).toBe(200);
       expect(await runInDurableObject(env.PARTY.getByName(code), async (_i, state) =>
         state.storage.sql.exec('SELECT COUNT(*) AS n FROM phrase_guesses').one().n)).toBe(0);
     });
 
     it('starts counting again after a quiet window', async () => {
-      const host = await signedIn('Host');
-      const { id, code } = await create(host, 'mistletoe');
-      const guest = await guestWithoutRateLimit();
+      const host = await signIn();
+      const { code } = await create(host.token, 'mistletoe');
+      const guest = await signIn();
       for (let i = 0; i < MAX_PHRASE_GUESSES - 1; i++) {
-        await join(guest, id, `guess ${i}`);
+        await join(guest.token, code, `guess ${i}`);
       }
-      await firstGuessAgo(code, guest.userId!, PHRASE_GUESS_WINDOW_MS + 1000);
+      await firstGuessAgo(code, guest.id, PHRASE_GUESS_WINDOW_MS + 1000);
       // The window passed, so this wrong guess is the first of a new one, not the fifth.
-      expect(await join(guest, id, 'nope')).toMatchObject(wrong);
-      expect(await join(guest, id, 'nope again')).toMatchObject(wrong);
+      expect(await join(guest.token, code, 'nope')).toMatchObject(wrong);
+      expect(await join(guest.token, code, 'nope again')).toMatchObject(wrong);
       expect(await runInDurableObject(env.PARTY.getByName(code), async (_i, state) =>
         state.storage.sql.exec('SELECT failures FROM phrase_guesses').one().failures)).toBe(2);
     });

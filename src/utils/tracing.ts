@@ -2,11 +2,6 @@ import { tracing } from 'cloudflare:workers';
 
 export type SpanAttributes = Record<string, string | number | boolean | undefined>;
 
-type ResultPayload = {
-  status?: string;
-  userErrors?: { fieldName: string | null }[] | null;
-};
-
 /**
  * Runs `fn` inside a custom span (Workers tracing, exported to Better Stack). Platform calls made inside, such as
  * Durable Object RPCs and fetches, become child spans. Thrown errors are recorded on the span and rethrown.
@@ -24,12 +19,15 @@ export function withSpan<T>(name: string, attributes: SpanAttributes, fn: (span:
   });
 }
 
-/** Records the outcome of a mutation payload: `api.status`, and the fields of any user errors. */
-export function recordResult(span: Span, payload: ResultPayload) {
-  const fields = (payload.userErrors ?? []).map(e => e.fieldName ?? '-');
+/**
+ * Records how an API action ended: `api.status` (ok or error), and for an expected failure its code and the field it
+ * is about (`api.user_error_fields`, "-" when it is about no field, as before).
+ */
+export function recordOutcome(span: Span, error?: { code: string; field?: string }) {
   span.setAttributes({
-    'api.status': payload.status ?? 'ok',
-    'api.user_error_fields': fields.length ? fields.join(',') : undefined,
+    'api.status': error ? 'error' : 'ok',
+    'api.error_code': error?.code,
+    'api.user_error_fields': error ? (error.field ?? '-') : undefined,
   });
 }
 

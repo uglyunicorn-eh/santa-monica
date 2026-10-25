@@ -1,12 +1,15 @@
-import { env, runDurableObjectAlarm } from 'cloudflare:test';
+import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { exports } from 'cloudflare:workers';
+import { expect } from 'vitest';
 
-import { EnterRequestToken, UserToken } from 'src/apollo/types';
+import { EnterRequestToken, UserToken } from 'src/api/types';
 import { createJwtHelpers } from 'src/utils/jwt';
 
 import { domain } from 'src/config.json';
 
 export const ORIGIN = 'https://api.test';
+/** Where emailed links point in tests (FRONTEND_URL in vitest.config.ts). */
+export const FRONTEND = 'https://gnomik.me';
 
 export type Mail = {
   messageId: string;
@@ -23,27 +26,38 @@ let counter = 0;
 /** A unique address per call, so tests never share users, rate-limit buckets or mailboxes. */
 export const uniqueEmail = (label = 'user') => `${label}-${Date.now().toString(36)}-${++counter}@example.com`;
 
-const uniqueIp = () => `10.${(counter >> 16) & 255}.${(counter >> 8) & 255}.${++counter & 255}`;
+export const uniqueIp = () => `10.${(counter >> 16) & 255}.${(counter >> 8) & 255}.${++counter & 255}`;
 
-/** Sends a request through the Worker's real entry point (Hono app, Apollo, Durable Objects). */
+/** A fresh Idempotency-Key. */
+export const newKey = () => crypto.randomUUID();
+
+/** Sends a request through the Worker's real entry point (Hono app, Durable Objects). */
 export async function api(path: string, init: RequestInit = {}): Promise<Response> {
   return await (exports as any).default.fetch(new Request(new URL(path, ORIGIN), init));
 }
 
-export type GqlOptions = { token?: string; ip?: string };
+export type CallOptions = { body?: unknown; token?: string; key?: string; ip?: string; headers?: Record<string, string> };
 
-export async function gql<T = any>(query: string, variables: Record<string, unknown> = {}, options: GqlOptions = {}) {
-  const res = await api('/graph', {
-    method: 'POST',
+/** Calls the API the way the frontend does and returns the status with the parsed JSON body. */
+export async function call<T = any>(method: string, path: string, options: CallOptions = {}): Promise<{ status: number; body: T }> {
+  const res = await api(path, {
+    method,
     headers: {
-      'content-type': 'application/json',
       'cf-connecting-ip': options.ip ?? uniqueIp(),
+      ...(options.body === undefined ? {} : { 'content-type': 'application/json' }),
       ...(options.token ? { authorization: `Bearer ${options.token}` } : {}),
+      ...(options.key ? { 'idempotency-key': options.key } : {}),
+      ...options.headers,
     },
-    body: JSON.stringify({ query, variables }),
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
   });
-  return await res.json() as { data: T; errors?: { message: string }[] };
+  return { status: res.status, body: await res.json() as T };
 }
+
+/** The error body an expected failure answers with. */
+export const apiError = (code: string, message?: string, field?: string) => ({
+  error: { code, ...(message === undefined ? {} : { message }), ...(field === undefined ? {} : { field }) },
+});
 
 /** All mail delivered to an address, oldest first. */
 export async function mailbox(email: string): Promise<Mail[]> {
@@ -53,42 +67,40 @@ export async function mailbox(email: string): Promise<Mail[]> {
   return mails.sort((a, b) => a.sentAt - b.sentAt);
 }
 
-export const ENTER_REQUEST = `
-  mutation ($email: String!, $party: String) {
-    auth { enterRequest(input: { email: $email, party: $party }) { status userErrors { fieldName messages } } }
-  }`;
-
-export const ENTER = `
-  mutation ($token: String!) {
-    auth { enter(input: { enterRequestToken: $token }) { status userErrors { fieldName messages } userToken user { id name } } }
-  }`;
-
-/** Extracts the magic-link token from a sign-in email (the link is https://gnomik.me/enter/<token>). */
-export function magicLinkToken(mail: Mail): string {
-  const match = /https:\/\/gnomik\.me\/enter\/([\w-]+\.[\w-]+\.[\w-]+)/.exec(mail.text ?? '');
+/** The token at the end of an emailed link to `path` (e.g. "enter", "profile/delete", "profile/email"). */
+export function linkToken(mail: Mail, path: string): string {
+  const match = new RegExp(`${FRONTEND.replace(/[.]/g, '\\.')}/${path}/([\\w-]+\\.[\\w-]+\\.[\\w-]+)`).exec(mail.text ?? '');
   if (!match) {
-    throw new Error('No magic link in the email');
+    throw new Error(`No ${path} link in the email`);
   }
   return match[1];
 }
 
+export const magicLinkToken = (mail: Mail) => linkToken(mail, 'enter');
+
+export const requestMagicLink = (email: string, options: CallOptions & { party?: string } = {}) =>
+  call('POST', '/v1/auth/magic-link', { ...options, body: { email, ...(options.party ? { party: options.party } : {}) } });
+
+export const redeem = (token: string, options: CallOptions = {}) =>
+  call('POST', '/v1/auth/session', { ...options, body: { token } });
+
 /** Signs in the way a person does: request a magic link, read the email, follow the link. */
-export async function signInWithMagicLink(email: string, party?: string) {
+export async function signIn(email: string, party?: string) {
   const before = (await mailbox(email)).length;
-  const requested = await gql(ENTER_REQUEST, { email, party });
-  if (requested.data.auth.enterRequest.status !== 'ok') {
-    throw new Error(`enterRequest failed: ${JSON.stringify(requested.data.auth.enterRequest.userErrors)}`);
+  const requested = await requestMagicLink(email, { party });
+  if (requested.status !== 202) {
+    throw new Error(`magic link failed: ${JSON.stringify(requested.body)}`);
   }
   const mails = await mailbox(email);
   if (mails.length !== before + 1) {
     throw new Error(`Expected one new sign-in email for ${email}, got ${mails.length - before}`);
   }
-  const entered = await gql(ENTER, { token: magicLinkToken(mails.at(-1)!) });
-  const { userToken, user } = entered.data.auth.enter;
-  return { email, token: userToken as string, id: user.id as string };
+  const entered = await redeem(magicLinkToken(mails.at(-1)!));
+  const { userToken, user } = entered.body;
+  return { email: email.toLowerCase(), token: userToken as string, id: user.id as string };
 }
 
-export type Person = Awaited<ReturnType<typeof signInWithMagicLink>>;
+export type Person = Awaited<ReturnType<typeof signIn>>;
 
 export const jwt = (privateKey: string = env.JWT_PRIVATE_KEY) => createJwtHelpers({ privateKey, issuer: domain });
 
@@ -111,42 +123,90 @@ export async function settleParty(code: string, attempts = 50) {
   return await stub.pendingOutbox();
 }
 
-export const PARTY_FIELDS = `
-  id name code password isJoined isHost isProtected isClosed participantCount participants target { id name }`;
+export type PartyJson = {
+  code: string;
+  name: string;
+  password: string | null;
+  isJoined: boolean;
+  isHost: boolean;
+  isProtected: boolean;
+  isClosed: boolean;
+  createdAt: string;
+  rolledAt: string | null;
+  deletedAt: string | null;
+  restorableUntil: string | null;
+  participantCount: number | null;
+  participants: string[] | null;
+  target: { name: string } | null;
+};
 
-export const CREATE_PARTY = `
-  mutation ($name: String!, $password: String) {
-    parties { createParty(input: { name: $name, password: $password }) { status userErrors { fieldName messages } node { ${PARTY_FIELDS} } } }
-  }`;
-
-export const JOIN_PARTY = `
-  mutation ($party: ID!, $name: String!, $password: String) {
-    parties { joinParty(input: { party: $party, name: $name, password: $password }) { status userErrors { fieldName messages } node { ${PARTY_FIELDS} } } }
-  }`;
-
-export const LEAVE_PARTY = `
-  mutation ($party: ID!) {
-    parties { leaveParty(input: { party: $party }) { status userErrors { fieldName messages } node { ${PARTY_FIELDS} } } }
-  }`;
-
-export const CLOSE_PARTY = `
-  mutation ($party: ID!) {
-    parties { closeParty(input: { party: $party }) { status userErrors { fieldName messages } node { ${PARTY_FIELDS} } } }
-  }`;
-
-export const PARTY = `query ($code: String!) { party(code: $code) { ${PARTY_FIELDS} } }`;
-
-export const PARTIES = `query ($first: Int) { parties(first: $first) { code name isHost isJoined } }`;
-
-export async function createParty(host: Person, name = 'Office party', password: string | null = null) {
-  const res = await gql(CREATE_PARTY, { name, ...(password === null ? {} : { password }) }, { token: host.token });
-  if (res.data?.parties.createParty.status !== 'ok') {
+export async function createParty(host: Person, name = 'Office party', password: string | null = null, key?: string) {
+  const res = await call<PartyJson>('POST', '/v1/parties', { token: host.token, key, body: { name, ...(password === null ? {} : { password }) } });
+  if (res.status !== 201) {
     throw new Error(`createParty failed: ${JSON.stringify(res)}`);
   }
-  return res.data.parties.createParty.node as { id: string; code: string; name: string };
+  return res.body;
 }
 
-export async function joinParty(person: Person, party: { id: string }, name: string, password: string | null = null) {
-  const res = await gql(JOIN_PARTY, { party: party.id, name, ...(password === null ? {} : { password }) }, { token: person.token });
-  return res.data.parties.joinParty;
+export const viewParty = (code: string, person?: { token: string }) => call<PartyJson>('GET', `/v1/parties/${code}`, { token: person?.token });
+
+export const joinParty = (person: { token: string }, party: { code: string }, name: string, password: string | null = null) =>
+  call<PartyJson>('POST', `/v1/parties/${party.code}/join`, { token: person.token, body: { name, ...(password === null ? {} : { password }) } });
+
+export const leaveParty = (person: { token: string }, party: { code: string }) =>
+  call<PartyJson>('POST', `/v1/parties/${party.code}/leave`, { token: person.token });
+
+export const drawParty = (person: { token: string }, party: { code: string }) =>
+  call<PartyJson>('POST', `/v1/parties/${party.code}/draw`, { token: person.token });
+
+export const deleteParty = (person: { token: string }, party: { code: string }) =>
+  call<PartyJson>('DELETE', `/v1/parties/${party.code}`, { token: person.token });
+
+export const restoreParty = (person: { token: string }, party: { code: string }) =>
+  call<PartyJson>('POST', `/v1/parties/${party.code}/restore`, { token: person.token });
+
+export const myParties = (person: { token?: string }, query = '') =>
+  call<{ items: PartyJson[]; hasMore: boolean; endCursor: string | null }>('GET', `/v1/me/parties${query}`, { token: person.token });
+
+export const me = (person: { token?: string }) => call('GET', '/v1/me', { token: person.token });
+
+/** Asks for the account deletion link and returns its token, read from the email. */
+export async function requestDeletion(person: Person, key?: string) {
+  const res = await call('POST', '/v1/me/deletion', { token: person.token, key });
+  expect(res).toMatchObject({ status: 202 });
+  return linkToken((await mailbox(person.email)).at(-1)!, 'profile/delete');
+}
+
+export const confirmDeletion = (token: string, options: CallOptions = {}) =>
+  call('POST', '/v1/me/deletion/confirm', { ...options, body: { token } });
+
+/** Asks to move the account to `newEmail` and returns the confirmation link's token, read from the new mailbox. */
+export async function requestEmailChange(person: Person, newEmail: string, key?: string) {
+  const res = await call('POST', '/v1/me/email-change', { token: person.token, key, body: { email: newEmail } });
+  expect(res).toMatchObject({ status: 202 });
+  return linkToken((await mailbox(newEmail)).at(-1)!, 'profile/email');
+}
+
+export const confirmEmailChange = (token: string, options: CallOptions = {}) =>
+  call('POST', '/v1/me/email-change/confirm', { ...options, body: { token } });
+
+/** Moves the person's account to a new address through the emails, and returns them as they are afterwards. */
+export async function changeEmail(person: Person, newEmail: string): Promise<Person> {
+  const token = await requestEmailChange(person, newEmail);
+  const res = await confirmEmailChange(token);
+  expect(res.status).toBe(200);
+  return { email: newEmail.toLowerCase(), token: res.body.userToken, id: res.body.user.id };
+}
+
+/** Deletes the person's account through the emails. */
+export async function deleteAccount(person: Person) {
+  const res = await confirmDeletion(await requestDeletion(person));
+  expect(res).toMatchObject({ status: 200 });
+}
+
+/** Moves a time column in a DO table `ms` into the past, for time windows (links, restore windows). */
+export async function ageRows(stub: DurableObjectStub, table: string, column: string, ms: number) {
+  await runInDurableObject(stub, async (_instance, state) => {
+    state.storage.sql.exec(`UPDATE ${table} SET ${column} = ${column} - ?`, ms);
+  });
 }
