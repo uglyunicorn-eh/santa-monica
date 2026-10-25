@@ -85,7 +85,7 @@ export type PartyResult =
 
 /** UserDO.startHosting: whether the user may host another party, holding a slot for it when they may. */
 export type HostingStart = UserRecord & { openHostedParties: number } & (
-  | { allowed: true; reservation: string }
+  | { allowed: true; reservation?: string; request?: { id: string; slug: string } }
   | { allowed: false }
 );
 

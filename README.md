@@ -30,6 +30,7 @@ Keeping Durable Object calls low:
 - Party history (`partyHistory`) is paged from the same summaries: one call per page. The summaries also carry when each party started and was drawn (`createdAt`, `rolledAt`).
 - Deleting an account or changing its email makes one call to each of the user's parties, plus two (deletion) or four (email change) to the user's `UserDO`s.
 - Revoked sessions (deleted accounts, see below) are not checked against the `UserDO` on every request, only where a call to it happens anyway: reading the profile (`user`), `createParty` (in `UserDO.startHosting`), `updateName`, and joining, where the party sends the session along with its update to the user, before storing the membership.
+- `createParty` is idempotent when given a `requestId`: `UserDO` remembers the id for ten minutes with the party id and code it picked, so a repeat returns that party instead of making another (and takes no extra hosting slot).
 - `test/unit/efficiency.test.ts` counts the calls each operation makes.
 
 ```bash

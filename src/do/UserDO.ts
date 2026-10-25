@@ -55,6 +55,8 @@ const ADDED_COLUMNS: Record<string, Record<string, string>> = {
 
 /** How long a slot held for a party being created lasts if the party never arrives (say, the create failed). */
 const HOST_RESERVATION_TTL_MS = 5 * 60 * 1000;
+/** How long a repeated createParty request with the same request id returns the party the first one created. */
+const CREATE_REQUEST_TTL_MS = 10 * 60 * 1000;
 
 /**
  * One instance per user, addressed by the lowercased email (`env.USER.getByName(email)`).
@@ -94,6 +96,12 @@ export class UserDO extends DurableObject<Env> {
         );
         CREATE TABLE IF NOT EXISTS host_reservations (
           id TEXT PRIMARY KEY,
+          expires_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS create_requests (
+          key TEXT PRIMARY KEY,
+          party_id TEXT NOT NULL,
+          slug TEXT NOT NULL,
           expires_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS used_magic_links (
@@ -268,23 +276,39 @@ export class UserDO extends DurableObject<Env> {
    * (`releaseHostSlot`) or after HOST_RESERVATION_TTL_MS. Returns null when there is no user or the session no longer
    * belongs to them.
    */
-  startHosting(limit: number, session: Session): HostingStart | null {
+  startHosting(limit: number, session: Session, request?: { key: string; id: string; slug: string }): HostingStart | null {
     const user = this.get();
     if (!sessionMatches(user, session)) {
       return null;
     }
     const now = Date.now();
     this.sql.exec('DELETE FROM host_reservations WHERE expires_at < ?', now);
+    this.sql.exec('DELETE FROM create_requests WHERE expires_at < ?', now);
     const open = this.sql
       .exec<{ n: number }>('SELECT COUNT(*) AS n FROM parties WHERE is_host = 1 AND NOT COALESCE(is_closed, 0) AND deleted_at IS NULL')
       .one().n;
     const held = this.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM host_reservations').one().n;
+    const repeated = request && this.sql
+      .exec<{ party_id: string; slug: string }>('SELECT party_id, slug FROM create_requests WHERE key = ?', request.key)
+      .toArray()[0];
+    if (repeated) {
+      // The same request again: it holds no new slot, and gets the party the first one made (or is making).
+      return { ...user!, openHostedParties: open + held, allowed: true, request: { id: repeated.party_id, slug: repeated.slug } };
+    }
     if (open + held >= limit) {
       return { ...user!, openHostedParties: open + held, allowed: false };
     }
     const reservation = newObjectId();
     this.sql.exec('INSERT INTO host_reservations (id, expires_at) VALUES (?, ?)', reservation, now + HOST_RESERVATION_TTL_MS);
-    return { ...user!, openHostedParties: open + held, allowed: true, reservation };
+    if (request) {
+      this.sql.exec('INSERT INTO create_requests (key, party_id, slug, expires_at) VALUES (?, ?, ?, ?)', request.key, request.id, request.slug, now + CREATE_REQUEST_TTL_MS);
+    }
+    return { ...user!, openHostedParties: open + held, allowed: true, reservation, request: request && { id: request.id, slug: request.slug } };
+  }
+
+  /** Points a create request at another party code, when the one it first took turned out to be in use. */
+  retargetRequest(key: string, slug: string): void {
+    this.sql.exec('UPDATE create_requests SET slug = ? WHERE key = ?', slug, key);
   }
 
   /**
