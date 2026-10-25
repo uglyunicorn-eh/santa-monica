@@ -1,12 +1,12 @@
 /**
- * Every shape the API reads or writes, as valibot schemas: request bodies, query strings, path params, headers, the
- * payloads of the tokens it verifies, and every response. Input schemas bound and clean what a client sends; output
+ * Every shape the API reads or writes, as valibot schemas: request bodies, query strings, headers, the payloads of the
+ * tokens it verifies, and every response. Input schemas bound and clean what a client sends; output
  * schemas turn stored records into the JSON the API answers with, and check it on the way out.
  */
 import * as v from 'valibot';
 
 import {
-  IDEMPOTENCY_KEY_RE, MAX_CURSOR_LENGTH, MAX_EMAIL_LENGTH, MAX_NAME_LENGTH, MAX_PAGE_SIZE, MAX_PHRASE_LENGTH,
+  DEFAULT_PAGE_SIZE, IDEMPOTENCY_KEY_RE, MAX_CURSOR_LENGTH, MAX_EMAIL_LENGTH, MAX_NAME_LENGTH, MAX_PAGE_SIZE, MAX_PHRASE_LENGTH,
   MAX_TOKEN_LENGTH, MIN_PAGE_SIZE,
 } from 'src/api/limits';
 import { RESTORE_WINDOW_MS } from 'src/do/PartyDO';
@@ -134,7 +134,7 @@ export const queries = {
       v.transform(Number),
       v.minValue(MIN_PAGE_SIZE, PAGE_SIZE),
       v.maxValue(MAX_PAGE_SIZE, PAGE_SIZE),
-    ), '10'),
+    ), String(DEFAULT_PAGE_SIZE)),
     after: v.optional(cursor),
   }),
 };
@@ -306,4 +306,3 @@ export const partyPage = v.object({
 /** "Accepted": the email is on its way, or the request was already done. */
 export const accepted = v.object({ ok: v.literal(true) });
 
-export type PartyJsonOut = v.InferOutput<typeof PartyJson>;

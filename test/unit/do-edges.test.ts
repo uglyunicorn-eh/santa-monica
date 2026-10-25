@@ -198,7 +198,8 @@ describe('UserDO', () => {
     await stub.ensure(email);
     expect(await stub.apply([{ type: 'setNameIfEmpty', name: 'First' }])).toMatchObject({ name: 'First' });
     expect(await stub.apply([{ type: 'setNameIfEmpty', name: 'Second' }])).toMatchObject({ name: 'First' });
-    expect(await stub.apply([{ type: 'setName', name: 'Edited' }])).toMatchObject({ name: 'Edited' });
+    expect(await stub.updateName('Edited', { userId: (await stub.get())!.id })).toMatchObject({ name: 'Edited' });
+    expect(await stub.apply([{ type: 'setNameIfEmpty', name: 'Third' }])).toMatchObject({ name: 'Edited' });
   });
 
   it('fills in the name only on the account that joined', async () => {
@@ -226,7 +227,7 @@ describe('UserDO', () => {
     const stub = env.USER.getByName(email);
     const user = await stub.ensure(email);
     await stub.apply([
-      { type: 'setName', name: 'Gone' },
+      { type: 'setNameIfEmpty', name: 'Gone' },
       { type: 'addParty', party: { slug: 'QQQQA', name: 'P', createdAt: 1, isHost: true, isProtected: false, isClosed: false, closedAt: null } },
     ]);
 
@@ -237,7 +238,7 @@ describe('UserDO', () => {
 
     // A late outbox delivery can't bring the record back.
     expect(await stub.apply([
-      { type: 'setName', name: 'Resurrected' },
+      { type: 'setNameIfEmpty', name: 'Resurrected' },
       { type: 'addParty', party: { slug: 'QQQQB', name: 'Late', createdAt: 2, isHost: false, isProtected: false, isClosed: false, closedAt: null } },
     ])).toBeNull();
     expect(await stub.listParties(10)).toEqual([]);
@@ -259,7 +260,6 @@ describe('UserDO', () => {
     expect(await stub.apply([
       { type: 'addParty', party: { slug: 'QQQQC', name: 'P', createdAt: 1, isHost: false, isProtected: false, isClosed: false, closedAt: null } },
       { type: 'setNameIfEmpty', name: 'Nobody' },
-      { type: 'setName', name: 'Nobody' },
     ])).toBeNull();
     expect(await stub.listParties(10)).toHaveLength(1);
     expect(await stub.ensure(email)).toMatchObject({ name: '' });
@@ -457,17 +457,5 @@ describe('PartyDO join session check', () => {
   it('skips the check for members without an email (legacy users)', async () => {
     const { stub } = await party();
     expect(await stub.join(member('nomail', null), 'No mail', null, {})).toMatchObject({ ok: true });
-  });
-
-  it('delivers an older queued user.setName as setNameIfEmpty', async () => {
-    const { stub } = await party();
-    const named = await signedUp('named');
-    const unnamed = await signedUp('unnamed');
-    await env.USER.getByName(named.email).apply([{ type: 'setName', name: 'Kept' }]);
-    await insertOutbox(stub, { kind: 'user.setName', email: named.email, name: 'Overwrite' });
-    await insertOutbox(stub, { kind: 'user.setName', email: unnamed.email, name: 'Filled' });
-    await runInDurableObject(stub, async (instance: PartyDO) => instance.alarm());
-    expect((await env.USER.getByName(named.email).get())!.name).toBe('Kept');
-    expect((await env.USER.getByName(unnamed.email).get())!.name).toBe('Filled');
   });
 });

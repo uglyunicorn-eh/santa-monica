@@ -69,7 +69,7 @@ export const sessionToken = (id: string, email: string, ver?: number) =>
 export async function signIn(email: string = uniqueEmail(), name = '') {
   const user = await env.USER.getByName(email).ensure(email);
   if (name) {
-    await env.USER.getByName(email).apply([{ type: 'setName', name }]);
+    await env.USER.getByName(email).apply([{ type: 'setNameIfEmpty', name }]);
   }
   const sub = nodeIdToStr({ kind: 'User', id: user.id });
   const token = await jwt().issueToken<UserToken>('UserToken', { sub, email, ver: user.tokenVersion }, { ttl: 3600 });

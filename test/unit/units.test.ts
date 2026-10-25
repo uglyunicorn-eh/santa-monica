@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { renderAccountDeletion, renderEmailChange, renderEmailChangeNotice, renderEmailTakenNotice, renderPartyNotification, renderSignIn } from 'src/mail';
-import { isObjectId, newObjectId, objectIdTime } from 'src/utils/ids';
+import { newObjectId } from 'src/utils/ids';
 import santaShuffle from 'src/utils/santaShuffle';
 import { nodeIdToStr, strToNodeId } from 'src/utils/strings/nodeId';
 
@@ -27,8 +27,8 @@ describe('santaShuffle', () => {
 describe('ids', () => {
   it('generates ObjectId-compatible ids that carry the creation time', () => {
     const id = newObjectId(1_700_000_000_000);
-    expect(isObjectId(id)).toBe(true);
-    expect(objectIdTime(id)).toBe(1_700_000_000_000);
+    expect(id).toMatch(/^[0-9a-f]{24}$/);
+    expect(parseInt(id.slice(0, 8), 16) * 1000).toBe(1_700_000_000_000);
   });
 
   it('round-trips node ids', () => {
