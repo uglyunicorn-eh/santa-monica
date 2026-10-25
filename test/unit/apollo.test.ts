@@ -478,6 +478,29 @@ describe('party mutations', () => {
       }
     });
 
+    it('does not make a new party when the request is repeated after its party was deleted', async () => {
+      const host = await signedIn('Host');
+      const { node } = await createParty(host, 'Gone', undefined, 'req-gone');
+      expect((await parties(null, {}, host).deleteParty({ input: { party: node.id } }, host) as any).status).toBe('ok');
+      expect(await createParty(host, 'Gone', undefined, 'req-gone')).toEqual({
+        status: 'error',
+        userErrors: [{ fieldName: null, messages: ['This party is no longer available. Please start a new one.'] }],
+      });
+      expect(await codes(host)).toEqual([node.code]); // still listed as deleted, restorable
+    });
+
+    it('does not pick a new code for a repeat that hits a collision', async () => {
+      const host = await signedIn('Host');
+      await createParty(host, 'First', undefined, 'req-x');
+      let calls = 0;
+      const collide = {
+        ...env,
+        PARTY: { getByName: () => (++calls, { create: async () => ({ ok: false, conflict: true }) }) },
+      } as unknown as typeof env;
+      expect(await createParty({ ...host, env: collide }, 'First', undefined, 'req-x')).toMatchObject({ status: 'error' });
+      expect(calls).toBe(1);
+    });
+
     it('keeps the request on the new code after a collision', async () => {
       const host = await signedIn('Host');
       let calls = 0;

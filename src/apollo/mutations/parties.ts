@@ -27,6 +27,14 @@ const tooManyOpenParties = (action: string) => ({
   }],
 });
 
+const repeatedRequestFailed = {
+  status: 'error' as const,
+  userErrors: [{
+    fieldName: null,
+    messages: ['This party is no longer available. Please start a new one.'],
+  }],
+};
+
 const notLoggedIn = (action: string) => ({
   status: 'error',
   userErrors: [{
@@ -92,6 +100,10 @@ const partyMutations = {
       if (user.request) {
         ({ id, slug } = user.request);
       }
+      // A repeated request holds no slot. It only gets the party the first one made: on a conflict that party is gone
+      // (deleted) or still being placed under another code by the first request, so a repeat never picks a new code.
+      const repeated = !user.reservation;
+      annotate({ 'party.request_repeated': repeated });
       for (let attempt = 0; attempt < SLUG_ATTEMPTS; attempt++) {
         if (attempt > 0) {
           slug = randomString(PARTY_CODE_LENGTH, PARTY_CODE_ALPHABET);
@@ -109,6 +121,9 @@ const partyMutations = {
         });
         annotate({ 'party.code_attempts': attempt + 1 });
         if ('conflict' in result) {
+          if (repeated) {
+            return repeatedRequestFailed;
+          }
           continue;
         }
         annotate({ 'party.code': slug });
