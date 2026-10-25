@@ -3,8 +3,9 @@ import { DurableObject } from 'cloudflare:workers';
 import { Env } from 'src/env';
 import { isPermanentMailError, renderPartyNotification, sendMail } from 'src/mail';
 import santaShuffle from 'src/utils/santaShuffle';
+import { sessionMatches } from 'src/utils/session';
 
-import { CreatePartyInput, Member, PartyResult, PartyView, UserUpdate } from './types';
+import { CreatePartyInput, Member, PartyResult, PartyView, UserRecord, UserUpdate } from './types';
 
 import { baseUrl } from 'src/config.json';
 
@@ -29,14 +30,22 @@ type MembershipRow = {
 
 // user.sync sends the member's current view of this party (added, closed, or removed if they left). It is computed at
 // delivery time, so it is always current and safe to repeat. user.addParty / user.removeParty are older forms of it.
+// user.setNameIfEmpty gives a new member's profile the name they joined with, unless they already have one.
+// user.setName is its older form, queued before joining stopped overwriting profile names; it is delivered the same way.
 type OutboxMessage =
   | { kind: 'user.sync' | 'user.addParty' | 'user.removeParty'; email: string }
-  | { kind: 'user.setName'; email: string; name: string }
+  | { kind: 'user.setNameIfEmpty' | 'user.setName'; email: string; name: string; memberId?: string }
   | { kind: 'mail.partyNotification'; email: string; partyName: string; slug: string };
 
 type OutboxRow = { id: number; payload: string; attempts: number; next_attempt_at: number };
 
 type OutboxBatch = { key: string; rows: OutboxRow[]; messages: OutboxMessage[] };
+
+/** What each user's UserDO reported back (see `UserDO.apply`) for the batches delivered in an outbox run, by email. */
+type DeliveredUsers = Map<string, UserRecord | null>;
+
+/** Checks the joining session against the user's record. Tokens without a version count as version 0. */
+export type JoinCheck = { tokenVersion?: number };
 
 const MAX_ATTEMPTS = 15;
 const MAX_BACKOFF_MS = 60 * 60 * 1000;
@@ -54,7 +63,7 @@ export class PartyDO extends DurableObject<Env> {
   private sql: SqlStorage;
   private schemaReady = false;
   // Outbox runs (inline and from the alarm) are chained so a message is never delivered twice at the same time.
-  private outboxRun: Promise<void> = Promise.resolve();
+  private outboxRun: Promise<unknown> = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -120,8 +129,8 @@ export class PartyDO extends DurableObject<Env> {
   }
 
   /** Delivers queued user updates now, so the caller's party list and name are current when the mutation returns. */
-  private async deliverUserUpdates() {
-    await this.runOutbox(message => message.kind.startsWith('user.'));
+  private async deliverUserUpdates(): Promise<DeliveredUsers> {
+    return await this.runOutbox(message => message.kind.startsWith('user.'));
   }
 
   /** The party as a member sees it in their list, or its removal if they are no longer a member. */
@@ -220,7 +229,13 @@ export class PartyDO extends DurableObject<Env> {
     return { ok: true, view: this.buildView(party, input.host.id) };
   }
 
-  async join(member: Member, name: string, password: string | null): Promise<PartyResult> {
+  /**
+   * Adds a member. With `check`, the session that asked is verified against the member's UserDO through the update
+   * this join sends it anyway (no extra call): if the account was deleted or the token revoked, the membership is
+   * undone and the join fails. While that runs, no other request reaches the party, so nobody sees the membership
+   * before it is confirmed. If the update can't be delivered right now (it waits for a retry), the join stands.
+   */
+  async join(member: Member, name: string, password: string | null, check?: JoinCheck): Promise<PartyResult> {
     const party = this.party();
     if (!party) {
       return fail('party', 'Party does not exist.');
@@ -239,18 +254,37 @@ export class PartyDO extends DurableObject<Env> {
       return fail('name', 'We were unable to get your name.');
     }
 
-    this.ctx.storage.transactionSync(() => {
+    const insert = () => this.ctx.storage.transactionSync(() => {
       this.sql.exec(
         'INSERT INTO memberships (member_id, member_email, name, joined_at) VALUES (?, ?, ?, ?)',
         member.id, member.email, displayName, Date.now(),
       );
       if (member.email) {
         this.enqueue({ kind: 'user.sync', email: member.email });
-        this.enqueue({ kind: 'user.setName', email: member.email, name: displayName });
+        this.enqueue({ kind: 'user.setNameIfEmpty', email: member.email, name: displayName, memberId: member.id });
       }
     });
-    await this.deliverUserUpdates();
-    return { ok: true, view: this.buildView(party, member.id) };
+
+    if (!check || !member.email) {
+      insert();
+      await this.deliverUserUpdates();
+      return { ok: true, view: this.buildView(party, member.id) };
+    }
+
+    const email = member.email;
+    return await this.ctx.blockConcurrencyWhile(async () => {
+      insert();
+      const delivered = await this.deliverUserUpdates();
+      if (delivered.has(email) && !sessionMatches(delivered.get(email), { userId: member.id, tokenVersion: check.tokenVersion })) {
+        this.ctx.storage.transactionSync(() => {
+          this.sql.exec('DELETE FROM memberships WHERE member_id = ?', member.id);
+          this.enqueue({ kind: 'user.sync', email });
+        });
+        await this.deliverUserUpdates();
+        return fail(null, 'You must be logged in before joining the party.');
+      }
+      return { ok: true, view: this.buildView(party, member.id) };
+    });
   }
 
   async leave(userId: string): Promise<PartyResult> {
@@ -314,41 +348,46 @@ export class PartyDO extends DurableObject<Env> {
   }
 
 
-  /** Delivers a batch: one email, or all queued changes for one user in a single UserDO call. */
-  private async deliver({ messages }: OutboxBatch) {
+  /**
+   * Delivers a batch: one email, or all queued changes for one user in a single UserDO call. For a user batch,
+   * returns what the UserDO reported back.
+   */
+  private async deliver({ messages }: OutboxBatch): Promise<{ email: string; user: UserRecord | null } | undefined> {
     const [first] = messages;
     if (first.kind === 'mail.partyNotification') {
-      return await sendMail(this.env, first.email, renderPartyNotification({
+      await sendMail(this.env, first.email, renderPartyNotification({
         party: { name: first.partyName, url: `${baseUrl}/p/${first.slug}/` },
         assetsUrl: this.env.PUBLIC_URL,
       }));
+      return;
     }
     const updates: UserUpdate[] = [];
     let synced = false;
     for (const message of messages) {
-      if (message.kind === 'user.setName') {
-        updates.push({ type: 'setName', name: message.name });
+      if (message.kind === 'user.setNameIfEmpty' || message.kind === 'user.setName') {
+        updates.push({ type: 'setNameIfEmpty', name: message.name, userId: message.memberId });
       } else if (!synced) {
         synced = true;
         updates.push(this.memberUpdate(first.email));
       }
     }
-    return await this.env.USER.getByName(first.email).apply(updates);
+    return { email: first.email, user: await this.env.USER.getByName(first.email).apply(updates) };
   }
 
   async alarm() {
     await this.runOutbox(() => true);
   }
 
-  private runOutbox(filter: (message: OutboxMessage) => boolean): Promise<void> {
+  private runOutbox(filter: (message: OutboxMessage) => boolean): Promise<DeliveredUsers> {
     const run = this.outboxRun.then(() => this.processOutbox(filter));
     this.outboxRun = run.catch(() => undefined);
     return run;
   }
 
-  private async processOutbox(filter: (message: OutboxMessage) => boolean) {
+  private async processOutbox(filter: (message: OutboxMessage) => boolean): Promise<DeliveredUsers> {
+    const delivered: DeliveredUsers = new Map();
     if (!this.hasSchema()) {
-      return;
+      return delivered;
     }
     const now = Date.now();
     const rows = this.sql
@@ -381,7 +420,10 @@ export class PartyDO extends DurableObject<Env> {
     await Promise.all([...batches.values()].map(async batch => {
       const ids = batch.rows.map(row => row.id);
       try {
-        await this.deliver(batch);
+        const result = await this.deliver(batch);
+        if (result) {
+          delivered.set(result.email, result.user);
+        }
         this.sql.exec(`DELETE FROM outbox WHERE id IN (${ids.map(() => '?').join(',')})`, ...ids);
       } catch (error) {
         const attempts = batch.rows[0].attempts + 1;
@@ -404,6 +446,7 @@ export class PartyDO extends DurableObject<Env> {
     if (next !== null) {
       await this.ctx.storage.setAlarm(Math.max(next, Date.now()));
     }
+    return delivered;
   }
 
   /** Number of undelivered outbox messages. Used by tests. */

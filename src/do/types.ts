@@ -3,6 +3,14 @@ export type UserRecord = {
   email: string;
   name: string;
   joined: number;
+  /** Goes up when the user's tokens are revoked. Session tokens carry the version they were issued with. */
+  tokenVersion: number;
+};
+
+/** Where to continue a party list from: the last row of the previous page. */
+export type PartyListCursor = {
+  createdAt: number;
+  slug: string;
 };
 
 /** A user's copy of a party summary, enough to list their parties without asking each party. */
@@ -26,7 +34,12 @@ export type UserPartyListItem = Omit<UserPartyRecord, 'isHost' | 'isProtected' |
 export type UserUpdate =
   | { type: 'addParty'; party: UserPartyRecord }
   | { type: 'removeParty'; slug: string }
-  | { type: 'setName'; name: string };
+  | { type: 'setName'; name: string }
+  /**
+   * Sent when the user joins a party: the name they joined with becomes their profile name only if they have none,
+   * and only on the account that joined (`userId`), not on a newer account under the same email.
+   */
+  | { type: 'setNameIfEmpty'; name: string; userId?: string };
 
 
 export type Member = {

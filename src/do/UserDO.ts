@@ -2,10 +2,11 @@ import { DurableObject } from 'cloudflare:workers';
 
 import { Env } from 'src/env';
 import { newObjectId } from 'src/utils/ids';
+import { Session, sessionMatches } from 'src/utils/session';
 
-import { UserPartyListItem, UserRecord, UserUpdate } from './types';
+import { PartyListCursor, UserPartyListItem, UserRecord, UserUpdate } from './types';
 
-type UserRow = { id: string; email: string; name: string; joined: number };
+type UserRow = { id: string; email: string; name: string; joined: number; token_version: number; deleted_at: number | null };
 type PartyRow = {
   slug: string;
   name: string;
@@ -17,10 +18,30 @@ type PartyRow = {
 
 const flag = (value: number | null) => (value === null ? null : Boolean(value));
 
+const toRecord = ({ id, email, name, joined, token_version }: UserRow): UserRecord =>
+  ({ id, email, name, joined, tokenVersion: token_version });
+
+// Columns added after the first release. Tables created before them get the columns on the next start.
+const ADDED_COLUMNS: Record<string, Record<string, string>> = {
+  user: {
+    token_version: 'INTEGER NOT NULL DEFAULT 0',
+    deleted_at: 'INTEGER',
+  },
+  parties: {
+    is_host: 'INTEGER',
+    is_protected: 'INTEGER',
+    is_closed: 'INTEGER',
+  },
+};
+
 /**
  * One instance per user, addressed by the lowercased email (`env.USER.getByName(email)`).
  * Holds the profile and the user's party list. The list carries a summary of each party (name, host, protected,
  * closed), kept up to date by `PartyDO`'s outbox through `apply`, so listing parties needs no call to any party.
+ *
+ * A deleted account leaves a tombstone: `get()` returns null and `apply` writes nothing, so late outbox deliveries
+ * can't bring the record back, and the token version is bumped so its session tokens stop working. The next sign-in
+ * with the same email starts a new account (new id) on top of it.
  */
 export class UserDO extends DurableObject<Env> {
   private sql: SqlStorage;
@@ -34,7 +55,9 @@ export class UserDO extends DurableObject<Env> {
           id TEXT PRIMARY KEY,
           email TEXT NOT NULL,
           name TEXT NOT NULL DEFAULT '',
-          joined INTEGER NOT NULL
+          joined INTEGER NOT NULL,
+          token_version INTEGER NOT NULL DEFAULT 0,
+          deleted_at INTEGER
         );
         CREATE TABLE IF NOT EXISTS parties (
           slug TEXT PRIMARY KEY,
@@ -49,29 +72,43 @@ export class UserDO extends DurableObject<Env> {
           expires_at INTEGER NOT NULL
         );
       `);
-      // Lists created before party summaries existed get the columns added; their rows stay null until refreshed.
-      const columns = new Set(this.sql.exec<{ name: string }>('PRAGMA table_info(parties)').toArray().map(c => c.name));
-      for (const column of ['is_host', 'is_protected', 'is_closed']) {
-        if (!columns.has(column)) {
-          this.sql.exec(`ALTER TABLE parties ADD COLUMN ${column} INTEGER`);
+      // Party rows stored before summaries existed stay null until refreshed; users get version 0, not deleted.
+      for (const [table, added] of Object.entries(ADDED_COLUMNS)) {
+        const columns = new Set(this.sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray().map(c => c.name));
+        for (const [column, definition] of Object.entries(added)) {
+          if (!columns.has(column)) {
+            this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+          }
         }
       }
     });
   }
 
   private row(): UserRow | null {
-    return this.sql.exec<UserRow>('SELECT id, email, name, joined FROM user LIMIT 1').toArray()[0] ?? null;
+    return this.sql.exec<UserRow>('SELECT id, email, name, joined, token_version, deleted_at FROM user LIMIT 1').toArray()[0] ?? null;
   }
 
-  /** Returns the user, creating it on the first sign-in. */
+  /** The live user record: null when there is none or the account was deleted. */
+  private live(): UserRecord | null {
+    const row = this.row();
+    return row && row.deleted_at === null ? toRecord(row) : null;
+  }
+
+  /** Returns the user, creating it on the first sign-in, or starting a new account after a deleted one. */
   ensure(email: string): UserRecord {
     const existing = this.row();
-    if (existing) {
-      return existing;
+    if (existing && existing.deleted_at === null) {
+      return toRecord(existing);
     }
-    const user = { id: newObjectId(), email, name: '', joined: Date.now() };
-    this.sql.exec('INSERT INTO user (id, email, name, joined) VALUES (?, ?, ?, ?)', user.id, user.email, user.name, user.joined);
-    return user;
+    const id = newObjectId();
+    const joined = Date.now();
+    if (existing) {
+      // The tombstone's token version is kept, so tokens of the deleted account stay revoked.
+      this.sql.exec("UPDATE user SET id = ?, email = ?, name = '', joined = ?, deleted_at = NULL", id, email, joined);
+      return { id, email, name: '', joined, tokenVersion: existing.token_version };
+    }
+    this.sql.exec('INSERT INTO user (id, email, name, joined) VALUES (?, ?, ?, ?)', id, email, '', joined);
+    return { id, email, name: '', joined, tokenVersion: 0 };
   }
 
   /**
@@ -87,12 +124,44 @@ export class UserDO extends DurableObject<Env> {
     return this.ensure(email);
   }
 
+  /** The user, or null when there is none or the account was deleted. */
   get(): UserRecord | null {
-    return this.row();
+    return this.live();
   }
 
-  /** Applies a batch of changes from a party, in order, in one transaction. Safe to retry. */
-  apply(updates: UserUpdate[]): void {
+  /**
+   * Sets the profile name, the default name for parties the user joins later. Parties already joined keep the
+   * name the user joined them with. Returns null, changing nothing, when the session no longer belongs to this user.
+   */
+  updateName(name: string, session: Session): UserRecord | null {
+    const user = this.live();
+    if (!sessionMatches(user, session)) {
+      return null;
+    }
+    this.sql.exec('UPDATE user SET name = ?', name);
+    return { ...user!, name };
+  }
+
+  /**
+   * Deletes the account, leaving a tombstone: the profile and party list are wiped, and every session token issued
+   * so far is revoked.
+   */
+  tombstone(): void {
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec("UPDATE user SET name = '', deleted_at = ?, token_version = token_version + 1", Date.now());
+      this.sql.exec('DELETE FROM parties');
+    });
+  }
+
+  /**
+   * Applies a batch of changes from a party, in order, in one transaction. Safe to retry.
+   * Writes nothing to a deleted account. Returns the user as it is afterwards (null if there is none or it was
+   * deleted), so a party can tell whether the session that joined it is still valid without another call.
+   */
+  apply(updates: UserUpdate[]): UserRecord | null {
+    if (this.row()?.deleted_at) {
+      return null;
+    }
     this.ctx.storage.transactionSync(() => {
       for (const update of updates) {
         switch (update.type) {
@@ -110,16 +179,29 @@ export class UserDO extends DurableObject<Env> {
           case 'setName':
             this.sql.exec('UPDATE user SET name = ?', update.name);
             break;
+          case 'setNameIfEmpty':
+            this.sql.exec("UPDATE user SET name = ? WHERE name = '' AND id = coalesce(?, id)", update.name, update.userId ?? null);
+            break;
         }
       }
     });
+    return this.live();
   }
 
-  listParties(first: number): UserPartyListItem[] {
-    return this.sql
-      .exec<PartyRow>(
-        'SELECT slug, name, created_at, is_host, is_protected, is_closed FROM parties ORDER BY created_at DESC LIMIT ?', first,
+  /**
+   * The user's parties, newest first. Parties created at the same time are ordered by slug, so `after` (the last
+   * row of the previous page) continues exactly where that page ended.
+   */
+  listParties(first: number, after?: PartyListCursor | null): UserPartyListItem[] {
+    const columns = 'slug, name, created_at, is_host, is_protected, is_closed';
+    const order = 'ORDER BY created_at DESC, slug DESC LIMIT ?';
+    const rows = after
+      ? this.sql.exec<PartyRow>(
+        `SELECT ${columns} FROM parties WHERE created_at < ? OR (created_at = ? AND slug < ?) ${order}`,
+        after.createdAt, after.createdAt, after.slug, first,
       )
+      : this.sql.exec<PartyRow>(`SELECT ${columns} FROM parties ${order}`, first);
+    return rows
       .toArray()
       .map(row => ({
         slug: row.slug,

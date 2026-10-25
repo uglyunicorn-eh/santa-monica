@@ -58,7 +58,8 @@ const partyMutations = {
 
     createParty: _(createPartyInputSchema, 'createParty')(async (input: CreatePartyInput, { env, userEmail, retrieveUser }: ApolloContext) => {
       annotate({ 'party.protected': Boolean(input.password) });
-      // The host's display name lives in their profile, so creating a party reads it (one UserDO call).
+      // The host's display name lives in their profile, so creating a party reads it (one UserDO call). retrieveUser
+      // also checks the session is still valid.
       const user = await retrieveUser();
       if (!user) {
         return notLoggedIn('creating');
@@ -82,18 +83,20 @@ const partyMutations = {
       throw new Error('Unable to generate a unique party code.');
     }),
 
-    joinParty: _(joinPartyInputSchema, 'joinParty')(async ({ party, name, password }: JoinPartyInput, { env, userId, userEmail }: ApolloContext) => {
+    joinParty: _(joinPartyInputSchema, 'joinParty')(async ({ party, name, password }: JoinPartyInput, { env, userId, userEmail, tokenVersion }: ApolloContext) => {
       const slug = partySlug(party);
       if (!slug) {
         return unknownParty;
       }
       annotate({ 'party.code': slug });
 
-      // The member comes from the session token and the name from the form: no need to read the profile.
+      // The member comes from the session token and the name from the form: no need to read the profile. The party
+      // checks the session against the user through the update it sends them anyway.
       return toPayload(await env.PARTY.getByName(slug).join(
         { id: userId!, email: userEmail!, name },
         name,
         password || null,
+        { tokenVersion },
       ));
     }),
 
