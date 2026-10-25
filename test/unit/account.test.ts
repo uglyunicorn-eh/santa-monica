@@ -434,6 +434,14 @@ describe('account email requests with a request id', () => {
     error.mockRestore();
   });
 
+  it('frees the id when the request throws, so retrying it sends the email', async () => {
+    const me = await signedIn('Me');
+    const broken = { ...me, retrieveUser: async () => { throw new Error('down'); } };
+    await expect(requestDeletion(broken, 'boom')).rejects.toThrow('down');
+    expect(await requestDeletion(me, 'boom')).toEqual(ok);
+    expect(me.sent).toHaveLength(1);
+  });
+
   it('forgets an id after ten minutes', async () => {
     const me = await signedIn('Me');
     expect(await requestDeletion(me, 'old')).toEqual(ok);
