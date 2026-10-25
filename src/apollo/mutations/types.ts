@@ -36,6 +36,11 @@ export type ConfirmTokenInput = {
 
 export type RequestEmailChangeInput = {
   email: string;
+  requestId?: string;
+}
+
+export type RequestAccountDeletionInput = {
+  requestId?: string;
 }
 
 export type EnterRequestInput = {

@@ -57,6 +57,8 @@ const ADDED_COLUMNS: Record<string, Record<string, string>> = {
 const HOST_RESERVATION_TTL_MS = 5 * 60 * 1000;
 /** How long a repeated createParty request with the same request id returns the party the first one created. */
 const CREATE_REQUEST_TTL_MS = 10 * 60 * 1000;
+/** How long a repeated account email request (deletion, email change) with the same request id sends nothing again. */
+const MAIL_REQUEST_TTL_MS = 10 * 60 * 1000;
 
 /**
  * One instance per user, addressed by the lowercased email (`env.USER.getByName(email)`).
@@ -102,6 +104,11 @@ export class UserDO extends DurableObject<Env> {
           key TEXT PRIMARY KEY,
           party_id TEXT NOT NULL,
           slug TEXT NOT NULL,
+          expires_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS mail_requests (
+          key TEXT PRIMARY KEY,
+          detail TEXT NOT NULL,
           expires_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS used_magic_links (
@@ -309,6 +316,27 @@ export class UserDO extends DurableObject<Env> {
   /** Points a create request at another party code, when the one it first took turned out to be in use. */
   retargetRequest(key: string, slug: string): void {
     this.sql.exec('UPDATE create_requests SET slug = ? WHERE key = ?', slug, key);
+  }
+
+  /**
+   * Claims an account email request by its request id. Returns false when the same request (same key and detail) was
+   * claimed in the last MAIL_REQUEST_TTL_MS, so the caller answers it without emailing again. The same key with another
+   * detail (say, a different new address) is a new request and replaces the old claim.
+   */
+  claimMailRequest(key: string, detail: string): boolean {
+    const now = Date.now();
+    this.sql.exec('DELETE FROM mail_requests WHERE expires_at < ?', now);
+    const claimed = this.sql.exec<{ detail: string }>('SELECT detail FROM mail_requests WHERE key = ?', key).toArray()[0];
+    if (claimed?.detail === detail) {
+      return false;
+    }
+    this.sql.exec('INSERT OR REPLACE INTO mail_requests (key, detail, expires_at) VALUES (?, ?, ?)', key, detail, now + MAIL_REQUEST_TTL_MS);
+    return true;
+  }
+
+  /** Frees a claimed request whose email didn't go out, so a retry of it sends one. */
+  releaseMailRequest(key: string, detail: string): void {
+    this.sql.exec('DELETE FROM mail_requests WHERE key = ? AND detail = ?', key, detail);
   }
 
   /**
