@@ -65,7 +65,23 @@ export const renderEmailTakenNotice = ({ email, assetsUrl }: { email: string; as
   return render(emailTakenNotice, { ...emailTakenNotice.vars, ...vars, body: fillBody(emailTakenNotice.body, vars) });
 };
 
+/**
+ * Whether `to` may get email from this Worker. `allowlist` is EMAIL_ALLOWLIST: comma-separated addresses and `@domain`
+ * entries. Public PR previews set it, so they can't be used to email just anyone; production doesn't.
+ */
+export function recipientAllowed(allowlist: string | undefined, to: string): boolean {
+  if (allowlist === undefined) {
+    return true;
+  }
+  const address = to.toLowerCase();
+  return allowlist.split(',').map(entry => entry.trim().toLowerCase()).filter(Boolean)
+    .some(entry => (entry.startsWith('@') ? address.endsWith(entry) : address === entry));
+}
+
 export const sendMail = async (env: Env, to: string, message: MailMessage) => {
+  if (!recipientAllowed(env.EMAIL_ALLOWLIST, to)) {
+    throw Object.assign(new Error('This environment only emails the addresses in EMAIL_ALLOWLIST.'), { code: 'E_RECIPIENT_NOT_ALLOWED' });
+  }
   await env.EMAIL.send({
     to,
     from: { email: from.email, name: from.name },
@@ -82,6 +98,7 @@ export const sendMail = async (env: Env, to: string, message: MailMessage) => {
 export const isPermanentMailError = (error: unknown) => {
   const code = (error as { code?: string } | null)?.code;
   return code === 'E_RECIPIENT_SUPPRESSED'
+    || code === 'E_RECIPIENT_NOT_ALLOWED'
     || code === 'E_VALIDATION_ERROR'
     || code === 'E_FIELD_MISSING';
 };

@@ -18,6 +18,11 @@ export interface Env {
   FRONTEND_URL: string;
   /** Browser origins allowed to call the API (CORS): comma-separated, `https://*.domain` for subdomains. */
   ALLOWED_ORIGINS: string;
+  /**
+   * Who may get email: comma-separated addresses and `@domain` entries. Set for PR previews only, which are public;
+   * unset means anyone (production).
+   */
+  EMAIL_ALLOWLIST?: string;
   /** P-256 private key (PKCS#8 PEM) for ES256 tokens. The frontend verifies tokens with the matching public key. */
   JWT_PRIVATE_KEY: string;
 }

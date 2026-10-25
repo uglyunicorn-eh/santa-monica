@@ -89,7 +89,8 @@ export type PartyResult =
 /** UserDO.startHosting: whether the user may host another party, holding a slot for it when they may. */
 export type HostingStart = UserRecord & { openHostedParties: number } & (
   | { allowed: true; reservation?: string; request?: { id: string; slug: string } }
-  | { allowed: false }
+  /** `open`: too many open parties right now; `new`: too many parties started in the last day. */
+  | { allowed: false; limit: 'open' | 'new' }
 );
 
 /** What `PartyDO.forgetMember` did for a deleted account. */

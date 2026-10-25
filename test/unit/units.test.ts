@@ -19,6 +19,19 @@ describe('santaShuffle', () => {
     }
   });
 
+  it('makes every possible draw equally likely', () => {
+    // Four people have 9 possible draws. 18,000 draws give each about 2,000; the old algorithm gave one of them 25%.
+    const counts = new Map<string, number>();
+    for (let run = 0; run < 18_000; run++) {
+      const key = santaShuffle([0, 1, 2, 3]).map(d => d.target).join('');
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    expect(counts.size).toBe(9);
+    for (const [draw, n] of counts) {
+      expect([draw, Math.abs(n - 2000) < 300]).toEqual([draw, true]);
+    }
+  });
+
   it('refuses a draw for fewer than two people', () => {
     expect(() => santaShuffle([1])).toThrow();
   });
