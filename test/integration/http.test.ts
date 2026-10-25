@@ -52,7 +52,7 @@ describe('HTTP surface', () => {
     }
   });
 
-  it('takes the party code from the query string only, so request logs never record it', async () => {
+  it('never takes the party code from the path, so request logs never record it: writes take it in the body', async () => {
     const host = await signIn(uniqueEmail('host'));
     const party = (await call('POST', '/v1/parties', { token: host.token, body: { name: 'Query' } })).body;
     expect((await call('GET', `/v1/parties?code=${party.code.toLowerCase()}`)).body).toMatchObject({ code: party.code });
@@ -62,6 +62,12 @@ describe('HTTP surface', () => {
       const res = await call(method, `/v1/parties/${party.code}${path}`, { token: host.token, body: method === 'POST' ? {} : undefined });
       expect([method, path, res.status, res.body.error.code]).toEqual([method, path, 404, 'not_found']);
     }
+    expect((await call('DELETE', `/v1/parties?code=${party.code}`, { token: host.token })).status).toBe(404);
+    // A code in the query string of a write is not read: the body must carry it.
+    expect(await call('POST', `/v1/parties/draw?code=${party.code}`, { token: host.token, body: {} })).toMatchObject({
+      status: 400, body: apiError('invalid', 'Invalid party code', 'code'),
+    });
+    expect((await call('POST', '/v1/parties/delete', { token: host.token, body: { code: party.code.toLowerCase() } })).status).toBe(200);
   });
 
   it('accepts a trailing slash on the routes', async () => {
@@ -108,8 +114,9 @@ describe('HTTP surface', () => {
       ['POST', '/v1/me/deletion/confirm', { token: long(2049) }],
       ['POST', '/v1/parties', { name: long(101) }],
       ['POST', '/v1/parties', { name: 'Ok', password: long(101) }],
-      ['POST', '/v1/parties/join?code=QWERTYUI', { name: long(101) }],
-      ['POST', '/v1/parties/join?code=QWERTYUI', { name: 'Ok', password: long(101) }],
+      ['POST', '/v1/parties/join', { code: 'QWERTYUI', name: long(101) }],
+      ['POST', '/v1/parties/join', { code: 'QWERTYUI', name: 'Ok', password: long(101) }],
+      ['POST', '/v1/parties/leave', { code: 'Q'.repeat(101) }],
     ];
     for (const [method, path, body] of cases) {
       const res = await call(method, path, { token: person.token, body });

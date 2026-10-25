@@ -27,10 +27,10 @@ const ROUTES: Record<string, { revoked: 'unauthenticated' | 'anonymous' | 'no se
   'GET /parties': { revoked: 'anonymous', call: (f, token) => viewParty(f.drawn.code, { token }) },
   'POST /parties': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/parties', { token, body: { name: 'Ghost party' } }) },
   'POST /parties/join': { revoked: 'unauthenticated', call: (f, token) => joinParty({ token }, f.open, 'Ghost') },
-  'POST /parties/leave': { revoked: 'unauthenticated', call: (f, token) => call('POST', `/v1/parties/leave?code=${f.party.code}`, { token }) },
-  'POST /parties/draw': { revoked: 'unauthenticated', call: (f, token) => call('POST', `/v1/parties/draw?code=${f.party.code}`, { token }) },
-  'DELETE /parties': { revoked: 'unauthenticated', call: (f, token) => call('DELETE', `/v1/parties?code=${f.party.code}`, { token }) },
-  'POST /parties/restore': { revoked: 'unauthenticated', call: (f, token) => call('POST', `/v1/parties/restore?code=${f.party.code}`, { token }) },
+  'POST /parties/leave': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/parties/leave', { body: { code: f.party.code }, token }) },
+  'POST /parties/draw': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/parties/draw', { body: { code: f.party.code }, token }) },
+  'POST /parties/delete': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/parties/delete', { body: { code: f.party.code }, token }) },
+  'POST /parties/restore': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/parties/restore', { body: { code: f.party.code }, token }) },
 };
 
 /** Someone who hosts an open party with a guest, is a guest in another open party, and has a drawn party with a target. */

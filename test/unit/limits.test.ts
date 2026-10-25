@@ -10,7 +10,7 @@ import { denied, request, signIn, testEnv, uniqueEmail } from './helpers';
 const create = async (token: string, password?: string) =>
   (await request('POST', '/v1/parties', { token, body: { name: 'Limits', ...(password ? { password } : {}) } })).body;
 const join = (token: string, code: string, password?: string, e = testEnv()) =>
-  request('POST', `/v1/parties/join?code=${code}`, { token, env: e, body: { name: 'Guest', ...(password ? { password } : {}) } });
+  request('POST', '/v1/parties/join', { token, env: e, body: { code: code, name: 'Guest', ...(password ? { password } : {}) } });
 
 describe('party codes', () => {
   it('gives new parties 8-letter codes and still accepts 5-letter ones', async () => {

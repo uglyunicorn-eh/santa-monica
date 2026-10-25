@@ -151,19 +151,19 @@ export async function createParty(host: Person, name = 'Office party', password:
 export const viewParty = (code: string, person?: { token: string }) => call<PartyJson>('GET', `/v1/parties?code=${code}`, { token: person?.token });
 
 export const joinParty = (person: { token: string }, party: { code: string }, name: string, password: string | null = null) =>
-  call<PartyJson>('POST', `/v1/parties/join?code=${party.code}`, { token: person.token, body: { name, ...(password === null ? {} : { password }) } });
+  call<PartyJson>('POST', '/v1/parties/join', { token: person.token, body: { code: party.code, name, ...(password === null ? {} : { password }) } });
 
 export const leaveParty = (person: { token: string }, party: { code: string }) =>
-  call<PartyJson>('POST', `/v1/parties/leave?code=${party.code}`, { token: person.token });
+  call<PartyJson>('POST', '/v1/parties/leave', { body: { code: party.code }, token: person.token });
 
 export const drawParty = (person: { token: string }, party: { code: string }) =>
-  call<PartyJson>('POST', `/v1/parties/draw?code=${party.code}`, { token: person.token });
+  call<PartyJson>('POST', '/v1/parties/draw', { body: { code: party.code }, token: person.token });
 
 export const deleteParty = (person: { token: string }, party: { code: string }) =>
-  call<PartyJson>('DELETE', `/v1/parties?code=${party.code}`, { token: person.token });
+  call<PartyJson>('POST', '/v1/parties/delete', { body: { code: party.code }, token: person.token });
 
 export const restoreParty = (person: { token: string }, party: { code: string }) =>
-  call<PartyJson>('POST', `/v1/parties/restore?code=${party.code}`, { token: person.token });
+  call<PartyJson>('POST', '/v1/parties/restore', { body: { code: party.code }, token: person.token });
 
 export const myParties = (person: { token?: string }, query = '') =>
   call<{ items: PartyJson[]; hasMore: boolean; endCursor: string | null }>('GET', `/v1/me/parties${query}`, { token: person.token });

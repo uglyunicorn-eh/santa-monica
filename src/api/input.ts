@@ -37,7 +37,7 @@ export async function readBody<S extends v.GenericSchema>(c: ApiContext, schema:
 /** The query string, read against a query schema. */
 export const readQuery = <S extends v.GenericSchema>(c: ApiContext, schema: S): v.InferOutput<S> => check(schema, c.req.query());
 
-/** The party a party route is about, from `?code=`. A missing or malformed code names a party that doesn't exist. */
+/** The party `GET /v1/parties` is about, from `?code=`. A missing or malformed code names a party that doesn't exist. */
 export const readPartyCode = (c: ApiContext): string =>
   check(partyQuery, c.req.query(), 'not_found', 'Party does not exist.', 'party').code;
 

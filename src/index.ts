@@ -18,7 +18,7 @@ app.use(secureHeaders({ removePoweredBy: false }));
 app.use(cors({
   // Only the frontend (ALLOWED_ORIGINS) may call the API from a browser.
   origin: (origin, c) => (originAllowed(origin, c.env.ALLOWED_ORIGINS) ? origin : null),
-  allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowMethods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
   // Browsers only send these after a preflight that lists them.
   allowHeaders: ['authorization', 'content-type', 'idempotency-key'],
   maxAge: 86400,

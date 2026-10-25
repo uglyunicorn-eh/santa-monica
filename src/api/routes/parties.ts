@@ -140,8 +140,7 @@ parties.post('/', requireSession, action('createParty', async c => {
  * in the call it makes to the user anyway. Joining twice keeps one membership.
  */
 parties.post('/join', requireSession, action('joinParty', async c => {
-  const code = readPartyCode(c);
-  const { name, password } = await readBody(c, bodies.joinParty);
+  const { code, name, password } = await readBody(c, bodies.joinParty);
   const s = session(c);
   annotate({ 'party.ref': await partyRef(c.env, code) });
   // Joining with a code is how a party without a secret phrase is reached, so attempts are limited per user.
@@ -161,7 +160,7 @@ parties.post('/join', requireSession, action('joinParty', async c => {
 
 /** Leaves a party. Leaving one you're not in answers with the party as it is. */
 parties.post('/leave', requireSession, action('leaveParty', async c => {
-  const code = readPartyCode(c);
+  const { code } = await readBody(c, bodies.partyAction);
   annotate({ 'party.ref': await partyRef(c.env, code) });
   const user = await verified(c);
   return sendParty(c, await c.env.PARTY.getByName(code).leave(user.id));
@@ -169,15 +168,15 @@ parties.post('/leave', requireSession, action('leaveParty', async c => {
 
 /** Rolls the dice (host only). A repeat answers with the same draw; nothing is drawn or mailed again. */
 parties.post('/draw', requireSession, action('closeParty', async c => {
-  const code = readPartyCode(c);
+  const { code } = await readBody(c, bodies.partyAction);
   annotate({ 'party.ref': await partyRef(c.env, code) });
   const user = await verified(c);
   return sendParty(c, await c.env.PARTY.getByName(code).close(user.id));
 }));
 
 /** Deletes an open party (host only); it can be restored for a day. A repeat answers with the deleted party. */
-parties.delete('/', requireSession, action('deleteParty', async c => {
-  const code = readPartyCode(c);
+parties.post('/delete', requireSession, action('deleteParty', async c => {
+  const { code } = await readBody(c, bodies.partyAction);
   annotate({ 'party.ref': await partyRef(c.env, code) });
   const user = await verified(c);
   return sendParty(c, await c.env.PARTY.getByName(code).delete(user.id));
@@ -189,7 +188,7 @@ parties.delete('/', requireSession, action('deleteParty', async c => {
  * party as it is, holding no slot.
  */
 parties.post('/restore', requireSession, action('restoreParty', async c => {
-  const code = readPartyCode(c);
+  const { code } = await readBody(c, bodies.partyAction);
   annotate({ 'party.ref': await partyRef(c.env, code) });
   const s = session(c);
   const stub = c.env.PARTY.getByName(code);
