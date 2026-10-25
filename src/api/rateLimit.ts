@@ -1,5 +1,21 @@
 import { fail } from 'src/api/errors';
+import type { MailQuota } from 'src/do/UserDO';
 import { Env } from 'src/env';
+
+/**
+ * At most this many emails to one address per hour: sign-in links, account links, email-change links. Counted
+ * exactly by the address's UserDO (`MAIL_QUOTA_WINDOW_MS`), on top of the approximate per-minute limits below. Kept
+ * low, but not so low that someone who knows an address can lock its owner out for long: at worst for an hour.
+ */
+export const EMAILS_PER_ADDRESS_PER_HOUR = 6;
+
+export const ADDRESS_QUOTA: MailQuota = { limit: EMAILS_PER_ADDRESS_PER_HOUR };
+
+/** Counted against the address, but never refused: the notice to the current address about an email change. */
+export const NOTICE_QUOTA: MailQuota = { limit: EMAILS_PER_ADDRESS_PER_HOUR, always: true };
+
+export const tooManyForAddress = (field?: string) =>
+  fail('rate_limited', "That's a lot of emails for this address. Please try again in an hour.", field);
 
 /**
  * The limits for anything that sends an email (magic links, account confirmations): per client IP and per

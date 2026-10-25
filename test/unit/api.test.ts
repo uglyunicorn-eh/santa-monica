@@ -729,10 +729,10 @@ describe('UserDO request ids and sessions', () => {
     const who = await signIn();
     const stub = env.USER.getByName(who.email);
     const session = { userId: who.id, tokenVersion: 0 };
-    expect(await stub.beginMailRequest({ userId: who.id, tokenVersion: 1 }, 'k', '')).toBeNull();
-    expect(await stub.beginMailRequest(session, undefined, '')).toMatchObject({ id: who.id });
-    expect(await stub.beginMailRequest(session, 'k', '')).toMatchObject({ id: who.id });
-    expect(await stub.beginMailRequest(session, 'k', '')).toBe('repeat');
+    expect(await stub.beginMailRequest({ userId: who.id, tokenVersion: 1 }, 'k', '', { limit: 6 })).toBeNull();
+    expect(await stub.beginMailRequest(session, undefined, '', { limit: 6 })).toMatchObject({ id: who.id });
+    expect(await stub.beginMailRequest(session, 'k', '', { limit: 6 })).toMatchObject({ id: who.id });
+    expect(await stub.beginMailRequest(session, 'k', '', { limit: 6 })).toBe('repeat');
     expect(await stub.seenMailRequest('k', '')).toBe(true);
     expect(await stub.seenMailRequest('k', 'other')).toBe(false);
   });

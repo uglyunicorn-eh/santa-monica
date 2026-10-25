@@ -50,7 +50,7 @@ const settle = async (code: string) => {
  * below). "+n" routes fan out to each of the user's parties, one call each, by design.
  */
 const BUDGETS: Record<string, { USER: number | string; PARTY: number | string }> = {
-  'POST /auth/magic-link': { USER: '0, or 2 with an Idempotency-Key', PARTY: '0, or 1 with a party code' },
+  'POST /auth/magic-link': { USER: '1, or 2 with an Idempotency-Key', PARTY: '0, or 1 with a party code' },
   'POST /auth/session': { USER: 1, PARTY: 0 },
   'GET /me': { USER: 1, PARTY: 0 },
   'PATCH /me': { USER: 1, PARTY: 0 },
@@ -73,12 +73,12 @@ describe('Durable Object call budgets', () => {
     expect(new Set(routeList().filter(r => !r.includes('/__test')))).toEqual(new Set(Object.keys(BUDGETS)));
   });
 
-  it('POST /auth/magic-link: none, two with a key (look up, then claim), one more with a party code', async () => {
+  it('POST /auth/magic-link: one (count the email), two with a key (look up, then claim and count), one more with a party code', async () => {
     const host = await person();
     const party = await create(host.token);
     const counting = countingEnv();
     expect((await request('POST', '/v1/auth/magic-link', { body: { email: uniqueEmail() }, env: counting.env })).status).toBe(202);
-    expect(counting.count()).toBe(0);
+    expect(counting.methods()).toEqual(['USER.countMail']);
 
     counting.reset();
     const k = key();
@@ -120,7 +120,7 @@ describe('Durable Object call budgets', () => {
     expect(counting.count()).toBe(0);
   });
 
-  it('POST /me/deletion: one call (session, request id); /me/email-change: one more for the new address', async () => {
+  it('POST /me/deletion: one call (session, request id, email cap); /me/email-change: one more for the new address', async () => {
     const who = await person();
     const counting = countingEnv();
     expect((await request('POST', '/v1/me/deletion', { token: who.token, key: key(), env: counting.env })).status).toBe(202);
@@ -129,7 +129,7 @@ describe('Durable Object call budgets', () => {
     counting.reset();
     const newEmail = uniqueEmail('new');
     expect((await request('POST', '/v1/me/email-change', { token: who.token, body: { email: newEmail }, env: counting.env })).status).toBe(202);
-    expect(counting.calls.map(c => `${c.name === who.email ? 'old' : 'new'}.${c.method}`)).toEqual(['old.beginMailRequest', 'new.get']);
+    expect(counting.calls.map(c => `${c.name === who.email ? 'old' : 'new'}.${c.method}`)).toEqual(['old.beginMailRequest', 'new.checkRecipient']);
   });
 
   it('confirming a deletion: two calls to the user and one per party, however many parties', async () => {

@@ -6,7 +6,7 @@ import { action } from 'src/api/action';
 import { ApiEnv, clientIp, jwtFor } from 'src/api/context';
 import { fail } from 'src/api/errors';
 import { idempotencyKey, keyHash, readBody, send } from 'src/api/input';
-import { admitLegacyCode, emailRateLimit } from 'src/api/rateLimit';
+import { ADDRESS_QUOTA, admitLegacyCode, emailRateLimit, tooManyForAddress } from 'src/api/rateLimit';
 import { accepted, bodies, session, tokens } from 'src/api/schemas';
 import { EnterRequestToken } from 'src/api/types';
 import { issueSession, sendRequestedMail } from 'src/api/users';
@@ -48,9 +48,14 @@ auth.post('/magic-link', action('enterRequest', async c => {
   if (party && !await env.PARTY.getByName(party).view()) {
     throw fail('not_found', 'Invalid party code.', 'party');
   }
-  if (key && !await recipient.claimMailRequest(key, detail)) {
+  const counted = key ? await recipient.claimMailRequest(key, detail, ADDRESS_QUOTA) : (await recipient.countMail(ADDRESS_QUOTA) ? 'claimed' : 'capped');
+  annotate({ 'mail.capped': counted === 'capped' });
+  if (counted === 'repeat') {
     // The same request got here first, a moment ago.
     return send(c, accepted, { ok: true }, 202);
+  }
+  if (counted === 'capped') {
+    throw tooManyForAddress('email');
   }
 
   const jwt = jwtFor(env);

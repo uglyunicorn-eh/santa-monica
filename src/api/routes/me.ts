@@ -7,11 +7,12 @@ import { ApiContext, ApiEnv, RequestSession, clientIp, jwtFor } from 'src/api/co
 import { fail, notSignedIn } from 'src/api/errors';
 import { idempotencyKey, keyHash, readBody, readQuery, send } from 'src/api/input';
 import { listParties } from 'src/api/party';
-import { emailRateLimit } from 'src/api/rateLimit';
+import { ADDRESS_QUOTA, NOTICE_QUOTA, emailRateLimit, tooManyForAddress } from 'src/api/rateLimit';
 import { requireSession } from 'src/api/session';
 import { accepted, bodies, partyPage, queries, session as sessionJson, tokens, user as userJson } from 'src/api/schemas';
 import { AccountDeletionToken, EmailChangeToken } from 'src/api/types';
 import { issueSession, sendCourtesyMail, sendRequestedMail } from 'src/api/users';
+import type { MailQuota } from 'src/do/UserDO';
 import { UserRecord } from 'src/do/types';
 import { renderAccountDeletion, renderEmailChange, renderEmailChangeNotice } from 'src/mail';
 import { canonicalEmail } from 'src/utils/email';
@@ -61,21 +62,25 @@ me.get('/parties', requireSession, action('partyHistory', async (c, span) => {
 }));
 
 /**
- * Starts an account email request in one UserDO call (session check + idempotency claim), runs `send`, and frees the
- * claim when `send` fails, so a retry sends the email. A repeat of a claimed request answers 202 without sending.
+ * Starts an account email request in one UserDO call (session check, idempotency claim, and counting the email to
+ * the user's address against `quota`), runs `deliver`, and frees the claim when `deliver` fails, so a retry sends the
+ * email. A repeat of a claimed request answers 202 without sending.
  */
-async function mailRequest(c: ApiContext, kind: string, detail: string, deliver: (user: UserRecord) => Promise<void>) {
+async function mailRequest(c: ApiContext, kind: string, detail: string, quota: MailQuota, deliver: (user: UserRecord) => Promise<void>) {
   const s = session(c);
   const key = idempotencyKey(c);
   const claim = key && `${kind}:${key}`;
   const userDO = c.env.USER.getByName(s.email);
-  const user = await userDO.beginMailRequest(s, claim, detail);
-  annotate({ 'mail.request_repeated': user === 'repeat' });
+  const user = await userDO.beginMailRequest(s, claim, detail, quota);
+  annotate({ 'mail.request_repeated': user === 'repeat', 'mail.capped': user === 'capped' });
   if (!user) {
     throw notSignedIn();
   }
   if (user === 'repeat') {
     return send(c, accepted, { ok: true }, 202);
+  }
+  if (user === 'capped') {
+    throw tooManyForAddress();
   }
   try {
     await deliver(user);
@@ -92,7 +97,7 @@ async function mailRequest(c: ApiContext, kind: string, detail: string, deliver:
 me.post('/deletion', requireSession, action('requestAccountDeletion', async c => {
   await readBody(c, bodies.empty);
   const { env } = c;
-  return await mailRequest(c, 'deletion', '', async user => {
+  return await mailRequest(c, 'deletion', '', ADDRESS_QUOTA, async user => {
     const rateLimited = await emailRateLimit(env, clientIp(c), user.email);
     annotate({ 'auth.rate_limited': rateLimited ?? false });
     if (rateLimited) {
@@ -110,22 +115,27 @@ me.post('/deletion', requireSession, action('requestAccountDeletion', async c =>
 me.post('/email-change', requireSession, action('requestEmailChange', async c => {
   const { email: newEmail, typed } = await readBody(c, bodies.emailChange);
   const { env } = c;
-  return await mailRequest(c, 'email', newEmail, async user => {
+  // The notice to the current address counts against it but never blocks the change; the new address's cap does.
+  return await mailRequest(c, 'email', newEmail, NOTICE_QUOTA, async user => {
     if (newEmail === canonicalEmail(user.email)) {
       throw fail('invalid', "That's already your email.", 'email');
     }
     // An account made before addresses were normalized may still be kept under the address as typed.
-    const [rateLimited, taken, takenAsTyped] = await Promise.all([
+    const [rateLimited, recipient, takenAsTyped] = await Promise.all([
       emailRateLimit(env, clientIp(c), newEmail),
-      env.USER.getByName(newEmail).get(),
+      env.USER.getByName(newEmail).checkRecipient(ADDRESS_QUOTA),
       typed === newEmail ? null : env.USER.getByName(typed).get(),
     ]);
     annotate({ 'auth.rate_limited': rateLimited ?? false });
     if (rateLimited) {
       throw tooManyEmails();
     }
-    if (taken || takenAsTyped) {
+    if (recipient === 'taken' || takenAsTyped) {
       throw emailTaken('email');
+    }
+    annotate({ 'mail.capped': recipient === 'capped' });
+    if (recipient === 'capped') {
+      throw tooManyForAddress('email');
     }
     const token = await jwtFor(env).issueToken<EmailChangeToken>('EmailChange', {
       sub: nodeIdToStr({ kind: 'User', id: user.id }), email: user.email, newEmail, jti: crypto.randomUUID(),

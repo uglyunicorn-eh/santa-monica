@@ -1,0 +1,104 @@
+import { env, runInDurableObject } from 'cloudflare:test';
+import { describe, expect, it, vi } from 'vitest';
+
+import { EMAILS_PER_ADDRESS_PER_HOUR } from 'src/api/rateLimit';
+import { MAIL_QUOTA_WINDOW_MS } from 'src/do/UserDO';
+
+import { mailer, request, signIn, testEnv, uniqueEmail } from './helpers';
+
+const key = () => crypto.randomUUID();
+
+/** How many emails the address has had counted in the current window. */
+const counted = (email: string) => runInDurableObject(env.USER.getByName(email), async (_i, state) =>
+  state.storage.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM mail_sent').one().n);
+
+/** Moves the address's counted emails out of the window, as if an hour had passed. */
+const anHourLater = (email: string) => runInDurableObject(env.USER.getByName(email), async (_i, state) => {
+  state.storage.sql.exec('UPDATE mail_sent SET at = at - ?', MAIL_QUOTA_WINDOW_MS);
+});
+
+const capped = { status: 429, body: { error: { code: 'rate_limited', message: "That's a lot of emails for this address. Please try again in an hour." } } };
+
+describe('the per-address email cap', () => {
+  const magicLink = (email: string, options: { key?: string; e?: typeof env } = {}) =>
+    request('POST', '/v1/auth/magic-link', { body: { email }, key: options.key, env: options.e });
+
+  it(`allows ${EMAILS_PER_ADDRESS_PER_HOUR} sign-in links an hour to one address, then refuses more until the hour has passed`, async () => {
+    const email = uniqueEmail();
+    const { sent, EMAIL } = mailer();
+    for (let i = 0; i < EMAILS_PER_ADDRESS_PER_HOUR; i++) {
+      expect((await magicLink(email, { e: testEnv({ EMAIL }), key: i % 2 ? key() : undefined })).status).toBe(202);
+    }
+    expect(await magicLink(email, { e: testEnv({ EMAIL }) })).toMatchObject({ ...capped, body: { error: { ...capped.body.error, field: 'email' } } });
+    expect(await magicLink(email, { e: testEnv({ EMAIL }), key: key() })).toMatchObject(capped);
+    expect(sent).toHaveLength(EMAILS_PER_ADDRESS_PER_HOUR);
+    // Another address isn't affected.
+    expect((await magicLink(uniqueEmail())).status).toBe(202);
+
+    await anHourLater(email);
+    expect((await magicLink(email, { e: testEnv({ EMAIL }) })).status).toBe(202);
+    expect(sent).toHaveLength(EMAILS_PER_ADDRESS_PER_HOUR + 1);
+  });
+
+  it('counts a repeated request once, and keeps no claim for a refused one', async () => {
+    const email = uniqueEmail();
+    const k = key();
+    for (let i = 0; i < 3; i++) {
+      expect((await magicLink(email, { key: k })).status).toBe(202);
+    }
+    expect(await counted(email)).toBe(1);
+    for (let i = 1; i < EMAILS_PER_ADDRESS_PER_HOUR; i++) {
+      await magicLink(email);
+    }
+    const refused = key();
+    expect(await magicLink(email, { key: refused })).toMatchObject(capped);
+    expect(await env.USER.getByName(email).seenMailRequest(refused, '')).toBe(false);
+  });
+
+  it('gives the count back when the email could not be sent', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const email = uniqueEmail();
+    expect((await magicLink(email, { key: key(), e: testEnv({ EMAIL: mailer(() => true).EMAIL }) })).status).toBe(503);
+    expect(await counted(email)).toBe(0);
+    error.mockRestore();
+  });
+
+  it('shares one count between sign-in links and account links', async () => {
+    const who = await signIn();
+    for (let i = 0; i < EMAILS_PER_ADDRESS_PER_HOUR - 1; i++) {
+      await magicLink(who.email);
+    }
+    expect((await request('POST', '/v1/me/deletion', { token: who.token, key: key() })).status).toBe(202);
+    expect(await request('POST', '/v1/me/deletion', { token: who.token, key: key() })).toMatchObject(capped);
+    expect(await request('POST', '/v1/me/deletion', { token: who.token })).toMatchObject(capped);
+    expect(await magicLink(who.email)).toMatchObject(capped);
+  });
+
+  it('caps email-change links to the new address, but never blocks the change over notices to the current one', async () => {
+    const who = await signIn();
+    const ask = (email: string, k?: string) => request('POST', '/v1/me/email-change', { token: who.token, key: k, body: { email } });
+
+    const busy = uniqueEmail('busy');
+    for (let i = 0; i < EMAILS_PER_ADDRESS_PER_HOUR; i++) {
+      await magicLink(busy);
+    }
+    expect(await ask(busy)).toMatchObject({ ...capped, body: { error: { ...capped.body.error, field: 'email' } } });
+
+    // The current address has had its fill, yet the change still goes ahead, and its notice is counted.
+    for (let i = 0; i < EMAILS_PER_ADDRESS_PER_HOUR; i++) {
+      await magicLink(who.email);
+    }
+    const { sent, EMAIL } = mailer();
+    const before = await counted(who.email);
+    const fresh = uniqueEmail('fresh');
+    expect((await request('POST', '/v1/me/email-change', { token: who.token, key: key(), body: { email: fresh }, env: testEnv({ EMAIL }) })).status).toBe(202);
+    expect(sent.map(m => m.to)).toEqual([fresh, who.email]);
+    expect([await counted(who.email), await counted(fresh)]).toEqual([before + 1, 1]);
+
+    // A refused change gives back what it counted.
+    const taken = await signIn();
+    const counts = await counted(who.email);
+    expect((await ask(taken.email, key())).status).toBe(409);
+    expect(await counted(who.email)).toBe(counts);
+  });
+});
