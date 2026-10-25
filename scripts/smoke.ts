@@ -84,13 +84,18 @@ const checks: Check[] = [
   },
 ];
 
-// A freshly deployed Worker (especially a new preview hostname) can answer 404 for a few seconds, so wait until it
-// serves / before checking anything.
+// A freshly deployed Worker (especially a new preview hostname) can answer 404 for a few seconds, and a new Worker
+// Preview's first Durable Object calls can fail while its storage is set up. So wait until it serves / and a party
+// lookup (which reaches a Durable Object) answers 404, before checking anything.
 const READY_TIMEOUT_MS = 60_000;
 const startedAt = Date.now();
+const ready = async () => {
+  const home = await fetch(new URL('/', base)).then(res => res.status, () => 0);
+  return home === 200 ? await fetch(new URL('/v1/parties/READYZZZ', base)).then(res => res.status, () => 0) : home;
+};
 while (true) {
-  const status = await fetch(new URL('/', base)).then(res => res.status, () => 0);
-  if (status === 200) {
+  const status = await ready();
+  if (status === 404) {
     break;
   }
   if (Date.now() - startedAt > READY_TIMEOUT_MS) {
