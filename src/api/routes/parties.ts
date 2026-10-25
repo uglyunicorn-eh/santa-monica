@@ -3,10 +3,9 @@ import { Hono } from 'hono';
 import { action } from 'src/api/action';
 import { ApiContext, ApiEnv, RequestSession, clientIp } from 'src/api/context';
 import { fail, notSignedIn } from 'src/api/errors';
-import { idempotencyKey } from 'src/api/idempotency';
-import { PARTY_CODE_ALPHABET, PARTY_CODE_LENGTH, toPartyJson } from 'src/api/party';
+import { idempotencyKey, readBody, readParams, send } from 'src/api/input';
+import { PARTY_CODE_ALPHABET, PARTY_CODE_LENGTH, bodies, params, party as partyJson } from 'src/api/schemas';
 import { optionalSession, requireSession } from 'src/api/session';
-import { parseBody, partyCode, schemas } from 'src/api/validation';
 import { PartyResult, PartyView } from 'src/do/types';
 import { newObjectId } from 'src/utils/ids';
 import { randomString } from 'src/utils/strings/random';
@@ -22,12 +21,12 @@ const tooManyOpenParties = (action: string) =>
 
 const notLoggedIn = (action: string) => fail('unauthenticated', `You must be logged in before ${action} the party.`);
 
-/** A party's answer: its JSON, or its failure as the matching API error. */
-function partyResult(result: PartyResult) {
+/** A party's answer: the party as JSON, or its failure as the matching API error. */
+function sendParty(c: ApiContext, result: PartyResult, status: 200 | 201 = 200) {
   if (!result.ok) {
     throw fail(result.error.code, result.error.message, result.error.fieldName ?? undefined);
   }
-  return toPartyJson(result.view);
+  return send(c, partyJson, result.view, status);
 }
 
 /** What someone without a (valid) session sees of a party: no membership details, and no deleted party at all. */
@@ -64,7 +63,7 @@ export const parties = new Hono<ApiEnv>();
  * the same time as it reads the party (one call each, in parallel); a revoked token sees what anyone sees.
  */
 parties.get('/:code', optionalSession, action('party', async (c, span) => {
-  const code = partyCode(c.req.param('code'));
+  const { code } = readParams(c, params.party);
   annotate({ 'party.code': code });
   await admitLookup(c);
   const s = c.get('session');
@@ -75,7 +74,7 @@ parties.get('/:code', optionalSession, action('party', async (c, span) => {
   if (!seen) {
     throw fail('not_found', 'Party does not exist.', 'party');
   }
-  return c.json(toPartyJson(seen));
+  return send(c, partyJson, seen);
 }));
 
 /**
@@ -83,7 +82,7 @@ parties.get('/:code', optionalSession, action('party', async (c, span) => {
  * open-party limit, and holds a slot. With an Idempotency-Key, a repeat for the same name returns the same party.
  */
 parties.post('/', requireSession, action('createParty', async c => {
-  const input = await parseBody(await c.req.text(), schemas.createParty);
+  const input = await readBody(c, bodies.createParty);
   const s = session(c);
   const key = idempotencyKey(c);
   annotate({ 'party.protected': Boolean(input.password) });
@@ -128,7 +127,7 @@ parties.post('/', requireSession, action('createParty', async c => {
       continue;
     }
     annotate({ 'party.code': slug });
-    return c.json(partyResult(result), 201);
+    return sendParty(c, result, 201);
   }
   throw new Error('Unable to generate a unique party code.');
 }));
@@ -138,8 +137,8 @@ parties.post('/', requireSession, action('createParty', async c => {
  * in the call it makes to the user anyway. Joining twice keeps one membership.
  */
 parties.post('/:code/join', requireSession, action('joinParty', async c => {
-  const code = partyCode(c.req.param('code'));
-  const { name, password } = await parseBody(await c.req.text(), schemas.joinParty);
+  const { code } = readParams(c, params.party);
+  const { name, password } = await readBody(c, bodies.joinParty);
   const s = session(c);
   annotate({ 'party.code': code });
   // Joining with a code is how a party without a secret phrase is reached, so attempts are limited per user.
@@ -148,36 +147,36 @@ parties.post('/:code/join', requireSession, action('joinParty', async c => {
   if (!success) {
     throw fail('rate_limited', "Whoa, that's a lot of tries! Please wait a minute and try again.", 'party');
   }
-  return c.json(partyResult(await c.env.PARTY.getByName(code).join(
+  return sendParty(c, await c.env.PARTY.getByName(code).join(
     { id: s.userId, email: s.email, name },
     name,
     password || null,
     { tokenVersion: s.tokenVersion },
-  )));
+  ));
 }));
 
 /** Leaves a party. Leaving one you're not in answers with the party as it is. */
 parties.post('/:code/leave', requireSession, action('leaveParty', async c => {
-  const code = partyCode(c.req.param('code'));
+  const { code } = readParams(c, params.party);
   annotate({ 'party.code': code });
   const user = await verified(c);
-  return c.json(partyResult(await c.env.PARTY.getByName(code).leave(user.id)));
+  return sendParty(c, await c.env.PARTY.getByName(code).leave(user.id));
 }));
 
 /** Rolls the dice (host only). A repeat answers with the same draw; nothing is drawn or mailed again. */
 parties.post('/:code/draw', requireSession, action('closeParty', async c => {
-  const code = partyCode(c.req.param('code'));
+  const { code } = readParams(c, params.party);
   annotate({ 'party.code': code });
   const user = await verified(c);
-  return c.json(partyResult(await c.env.PARTY.getByName(code).close(user.id)));
+  return sendParty(c, await c.env.PARTY.getByName(code).close(user.id));
 }));
 
 /** Deletes an open party (host only); it can be restored for a day. A repeat answers with the deleted party. */
 parties.delete('/:code', requireSession, action('deleteParty', async c => {
-  const code = partyCode(c.req.param('code'));
+  const { code } = readParams(c, params.party);
   annotate({ 'party.code': code });
   const user = await verified(c);
-  return c.json(partyResult(await c.env.PARTY.getByName(code).delete(user.id)));
+  return sendParty(c, await c.env.PARTY.getByName(code).delete(user.id));
 }));
 
 /**
@@ -186,7 +185,7 @@ parties.delete('/:code', requireSession, action('deleteParty', async c => {
  * party as it is, holding no slot.
  */
 parties.post('/:code/restore', requireSession, action('restoreParty', async c => {
-  const code = partyCode(c.req.param('code'));
+  const { code } = readParams(c, params.party);
   annotate({ 'party.code': code });
   const s = session(c);
   const stub = c.env.PARTY.getByName(code);
@@ -204,5 +203,5 @@ parties.post('/:code/restore', requireSession, action('restoreParty', async c =>
   } else {
     await verified(c);
   }
-  return c.json(partyResult(await stub.restore(s.userId, reservation)));
+  return sendParty(c, await stub.restore(s.userId, reservation));
 }));

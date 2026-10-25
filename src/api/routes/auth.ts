@@ -1,13 +1,14 @@
 import { Hono } from 'hono';
+import * as v from 'valibot';
 
 import { action } from 'src/api/action';
 import { ApiEnv, clientIp, jwtFor } from 'src/api/context';
 import { fail } from 'src/api/errors';
-import { idempotencyKey, keyHash } from 'src/api/idempotency';
+import { idempotencyKey, keyHash, readBody, send } from 'src/api/input';
 import { emailRateLimit } from 'src/api/rateLimit';
+import { accepted, bodies, session, tokens } from 'src/api/schemas';
 import { EnterRequestToken } from 'src/api/types';
 import { issueSession, sendRequestedMail } from 'src/api/users';
-import { parseBody, schemas } from 'src/api/validation';
 import { renderSignIn } from 'src/mail';
 import { annotate } from 'src/utils/tracing';
 
@@ -23,9 +24,7 @@ export const auth = new Hono<ApiEnv>();
  */
 auth.post('/magic-link', action('enterRequest', async c => {
   const { env } = c;
-  const input = await parseBody(await c.req.text(), schemas.magicLink);
-  const email = input.email.toLowerCase();
-  const party = input.party ?? undefined;
+  const { email, party } = await readBody(c, bodies.magicLink);
   const key = idempotencyKey(c);
   const detail = party ?? '';
   const recipient = env.USER.getByName(email);
@@ -33,7 +32,7 @@ auth.post('/magic-link', action('enterRequest', async c => {
 
   if (key && await recipient.seenMailRequest(key, detail)) {
     annotate({ 'mail.request_repeated': true });
-    return c.json({ ok: true }, 202);
+    return send(c, accepted, { ok: true }, 202);
   }
   const rateLimited = await emailRateLimit(env, clientIp(c), email);
   annotate({ 'auth.rate_limited': rateLimited ?? false });
@@ -45,7 +44,7 @@ auth.post('/magic-link', action('enterRequest', async c => {
   }
   if (key && !await recipient.claimMailRequest(key, detail)) {
     // The same request got here first, a moment ago.
-    return c.json({ ok: true }, 202);
+    return send(c, accepted, { ok: true }, 202);
   }
 
   const jwt = jwtFor(env);
@@ -60,7 +59,7 @@ auth.post('/magic-link', action('enterRequest', async c => {
     }
     throw error;
   }
-  return c.json({ ok: true }, 202);
+  return send(c, accepted, { ok: true }, 202);
 }));
 
 /**
@@ -69,27 +68,27 @@ auth.post('/magic-link', action('enterRequest', async c => {
  */
 auth.post('/session', action('enter', async c => {
   const { env } = c;
-  const { token } = await parseBody(await c.req.text(), schemas.session);
+  const { token } = await readBody(c, bodies.session);
   const key = await keyHash(idempotencyKey(c));
   const jwt = jwtFor(env);
 
-  let link: EnterRequestToken;
+  let payload: unknown;
   try {
-    link = await jwt.jwtVerify<EnterRequestToken>(token, 'EnterRequest');
+    payload = await jwt.jwtVerify(token, 'EnterRequest');
   } catch {
-    annotate({ 'auth.magic_link': 'invalid' });
-    throw fail('invalid_link', 'Invalid request token.', 'token');
+    payload = undefined;
   }
-  if (!link.jti || !link.exp || typeof link.email !== 'string') {
+  const link = v.safeParse(tokens.enterRequest, payload);
+  if (!link.success) {
     annotate({ 'auth.magic_link': 'invalid' });
     throw fail('invalid_link', 'Invalid request token.', 'token');
   }
 
-  const email = link.email.toLowerCase();
-  const user = await env.USER.getByName(email).redeemMagicLink(email, link.jti, link.exp * 1000, key);
+  const { email, jti, exp } = link.output;
+  const user = await env.USER.getByName(email).redeemMagicLink(email, jti, exp * 1000, key);
   annotate({ 'auth.magic_link': user ? 'redeemed' : 'already_used', 'user.id': user?.id });
   if (!user) {
     throw fail('link_used', 'This magic link has already been used. Please request a new one.', 'token');
   }
-  return c.json(await issueSession(jwt, user));
+  return send(c, session, await issueSession(jwt, user));
 }));

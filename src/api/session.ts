@@ -1,28 +1,28 @@
 import { createMiddleware } from 'hono/factory';
+import * as v from 'valibot';
 
 import { ApiEnv, jwtFor, makeSession } from 'src/api/context';
 import { notSignedIn } from 'src/api/errors';
-import { MAX_TOKEN_LENGTH } from 'src/api/limits';
-import { UserToken } from 'src/api/types';
+import { headers, tokens } from 'src/api/schemas';
 import { Env } from 'src/env';
-import { strToNodeId } from 'src/utils/strings/nodeId';
 
-/** The session the bearer token claims, with its signature checked (no DO call). Undefined for anything else. */
+/**
+ * The session the bearer token claims: the header must be a well-formed, length-limited `Bearer` token, its signature
+ * must check out, and its payload must fit the session token schema (no DO call). Undefined for anything else.
+ */
 export async function authenticate(env: Env, header: string | undefined) {
-  const match = header && /^Bearer ([\w-]+\.[\w-]+\.[\w-]+)$/.exec(header);
-  if (!match || match[1].length > MAX_TOKEN_LENGTH) {
+  const bearer = v.safeParse(headers.bearer, header);
+  if (!bearer.success) {
     return undefined;
   }
+  let payload: unknown;
   try {
-    const { sub, email, ver } = await jwtFor(env).jwtVerify<UserToken>(match[1], 'UserToken');
-    const { kind, id } = strToNodeId(sub);
-    if (kind !== 'User' || !email || (ver !== undefined && typeof ver !== 'number')) {
-      return undefined;
-    }
-    return makeSession(env, id, email, ver);
+    payload = await jwtFor(env).jwtVerify(bearer.output, 'UserToken');
   } catch {
     return undefined;
   }
+  const claims = v.safeParse(tokens.user, payload);
+  return claims.success ? makeSession(env, claims.output.sub, claims.output.email, claims.output.ver) : undefined;
 }
 
 /**

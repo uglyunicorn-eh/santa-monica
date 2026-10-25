@@ -1,14 +1,13 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it, vi } from 'vitest';
-import * as yup from 'yup';
+import * as v from 'valibot';
 
 import { makeSession } from 'src/api/context';
 import { ApiError, fail } from 'src/api/errors';
-import { keyHash } from 'src/api/idempotency';
-import { decodeCursor, encodeCursor, toPartyJson } from 'src/api/party';
+import { keyHash, readBody } from 'src/api/input';
+import { bodies, encodeCursor, headers, params, party as partyJson, partyPage, queries, tokens, user as userJson } from 'src/api/schemas';
 import { authenticate } from 'src/api/session';
 import { EnterRequestToken, UserToken } from 'src/api/types';
-import { cursorParam, pageSize, parseBody, partyCode, schemas } from 'src/api/validation';
 import { PartyDO } from 'src/do/PartyDO';
 import { nodeIdToStr } from 'src/utils/strings/nodeId';
 
@@ -477,39 +476,95 @@ describe('leave, draw, delete and restore', () => {
   });
 });
 
-describe('input helpers', () => {
-  it('parse a body: empty for schemas without required fields, null as absent, unknown fields and non-text refused', async () => {
-    expect(await parseBody('', schemas.empty)).toEqual({});
-    expect(await parseBody('  ', schemas.empty)).toEqual({});
-    expect(await parseBody('{"name":"x","password":null}', schemas.createParty)).toEqual({ name: 'x' });
-    await expect(parseBody('', schemas.profile)).rejects.toMatchObject({ code: 'invalid', field: 'name' });
-    await expect(parseBody(`{"${'k'.repeat(80)}":"v"}`, schemas.empty)).rejects.toMatchObject({ field: 'k'.repeat(50) });
-    await expect(parseBody('{"name":true}', schemas.profile)).rejects.toMatchObject({ message: 'Must be text.' });
+describe('schemas', () => {
+  const issue = (schema: v.GenericSchema, value: unknown) => {
+    const result = v.safeParse(schema, value, { abortEarly: true });
+    return result.success ? 'ok' : { message: result.issues[0].message, field: v.getDotPath(result.issues[0]) };
+  };
+
+  it('clean request bodies: trimmed, spaces collapsed, emails lowercased, codes uppercased, phrases only trimmed, null as absent', () => {
+    expect(v.parse(bodies.createParty, { name: '  Office \n  party  !  ', password: '  Jingle   Bells ' })).toEqual({ name: 'Office party!', password: 'Jingle   Bells' });
+    expect(v.parse(bodies.createParty, { name: 'x', password: null })).toEqual({ name: 'x', password: undefined });
+    expect(v.parse(bodies.magicLink, { email: ' Someone@Example.COM ', party: 'qwertyui' })).toEqual({ email: 'someone@example.com', party: 'QWERTYUI' });
+    expect(v.parse(bodies.empty, {})).toEqual({});
   });
 
-  it('read party codes, page sizes and cursors from the URL', () => {
-    expect(partyCode('qwertyui')).toBe('QWERTYUI');
-    expect(() => partyCode(undefined)).toThrow(ApiError);
-    expect(pageSize(undefined)).toBe(10);
-    expect(pageSize('100')).toBe(100);
-    expect(() => pageSize('-1')).toThrow('Must be a whole number from 1 to 100.');
-    expect(cursorParam(undefined)).toBeUndefined();
-    expect(cursorParam('abc')).toBe('abc');
-    expect(decodeCursor(encodeCursor({ createdAt: 1700000000000, slug: 'QWERT' }))).toEqual({ createdAt: 1700000000000, slug: 'QWERT' });
-    for (const cursor of ['%%%', btoa('nope'), btoa('12:lower'), btoa(`${'9'.repeat(16)}:QWERT`)]) {
-      expect(() => decodeCursor(cursor)).toThrow('Invalid cursor.');
+  it('refuse missing, non-text, unknown and over-long fields, naming the field', () => {
+    expect(issue(bodies.profile, {})).toEqual({ message: 'Name is required.', field: 'name' });
+    expect(issue(bodies.profile, { name: null })).toEqual({ message: 'Name is required.', field: 'name' });
+    expect(issue(bodies.profile, { name: true })).toEqual({ message: 'Must be text.', field: 'name' });
+    expect(issue(bodies.profile, { name: 'x'.repeat(101) })).toEqual({ message: 'Name must be at most 100 characters.', field: 'name' });
+    expect(issue(bodies.empty, { [`${'k'.repeat(80)}`]: 'v' })).toEqual({ message: `Unknown field: ${'k'.repeat(50)}.`, field: 'k'.repeat(80) });
+    expect(issue(bodies.magicLink, { email: 'nope' })).toEqual({ message: 'Must be a valid email', field: 'email' });
+    expect(issue(bodies.magicLink, { email: 'a@example.com', party: 'abc' })).toEqual({ message: 'Invalid party code', field: 'party' });
+    expect(issue(bodies.session, { token: 'x'.repeat(2049) })).toMatchObject({ field: 'token' });
+    expect(issue(bodies.joinParty, { name: 'x', password: 'p'.repeat(101) })).toMatchObject({ field: 'password' });
+  });
+
+  it('read page sizes and cursors from the query string', () => {
+    expect(v.parse(queries.partyHistory, {})).toEqual({ first: 10 });
+    expect(v.parse(queries.partyHistory, { first: '100', other: 'ignored' })).toEqual({ first: 100 });
+    for (const first of ['0', '101', '-1', 'abc', '1000']) {
+      expect(issue(queries.partyHistory, { first })).toEqual({ message: 'Must be a whole number from 1 to 100.', field: 'first' });
+    }
+    const cursor = encodeCursor({ createdAt: 1700000000000, slug: 'QWERT' });
+    expect(v.parse(queries.partyHistory, { after: cursor })).toEqual({ first: 10, after: { createdAt: 1700000000000, slug: 'QWERT' } });
+    for (const after of ['', 'x'.repeat(101), '%%%', btoa('nope'), btoa('12:lower'), btoa(`${'9'.repeat(16)}:QWERT`)]) {
+      expect(issue(queries.partyHistory, { after })).toEqual({ message: 'Invalid cursor.', field: 'after' });
     }
   });
 
-  it('map party views to JSON, with and without a target or roll time', () => {
+  it('read party codes, keys and bearer tokens', () => {
+    expect(v.parse(params.party, { code: 'qwertyui' })).toEqual({ code: 'QWERTYUI' });
+    expect(issue(params.party, { code: 'nope!' })).not.toBe('ok');
+    expect(v.parse(headers.idempotency, { 'idempotency-key': undefined })).toEqual({});
+    expect(issue(headers.idempotency, { 'idempotency-key': 'short' })).toMatchObject({ field: 'idempotency-key' });
+    expect(v.parse(headers.bearer, 'Bearer a.b.c')).toBe('a.b.c');
+    for (const header of ['Basic a.b.c', 'Bearer abc', `Bearer ${'a'.repeat(2050)}.b.c`]) {
+      expect(issue(headers.bearer, header)).not.toBe('ok');
+    }
+  });
+
+  it('read token payloads, refusing ones without what identifies the user or the link', () => {
+    const sub = nodeIdToStr({ kind: 'User', id: 'a'.repeat(24) });
+    expect(v.parse(tokens.user, { sub, email: 'a@example.com', ver: 2, iat: 1 })).toEqual({ sub: 'a'.repeat(24), email: 'a@example.com', ver: 2 });
+    for (const payload of [{ sub: nodeIdToStr({ kind: 'Party', id: 'QWERT' }), email: 'a' }, { sub: '%%%', email: 'a' }, { sub }, { sub, email: 'a', ver: '1' }]) {
+      expect(issue(tokens.user, payload)).not.toBe('ok');
+    }
+    expect(v.parse(tokens.enterRequest, { email: 'A@Example.com', jti: 'j', exp: 5 })).toEqual({ email: 'a@example.com', jti: 'j', exp: 5 });
+    expect(issue(tokens.emailChange, { sub, email: 'a', jti: 'j', exp: 5 })).toMatchObject({ field: 'newEmail' });
+  });
+
+  it('shape responses from stored records, leaving out anything that is not part of the answer', () => {
     const view = {
       id: 'x', slug: 'QWERT', name: 'P', password: null, isProtected: false, isHost: false, isJoined: true,
       isClosed: true, createdAt: Date.UTC(2026, 11, 1, 18, 30), closedAt: Date.UTC(2026, 11, 20, 9, 0, 5, 250),
       deletedAt: null, participantCount: 2, participants: ['A'], target: { id: 'a'.repeat(24), name: 'A' },
     };
-    expect(toPartyJson(view)).toMatchObject({ code: 'QWERT', target: { name: 'A' }, createdAt: '2026-12-01T18:30:00.000Z', rolledAt: '2026-12-20T09:00:05.250Z' });
-    expect(toPartyJson(view).target).toEqual({ name: 'A' });
-    expect(toPartyJson({ ...view, target: null, closedAt: null })).toMatchObject({ target: null, rolledAt: null });
+    expect(v.parse(partyJson, view)).toEqual({
+      code: 'QWERT', name: 'P', password: null, isProtected: false, isHost: false, isJoined: true, isClosed: true,
+      createdAt: '2026-12-01T18:30:00.000Z', rolledAt: '2026-12-20T09:00:05.250Z', deletedAt: null, restorableUntil: null,
+      participantCount: 2, participants: ['A'], target: { name: 'A' },
+    });
+    expect(v.parse(partyJson, { ...view, target: null, closedAt: null, deletedAt: Date.UTC(2026, 11, 2) })).toMatchObject({
+      target: null, rolledAt: null, deletedAt: '2026-12-02T00:00:00.000Z', restorableUntil: '2026-12-03T00:00:00.000Z',
+    });
+    expect(v.parse(userJson, { id: 'a'.repeat(24), email: 'a@example.com', name: 'A', joined: 1, tokenVersion: 3 }))
+      .toEqual({ id: nodeIdToStr({ kind: 'User', id: 'a'.repeat(24) }), name: 'A', email: 'a@example.com' });
+    expect(v.parse(partyPage, {
+      items: [{ slug: 'QWERT', name: 'P', createdAt: 0, isHost: true, isProtected: false, isClosed: false, closedAt: null }],
+      hasMore: false, endCursor: null,
+    })).toEqual({
+      items: [{ code: 'QWERT', name: 'P', isHost: true, isProtected: false, isClosed: false, isJoined: true, createdAt: '1970-01-01T00:00:00.000Z', rolledAt: null, deletedAt: null, restorableUntil: null }],
+      hasMore: false, endCursor: null,
+    });
+    // A record that doesn't fit is a bug, not something to answer with.
+    expect(() => v.parse(partyJson, { ...view, name: 7 })).toThrow();
+  });
+
+  it('report a problem with the input as a whole without a field', async () => {
+    const request = { req: { text: async () => '{}' } } as unknown as Parameters<typeof readBody>[0];
+    await expect(readBody(request, v.string('Expected text.'))).rejects.toMatchObject({ code: 'invalid', message: 'Expected text.', field: undefined });
   });
 
   it('build error bodies with and without a field, and hash keys', async () => {
@@ -696,8 +751,6 @@ describe('the remaining refusals', () => {
       expect(await request('POST', '/v1/auth/magic-link', { raw })).toMatchObject({ status: 400, body: { error: { message: 'The request body must be a JSON object.' } } });
     }
     expect(await request('POST', '/v1/auth/magic-link', { key: 'bad key', body: { email: uniqueEmail() } })).toMatchObject({ status: 400, body: { error: { field: 'Idempotency-Key' } } });
-    expect(() => cursorParam('')).toThrow('Invalid cursor.');
-    expect(() => cursorParam('x'.repeat(101))).toThrow('Invalid cursor.');
     const res = await (await import('src/index')).app.request('/v1/parties/QWERT', {}, testEnv());
     expect(res.status).toBe(404);
   });
@@ -791,9 +844,3 @@ describe('PartyDO with older data', () => {
   });
 });
 
-describe('parseBody', () => {
-  it('passes on errors that are not validation failures', async () => {
-    const schema = yup.object({ a: yup.string().test('boom', 'never shown', () => { throw new Error('boom'); }) });
-    await expect(parseBody('{"a":"b"}', schema)).rejects.toThrow('boom');
-  });
-});

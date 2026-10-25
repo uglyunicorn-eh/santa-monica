@@ -1,13 +1,11 @@
 import { env } from 'cloudflare:test';
 import * as jose from 'jose';
 import { describe, expect, it } from 'vitest';
-import * as yup from 'yup';
 
 import { isPermanentMailError, render } from 'src/mail';
 import { createJwtHelpers } from 'src/utils/jwt';
 import { strToNodeId } from 'src/utils/strings/nodeId';
 import { randomInt, randomString } from 'src/utils/strings/random';
-import * as YupHelpers from 'src/utils/yup';
 
 describe('jwt', () => {
   const helpers = createJwtHelpers({ privateKey: env.JWT_PRIVATE_KEY, issuer: 'api.test' });
@@ -88,18 +86,6 @@ describe('random strings', () => {
         expect(n).toBeLessThan(max);
       }
     }
-  });
-});
-
-describe('input normalisation', () => {
-  it('trims and collapses whitespace, and tightens space before punctuation', () => {
-    const schema = YupHelpers.string('Name');
-    expect(schema.cast('  Office \n  party  !  ')).toBe('Office party!');
-  });
-
-  it('only trims secret phrases', () => {
-    const schema = yup.object({ password: YupHelpers.password('Secret') });
-    expect(schema.cast({ password: '  Jingle   Bells ' })).toEqual({ password: 'Jingle   Bells' });
   });
 });
 

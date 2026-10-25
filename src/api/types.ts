@@ -30,10 +30,3 @@ export interface UserToken extends TokenPayload {
   /** The user's token version when this token was issued. Tokens issued before versions existed have none. */
   ver?: number;
 }
-
-/** The signed-in user, as the API returns them. */
-export type UserJson = {
-  id: string;
-  name: string;
-  email: string;
-};

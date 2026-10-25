@@ -1,18 +1,19 @@
 import { Hono } from 'hono';
+import * as v from 'valibot';
 
 import { action } from 'src/api/action';
 import { ApiContext, ApiEnv, RequestSession, clientIp, jwtFor } from 'src/api/context';
 import { fail, notSignedIn } from 'src/api/errors';
-import { idempotencyKey, keyHash } from 'src/api/idempotency';
-import { decodeCursor, listParties } from 'src/api/party';
+import { idempotencyKey, keyHash, readBody, readQuery, send } from 'src/api/input';
+import { listParties } from 'src/api/party';
 import { emailRateLimit } from 'src/api/rateLimit';
 import { requireSession } from 'src/api/session';
+import { accepted, bodies, partyPage, queries, session as sessionJson, tokens, user as userJson } from 'src/api/schemas';
 import { AccountDeletionToken, EmailChangeToken } from 'src/api/types';
-import { issueSession, sendCourtesyMail, sendRequestedMail, toUserJson } from 'src/api/users';
-import { cursorParam, pageSize, parseBody, schemas } from 'src/api/validation';
+import { issueSession, sendCourtesyMail, sendRequestedMail } from 'src/api/users';
 import { UserRecord } from 'src/do/types';
 import { renderAccountDeletion, renderEmailChange, renderEmailChangeNotice } from 'src/mail';
-import { nodeIdToStr, strToNodeId } from 'src/utils/strings/nodeId';
+import { nodeIdToStr } from 'src/utils/strings/nodeId';
 import { annotate } from 'src/utils/tracing';
 
 /** Account links (deletion, email change) work for an hour. */
@@ -36,7 +37,7 @@ me.get('/', requireSession, action('user', async c => {
   if (!user) {
     throw notSignedIn();
   }
-  return c.json(toUserJson(user));
+  return send(c, userJson, user);
 }));
 
 /**
@@ -44,33 +45,32 @@ me.get('/', requireSession, action('user', async c => {
  * name the user joined them with. One UserDO call, which also checks the session.
  */
 me.patch('/', requireSession, action('updateName', async c => {
-  const { name } = await parseBody(await c.req.text(), schemas.profile);
+  const { name } = await readBody(c, bodies.profile);
   const s = session(c);
   const user = await c.env.USER.getByName(s.email).updateName(name, s);
   if (!user) {
     throw notSignedIn();
   }
-  return c.json(toUserJson(user));
+  return send(c, userJson, user);
 }));
 
 /** The signed-in user's parties, newest first, a page at a time: one UserDO call, which also checks the session. */
 me.get('/parties', requireSession, action('partyHistory', async (c, span) => {
-  const first = pageSize(c.req.query('first'));
-  const after = cursorParam(c.req.query('after'));
+  const { first, after } = readQuery(c, queries.partyHistory);
   const s = session(c);
-  const page = await listParties(c.env, s.email, s, first, after ? decodeCursor(after) : undefined);
+  const page = await listParties(c.env, s.email, s, first, after);
   if (!page) {
     throw notSignedIn();
   }
   span.setAttributes({ 'parties.first': first, 'parties.count': page.count, 'parties.refreshed': page.refreshed, 'parties.has_more': page.hasMore });
-  return c.json({ items: page.items, hasMore: page.hasMore, endCursor: page.endCursor });
+  return send(c, partyPage, { items: page.items, hasMore: page.hasMore, endCursor: page.endCursor });
 }));
 
 /**
  * Starts an account email request in one UserDO call (session check + idempotency claim), runs `send`, and frees the
  * claim when `send` fails, so a retry sends the email. A repeat of a claimed request answers 202 without sending.
  */
-async function mailRequest(c: ApiContext, kind: string, detail: string, send: (user: UserRecord) => Promise<void>) {
+async function mailRequest(c: ApiContext, kind: string, detail: string, deliver: (user: UserRecord) => Promise<void>) {
   const s = session(c);
   const key = idempotencyKey(c);
   const claim = key && `${kind}:${key}`;
@@ -81,22 +81,22 @@ async function mailRequest(c: ApiContext, kind: string, detail: string, send: (u
     throw notSignedIn();
   }
   if (user === 'repeat') {
-    return c.json({ ok: true }, 202);
+    return send(c, accepted, { ok: true }, 202);
   }
   try {
-    await send(user);
+    await deliver(user);
   } catch (error) {
     if (claim) {
       await userDO.releaseMailRequest(claim, detail);
     }
     throw error;
   }
-  return c.json({ ok: true }, 202);
+  return send(c, accepted, { ok: true }, 202);
 }
 
 /** Emails a link that deletes the account (see `/deletion/confirm`). */
 me.post('/deletion', requireSession, action('requestAccountDeletion', async c => {
-  await parseBody(await c.req.text(), schemas.empty);
+  await readBody(c, bodies.empty);
   const { env } = c;
   return await mailRequest(c, 'deletion', '', async user => {
     const rateLimited = await emailRateLimit(env, clientIp(c), user.email);
@@ -114,9 +114,8 @@ me.post('/deletion', requireSession, action('requestAccountDeletion', async c =>
 
 /** Emails a link to the new address that moves the account there, and a notice to the current one. */
 me.post('/email-change', requireSession, action('requestEmailChange', async c => {
-  const { email } = await parseBody(await c.req.text(), schemas.emailChange);
+  const { email: newEmail } = await readBody(c, bodies.emailChange);
   const { env } = c;
-  const newEmail = email.toLowerCase();
   return await mailRequest(c, 'email', newEmail, async user => {
     if (newEmail === user.email) {
       throw fail('invalid', "That's already your email.", 'email');
@@ -138,29 +137,25 @@ me.post('/email-change', requireSession, action('requestEmailChange', async c =>
   });
 }));
 
-/** Verifies an emailed account link and returns it with the user id it is for. Throws 400 when it isn't valid. */
-async function verifyLink<T extends AccountDeletionToken | EmailChangeToken>(c: ApiContext, type: 'AccountDeletion' | 'EmailChange') {
-  const { token } = await parseBody(await c.req.text(), schemas.link);
-  let payload: T;
+/**
+ * Verifies an emailed account link: the body's token must carry a valid signature for `type`, and its payload must fit
+ * that link's schema. Returns the payload, with `sub` read as the user id. Throws 400 when it isn't valid.
+ */
+async function verifyLink<S extends typeof tokens.accountDeletion | typeof tokens.emailChange>(c: ApiContext, type: 'AccountDeletion' | 'EmailChange', schema: S) {
+  const { token } = await readBody(c, bodies.link);
+  let payload: unknown;
   try {
-    payload = await jwtFor(c.env).jwtVerify<T>(token, type);
+    payload = await jwtFor(c.env).jwtVerify(token, type);
   } catch {
+    payload = undefined;
+  }
+  const link = v.safeParse(schema, payload);
+  if (!link.success) {
     annotate({ 'account.link': 'invalid' });
     throw invalidLink();
   }
-  let userId: string | undefined;
-  try {
-    const { kind, id } = strToNodeId(payload.sub);
-    userId = kind === 'User' ? id : undefined;
-  } catch {
-    // Not a node id: reported below.
-  }
-  if (!userId || !payload.jti || !payload.exp || typeof payload.email !== 'string') {
-    annotate({ 'account.link': 'invalid' });
-    throw invalidLink();
-  }
-  annotate({ 'user.id': userId });
-  return { ...payload, userId, exp: payload.exp };
+  annotate({ 'user.id': link.output.sub });
+  return { ...link.output, userId: link.output.sub } as v.InferOutput<S> & { userId: string };
 }
 
 /** Collects every result, logging the failures. */
@@ -186,14 +181,14 @@ async function settleAll<T>(calls: Promise<T>[], what: string) {
  * the request that used the link (same Idempotency-Key) answers ok again.
  */
 me.post('/deletion/confirm', action('confirmAccountDeletion', async c => {
-  const link = await verifyLink<AccountDeletionToken>(c, 'AccountDeletion');
+  const link = await verifyLink(c, 'AccountDeletion', tokens.accountDeletion);
   const key = await keyHash(idempotencyKey(c));
   const user = c.env.USER.getByName(link.email);
   const started = await user.startAccountChange(link.userId, link.jti, link.exp * 1000, { key });
   annotate({ 'account.link': started.ok ? 'started' : started.reason });
   if (!started.ok) {
     if (started.reason === 'repeat') {
-      return c.json({ ok: true });
+      return send(c, accepted, { ok: true });
     }
     throw startFailed[started.reason]();
   }
@@ -214,7 +209,7 @@ me.post('/deletion/confirm', action('confirmAccountDeletion', async c => {
   }
   annotate({ 'account.link': 'redeemed' });
   await user.tombstone();
-  return c.json({ ok: true });
+  return send(c, accepted, { ok: true });
 }));
 
 /**
@@ -225,11 +220,7 @@ me.post('/deletion/confirm', action('confirmAccountDeletion', async c => {
  */
 me.post('/email-change/confirm', action('confirmEmailChange', async c => {
   const { env } = c;
-  const link = await verifyLink<EmailChangeToken>(c, 'EmailChange');
-  if (typeof link.newEmail !== 'string' || !link.newEmail) {
-    annotate({ 'account.link': 'invalid' });
-    throw invalidLink();
-  }
+  const link = await verifyLink(c, 'EmailChange', tokens.emailChange);
   const key = await keyHash(idempotencyKey(c));
   const { userId, email: oldEmail, newEmail } = link;
   const oldUser = env.USER.getByName(oldEmail);
@@ -244,7 +235,7 @@ me.post('/email-change/confirm', action('confirmEmailChange', async c => {
     if (started.reason === 'repeat') {
       // The account was moved by this same request: sign in again, as long as it is still there.
       if (taken?.id === userId) {
-        return c.json(await issueSession(jwt, taken));
+        return send(c, sessionJson, await issueSession(jwt, taken));
       }
       throw startFailed.used();
     }
@@ -278,7 +269,7 @@ me.post('/email-change/confirm', action('confirmEmailChange', async c => {
   }
   await oldUser.tombstone();
   annotate({ 'account.link': 'redeemed', 'account.parties': started.parties.length });
-  return c.json(await issueSession(jwt, moved));
+  return send(c, sessionJson, await issueSession(jwt, moved));
 }));
 
 /** The session `requireSession` put on the request. */

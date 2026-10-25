@@ -2,7 +2,7 @@ import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 
 import { MAX_BODY_BYTES, MAX_NAME_LENGTH } from 'src/api/limits';
-import { PARTY_CODE_RE } from 'src/api/party';
+import { PARTY_CODE_RE } from 'src/api/schemas';
 import { MAX_PHRASE_GUESSES, PHRASE_GUESS_WINDOW_MS } from 'src/do/PartyDO';
 
 import { denied, request, signIn, testEnv, uniqueEmail } from './helpers';

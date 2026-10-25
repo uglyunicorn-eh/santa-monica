@@ -1,5 +1,5 @@
 import { fail } from 'src/api/errors';
-import { UserJson, UserToken } from 'src/api/types';
+import { UserToken } from 'src/api/types';
 import { UserRecord } from 'src/do/types';
 import { Env } from 'src/env';
 import { MailMessage, sendMail } from 'src/mail';
@@ -10,18 +10,12 @@ import { annotate } from 'src/utils/tracing';
 /** Session tokens last 30 days. */
 const SESSION_TTL = 60 * 60 * 24 * 30;
 
-/** The signed-in user, email included (the API never returns anyone else's). */
-export const toUserJson = (user: UserRecord): UserJson => ({
-  id: nodeIdToStr({ kind: 'User', id: user.id }),
-  name: user.name,
-  email: user.email,
-});
-
 /** A session token for the user, with their current token version, and the user: the answer to a sign-in. */
 export async function issueSession(jwt: JwtHelpers, user: UserRecord) {
-  const json = toUserJson(user);
-  const userToken = await jwt.issueToken<UserToken>('UserToken', { sub: json.id, email: user.email, ver: user.tokenVersion }, { ttl: SESSION_TTL });
-  return { userToken, user: json };
+  const userToken = await jwt.issueToken<UserToken>('UserToken', {
+    sub: nodeIdToStr({ kind: 'User', id: user.id }), email: user.email, ver: user.tokenVersion,
+  }, { ttl: SESSION_TTL });
+  return { userToken, user };
 }
 
 /**
