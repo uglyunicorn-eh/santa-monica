@@ -82,7 +82,7 @@ export const typeDefs = `#graphql
     joinParty(input: JoinPartyInput!): JoinPartyPayload!
     leaveParty(input: LeavePartyInput!): LeavePartyPayload!
     closeParty(input: ClosePartyInput!): ClosePartyPayload!
-    "Deletes the party (host only). It can be restored for a day with restoreParty."
+    "Deletes an open party (host only); a party whose dice are rolled can't be deleted. It can be restored for a day with restoreParty."
     deleteParty(input: DeletePartyInput!): DeletePartyPayload!
     restoreParty(input: RestorePartyInput!): RestorePartyPayload!
   }

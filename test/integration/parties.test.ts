@@ -89,6 +89,18 @@ describe('open-party limit, deleting and restoring', () => {
     await expect.poll(() => codes(guest)).toEqual([party.code]);
   });
 
+  it('refuses to delete a party whose dice are rolled', async () => {
+    const host = await person('host');
+    const guest = await person('guest');
+    const party = await createParty(host);
+    await joinParty(guest, party, 'Guest');
+    expect((await gql(CLOSE_PARTY, { party: party.id }, { token: host.token })).data.parties.closeParty.status).toBe('ok');
+
+    const res = await gql(DELETE, { party: party.id }, { token: host.token });
+    expect(res.data.parties.deleteParty).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
+    expect((await gql(PARTY, { code: party.code }, { token: guest.token })).data.party).toMatchObject({ isClosed: true });
+  });
+
   it('lets only the host delete', async () => {
     const host = await person('host');
     const guest = await person('guest');

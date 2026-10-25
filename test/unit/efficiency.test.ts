@@ -351,9 +351,12 @@ describe('party → user updates', () => {
     const closed = (await gql(env, CREATE, { name: 'Closed' }, host.token)).data.parties.createParty.node;
     await gql(env, JOIN, { party: closed.id, name: 'G' }, guest.token);
     await gql(env, CLOSE, { party: closed.id }, host.token);
-    for (const p of [open, closed]) {
-      await gql(env, DELETE, { party: p.id }, host.token);
-    }
+    await gql(env, DELETE, { party: open.id }, host.token);
+    // Rolled parties can't be deleted any more; this one was deleted before that rule.
+    await runInDurableObject(env.PARTY.getByName(closed.code), async (instance: PartyDO) => {
+      (instance as any).setDeleted(Date.now());
+      await (instance as any).deliverSoon();
+    });
 
     const counting = countingEnv();
     expect((await gql(counting.env, RESTORE, { party: open.id }, host.token)).data.parties.restoreParty.status).toBe('ok');
