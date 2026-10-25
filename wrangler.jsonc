@@ -6,7 +6,10 @@
   "compatibility_flags": ["nodejs_compat"],
   // Logs and traces: kept in Workers Logs and exported to Better Stack (source "gnomik-api") through the
   // betterstack-logs / betterstack-traces OpenTelemetry destinations set up in the Cloudflare dashboard.
+  // Query strings are left out of request URLs in logs and traces: party routes carry the party code there (?code=),
+  // and a code lets anyone into a party without a secret phrase.
   "observability": {
+    "redact_query_string": true,
     "logs": { "enabled": true, "invocation_logs": true, "persist": true, "head_sampling_rate": 1, "destinations": ["betterstack-logs"] },
     "traces": { "enabled": true, "persist": true, "head_sampling_rate": 1, "destinations": ["betterstack-traces"] }
   },
@@ -77,6 +80,7 @@
       ],
       // Logs stay in Workers Logs only, so test traffic stays out of Better Stack.
       "observability": {
+        "redact_query_string": true,
         "logs": { "enabled": true, "invocation_logs": true, "persist": true },
         "traces": { "enabled": false }
       },
@@ -103,6 +107,7 @@
           { "name": "JOIN_RATE_LIMIT_USER", "namespace_id": "2004", "simple": { "limit": 10, "period": 60 } }
         ],
         "observability": {
+          "redact_query_string": true,
           "logs": { "enabled": true, "invocation_logs": true, "persist": true },
           "traces": { "enabled": false }
         }

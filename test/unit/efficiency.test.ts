@@ -35,7 +35,7 @@ function countingEnv(overrides: Partial<typeof env> = {}) {
 
 const person = (name = 'Person') => signIn(uniqueEmail('eff'), name);
 const create = async (token: string, name = 'Party') => (await request('POST', '/v1/parties', { token, body: { name } })).body;
-const join = (token: string, code: string, name = 'Guest') => request('POST', `/v1/parties/${code}/join`, { token, body: { name } });
+const join = (token: string, code: string, name = 'Guest') => request('POST', `/v1/parties/join?code=${code}`, { token, body: { name } });
 const key = () => crypto.randomUUID();
 
 /** Runs a party's alarm until its outbox is empty. */
@@ -60,13 +60,13 @@ const BUDGETS: Record<string, { USER: number | string; PARTY: number | string }>
   'POST /me/deletion/confirm': { USER: 2, PARTY: '1 per party' },
   'POST /me/email-change/confirm': { USER: 4, PARTY: '1 per party' },
   'POST /me/email-change/cancel': { USER: 1, PARTY: 0 },
-  'GET /parties/:code': { USER: '0 anonymous, 1 signed in', PARTY: 1 },
+  'GET /parties': { USER: '0 anonymous, 1 signed in', PARTY: 1 },
   'POST /parties': { USER: 1, PARTY: 1 },
-  'POST /parties/:code/join': { USER: 0, PARTY: 1 },
-  'POST /parties/:code/leave': { USER: 1, PARTY: 1 },
-  'POST /parties/:code/draw': { USER: 1, PARTY: 1 },
-  'DELETE /parties/:code': { USER: 1, PARTY: 1 },
-  'POST /parties/:code/restore': { USER: 1, PARTY: 2 },
+  'POST /parties/join': { USER: 0, PARTY: 1 },
+  'POST /parties/leave': { USER: 1, PARTY: 1 },
+  'POST /parties/draw': { USER: 1, PARTY: 1 },
+  'DELETE /parties': { USER: 1, PARTY: 1 },
+  'POST /parties/restore': { USER: 1, PARTY: 2 },
 };
 
 describe('Durable Object call budgets', () => {
@@ -178,7 +178,7 @@ describe('Durable Object call budgets', () => {
     }
   });
 
-  it('GET /parties/:code: one call anonymous, two signed in (made at the same time), whatever the party holds', async () => {
+  it('GET /parties: one call anonymous, two signed in (made at the same time), whatever the party holds', async () => {
     for (const members of [1, 12]) {
       const host = await person('Host');
       const party = await create(host.token);
@@ -186,10 +186,10 @@ describe('Durable Object call budgets', () => {
         await join((await person()).token, party.code);
       }
       const counting = countingEnv();
-      await request('GET', `/v1/parties/${party.code}`, { env: counting.env });
+      await request('GET', `/v1/parties?code=${party.code}`, { env: counting.env });
       expect(counting.methods()).toEqual(['PARTY.view']);
       counting.reset();
-      const { body } = await request('GET', `/v1/parties/${party.code}`, { token: host.token, env: counting.env });
+      const { body } = await request('GET', `/v1/parties?code=${party.code}`, { token: host.token, env: counting.env });
       expect(body.participants).toHaveLength(members);
       expect(counting.methods().sort()).toEqual(['PARTY.view', 'USER.get']);
     }
@@ -202,14 +202,14 @@ describe('Durable Object call budgets', () => {
     const { body: party } = await request('POST', '/v1/parties', { token: host.token, body: { name: 'Create' }, env: counting.env });
     expect(counting.methods()).toEqual(['USER.startHosting', 'PARTY.create']);
     counting.reset();
-    await request('POST', `/v1/parties/${party.code}/join`, { token: guest.token, body: { name: 'G' }, env: counting.env });
+    await request('POST', `/v1/parties/join?code=${party.code}`, { token: guest.token, body: { name: 'G' }, env: counting.env });
     expect(counting.methods()).toEqual(['PARTY.join']);
 
     // A deleted account's join is refused in that same call.
     const ghost = await person();
     await env.USER.getByName(ghost.email).tombstone();
     counting.reset();
-    expect((await request('POST', `/v1/parties/${party.code}/join`, { token: ghost.token, body: { name: 'G' }, env: counting.env })).status).toBe(401);
+    expect((await request('POST', `/v1/parties/join?code=${party.code}`, { token: ghost.token, body: { name: 'G' }, env: counting.env })).status).toBe(401);
     expect(counting.methods()).toEqual(['PARTY.join']);
   });
 
@@ -224,11 +224,11 @@ describe('Durable Object call budgets', () => {
         guests.push(guest);
       }
       const counting = countingEnv();
-      await request('POST', `/v1/parties/${party.code}/leave`, { token: guests[0].token, env: counting.env });
-      await request('POST', `/v1/parties/${party.code}/draw`, { token: host.token, env: counting.env });
+      await request('POST', `/v1/parties/leave?code=${party.code}`, { token: guests[0].token, env: counting.env });
+      await request('POST', `/v1/parties/draw?code=${party.code}`, { token: host.token, env: counting.env });
       const other = await create(host.token, 'Other');
       counting.reset();
-      await request('DELETE', `/v1/parties/${other.code}`, { token: host.token, env: counting.env });
+      await request('DELETE', `/v1/parties?code=${other.code}`, { token: host.token, env: counting.env });
       expect(counting.methods()).toEqual(['USER.get', 'PARTY.delete']);
     }
   });
@@ -239,8 +239,8 @@ describe('Durable Object call budgets', () => {
     const open = await create(host.token, 'Open');
     const closed = await create(host.token, 'Closed');
     await join(guest.token, closed.code);
-    await request('POST', `/v1/parties/${closed.code}/draw`, { token: host.token });
-    await request('DELETE', `/v1/parties/${open.code}`, { token: host.token });
+    await request('POST', `/v1/parties/draw?code=${closed.code}`, { token: host.token });
+    await request('DELETE', `/v1/parties?code=${open.code}`, { token: host.token });
     // Rolled parties can't be deleted any more; this one was deleted before that rule.
     await runInDurableObject(env.PARTY.getByName(closed.code), async (instance: PartyDO) => {
       (instance as any).setDeleted(Date.now());
@@ -248,10 +248,10 @@ describe('Durable Object call budgets', () => {
     });
 
     const counting = countingEnv();
-    expect((await request('POST', `/v1/parties/${open.code}/restore`, { token: host.token, env: counting.env })).status).toBe(200);
+    expect((await request('POST', `/v1/parties/restore?code=${open.code}`, { token: host.token, env: counting.env })).status).toBe(200);
     expect(counting.methods()).toEqual(['PARTY.view', 'USER.startHosting', 'PARTY.restore']);
     counting.reset();
-    expect((await request('POST', `/v1/parties/${closed.code}/restore`, { token: host.token, env: counting.env })).status).toBe(200);
+    expect((await request('POST', `/v1/parties/restore?code=${closed.code}`, { token: host.token, env: counting.env })).status).toBe(200);
     expect(counting.methods()).toEqual(['PARTY.view', 'USER.get', 'PARTY.restore']);
     // The slot held for the open party was released when it came back to the host's list.
     expect(await runInDurableObject(env.USER.getByName(host.email), async (_i, state) =>
@@ -264,8 +264,8 @@ describe('Durable Object call budgets', () => {
     const party = await create(host.token);
     await join(guest.token, party.code);
     for (const [method, path, body] of [
-      ['POST', `/v1/parties/${party.code}/join`, { name: 'G' }],
-      ['POST', `/v1/parties/${party.code}/draw`, undefined],
+      ['POST', `/v1/parties/join?code=${party.code}`, { name: 'G' }],
+      ['POST', `/v1/parties/draw?code=${party.code}`, undefined],
     ] as const) {
       const token = method === 'POST' && path.endsWith('/join') ? guest.token : host.token;
       const first = countingEnv();
@@ -301,7 +301,7 @@ describe('lists do not grow with what is in them (no N+1)', () => {
     const friend = await person('Friend');
     const party = await create(who.token, 'Timed');
     await join(friend.token, party.code);
-    await request('POST', `/v1/parties/${party.code}/draw`, { token: who.token });
+    await request('POST', `/v1/parties/draw?code=${party.code}`, { token: who.token });
     await settle(party.code);
     const counting = countingEnv();
     const { body } = await request('GET', '/v1/me/parties', { token: who.token, env: counting.env });
@@ -365,7 +365,7 @@ describe('party → user updates', () => {
     }
     const { applied, done } = recordUserCalls(party.code);
     await done;
-    await request('POST', `/v1/parties/${party.code}/draw`, { token: host.token });
+    await request('POST', `/v1/parties/draw?code=${party.code}`, { token: host.token });
     await runInDurableObject(env.PARTY.getByName(party.code), async (instance: PartyDO) => { await instance.alarm(); });
     expect(applied).toHaveLength(30);
     expect(new Set(applied.map(a => a.email)).size).toBe(30);
@@ -382,7 +382,7 @@ describe('party → user updates', () => {
     await join(guest.token, party.code);
     const { applied, done } = recordUserCalls(party.code);
     await done;
-    expect((await request('DELETE', `/v1/parties/${party.code}`, { token: host.token })).status).toBe(200);
+    expect((await request('DELETE', `/v1/parties?code=${party.code}`, { token: host.token })).status).toBe(200);
     expect(applied).toEqual([{ email: host.email, updates: [{ type: 'addParty', party: expect.objectContaining({ slug: party.code, deletedAt: expect.any(Number) }) }] }]);
 
     await runInDurableObject(env.PARTY.getByName(party.code), async (instance: PartyDO) => { await instance.alarm(); });
@@ -392,7 +392,7 @@ describe('party → user updates', () => {
   it('sends nothing for a sync left queued for a party that was erased', async () => {
     const host = await person('Host');
     const party = await create(host.token, 'Gone');
-    await request('DELETE', `/v1/parties/${party.code}`, { token: host.token });
+    await request('DELETE', `/v1/parties?code=${party.code}`, { token: host.token });
     await runInDurableObject(env.PARTY.getByName(party.code), async (instance: PartyDO, state) => {
       state.storage.sql.exec('UPDATE party SET deleted_at = ?', Date.now() - RESTORE_WINDOW_MS - 1000);
       await instance.alarm();
@@ -443,13 +443,13 @@ describe('party → user updates', () => {
 
     const deleted = await create(host.token, 'To delete');
     await waiting(deleted.code);
-    await request('DELETE', `/v1/parties/${deleted.code}`, { token: host.token });
+    await request('DELETE', `/v1/parties?code=${deleted.code}`, { token: host.token });
     expect(await outbox(deleted.code)).toBe(0);
 
     const closed = await create(host.token, 'To close');
     await join(guest.token, closed.code);
     await waiting(closed.code);
-    await request('POST', `/v1/parties/${closed.code}/draw`, { token: host.token });
+    await request('POST', `/v1/parties/draw?code=${closed.code}`, { token: host.token });
 
     const list = (await env.USER.getByName(host.email).listParties(10))!;
     expect(list.find(p => p.slug === deleted.code)!.deletedAt).toEqual(expect.any(Number));
@@ -461,7 +461,7 @@ describe('party → user updates', () => {
     const guest = await person('Guest');
     const party = await create(host.token, 'Leaving');
     await join(guest.token, party.code);
-    await request('POST', `/v1/parties/${party.code}/leave`, { token: guest.token });
+    await request('POST', `/v1/parties/leave?code=${party.code}`, { token: guest.token });
     expect(await env.USER.getByName(guest.email).listParties(10)).toEqual([]);
   });
 

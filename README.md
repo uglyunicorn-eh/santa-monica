@@ -13,7 +13,7 @@ The API is a Cloudflare Worker (Hono) with its data in Durable Objects: one `Par
 
 ### API
 
-Plain JSON routes under `/v1` (`src/api/`). A signed-in request sends `Authorization: Bearer <session token>`.
+Plain JSON routes under `/v1` (`src/api/`). A signed-in request sends `Authorization: Bearer <session token>`. Party routes take the party code as a query parameter, `?code=`, so it never shows up in request logs (see Logs and errors).
 
 | Route | Session | Does |
 |---|---|---|
@@ -27,17 +27,17 @@ Plain JSON routes under `/v1` (`src/api/`). A signed-in request sends `Authoriza
 | `POST /v1/me/email-change/cancel` `{token}` | link | "This wasn't me": stops the change and signs out everywhere |
 | `POST /v1/me/deletion` | yes | Emails a link that deletes the account (202) |
 | `POST /v1/me/deletion/confirm` `{token}` | link | Deletes the account |
-| `GET /v1/parties/:code` | optional | A party, as this person sees it |
+| `GET /v1/parties?code=` | optional | A party, as this person sees it |
 | `POST /v1/parties` `{name, password?}` | yes | Creates a party (201) |
-| `POST /v1/parties/:code/join` `{name, password?}` | yes | Joins |
-| `POST /v1/parties/:code/leave` | yes | Leaves |
-| `POST /v1/parties/:code/draw` | yes | Rolls the dice (host only) |
-| `DELETE /v1/parties/:code` | yes | Deletes an open party (host only); restorable for a day |
-| `POST /v1/parties/:code/restore` | yes | Restores it |
+| `POST /v1/parties/join?code=` `{name, password?}` | yes | Joins |
+| `POST /v1/parties/leave?code=` | yes | Leaves |
+| `POST /v1/parties/draw?code=` | yes | Rolls the dice (host only) |
+| `DELETE /v1/parties?code=` | yes | Deletes an open party (host only); restorable for a day |
+| `POST /v1/parties/restore?code=` | yes | Restores it |
 
 - **CORS**: only the origins in `ALLOWED_ORIGINS` (`wrangler.jsonc`) may call the API from a browser. Production allows `https://gnomik.me` and the Cloudflare Pages previews (`https://*.gnomik-me.pages.dev`; a `*` matches exactly one label); previews also allow `http://localhost:4321`–`4323`. Other origins get no CORS headers, so browsers keep the answers from them.
 - **Errors** always answer `{ "error": { "code", "message", "field" } }` with a matching status: 400 `invalid` (with the `field`), 400 `invalid_link`, 401 `unauthenticated`, 403 `forbidden`, 404 `not_found`, 409 `conflict` / `link_used` / `account_busy`, 429 `rate_limited`, 503 `unavailable` / `not_finished`, and 500 `internal` with an `errorId` (the error itself is only logged). **401 only ever means the session is missing, invalid or revoked**: the frontend signs out on it, so a bad emailed link never does that.
-- **Every input and output is a [valibot](https://valibot.dev) schema** (`src/api/schemas.ts`). Request bodies are strict objects of text fields, each trimmed and length-limited (names and phrases 100, emails 128 and normalized (see Email addresses below), tokens 2048, party codes uppercased and checked); unknown fields, non-text values and anything over a limit are refused by name. Query strings (`first`, `after`), path params (`:code`), the `Idempotency-Key` and `Authorization` headers, and the payload of every token the API verifies have schemas too. The body as a whole is capped at 16 KB (`src/api/limits.ts`, the same numbers as santa-barbara's `src/limits.ts`). Responses are shaped from stored records by output schemas, which also check them on the way out: anything that doesn't fit, or isn't part of the answer, never leaves the Worker.
+- **Every input and output is a [valibot](https://valibot.dev) schema** (`src/api/schemas.ts`). Request bodies are strict objects of text fields, each trimmed and length-limited (names and phrases 100, emails 128 and normalized (see Email addresses below), tokens 2048, party codes uppercased and checked); unknown fields, non-text values and anything over a limit are refused by name. Query strings (`first`, `after`, and `code` on party routes), the `Idempotency-Key` and `Authorization` headers, and the payload of every token the API verifies have schemas too. The body as a whole is capped at 16 KB (`src/api/limits.ts`, the same numbers as santa-barbara's `src/limits.ts`). Responses are shaped from stored records by output schemas, which also check them on the way out: anything that doesn't fit, or isn't part of the answer, never leaves the Worker.
 - **Every signed-in route checks the session's token version**, so tokens revoked by an email change or an account deletion stop working everywhere. The token's signature is checked once per request with no DO call; then either the route's own DO call checks the session (`updateName`, `startHosting`, `listParties`, the party's join, `beginMailRequest`), or `session.verify()` reads the user once (party view, leave, draw, delete). A revoked token looking up a party sees what anyone sees. `test/integration/revocation.test.ts` calls every route with a revoked token, and fails if a route is added without a row there.
 
 ### Email addresses
@@ -88,9 +88,9 @@ The host can delete a party until its dice are rolled: it leaves every member's 
 | `POST /v1/me/deletion/confirm` | 2 | 1 per party |
 | `POST /v1/me/email-change/confirm` | 4 | 1 per party |
 | `POST /v1/me/email-change/cancel` | 1 | 0 |
-| `GET /v1/parties/:code` | 0 anonymous, 1 signed in (in parallel) | 1 |
+| `GET /v1/parties?code=` | 0 anonymous, 1 signed in (in parallel) | 1 |
 | `POST /v1/parties` | 1 | 1 |
-| `POST /v1/parties/:code/join` | 0 (the party checks the session itself) | 1 |
+| `POST /v1/parties/join?code=` | 0 (the party checks the session itself) | 1 |
 | `leave`, `draw`, `DELETE` | 1 | 1 |
 | `restore` | 1 | 2 |
 
@@ -133,7 +133,7 @@ GitHub secrets. Pull-request jobs run code from any branch, so they never see th
 
 Production logs (every `console.*` call plus Cloudflare's invocation logs) and request traces are kept in Workers Logs and exported to Better Stack, source `gnomik-api`, by Cloudflare's OpenTelemetry export. No SDK is involved: the destinations `betterstack-logs` and `betterstack-traces` are defined in the Cloudflare dashboard (Workers & Pages → Observability → Telemetry) and referenced by name in `wrangler.jsonc`. Previews keep their logs in Workers Logs only.
 
-Every API route runs in its own span, `api.<action>` (for example `api.createParty`, `api.joinParty`, `api.party`), created with Workers' `tracing.enterSpan` (`src/utils/tracing.ts`). Spans record the action, the internal user id, the outcome (`api.status`, `api.error_code`, `api.user_error_fields`) and action details such as `party.ref` or `auth.magic_link`, never emails, names or party codes. A party code lets anyone into a party without a secret phrase, so logs carry `party.ref` instead: the first 12 hex digits of an HMAC of the code (`src/utils/logRef.ts`), keyed by HKDF from `JWT_PRIVATE_KEY`. The same party always has the same ref, so its requests can be followed in the logs, but the code can't be worked out from it. Durable Object calls made during an action show up as its child spans.
+Every API route runs in its own span, `api.<action>` (for example `api.createParty`, `api.joinParty`, `api.party`), created with Workers' `tracing.enterSpan` (`src/utils/tracing.ts`). Spans record the action, the internal user id, the outcome (`api.status`, `api.error_code`, `api.user_error_fields`) and action details such as `party.ref` or `auth.magic_link`, never emails, names or party codes. A party code lets anyone into a party without a secret phrase, so logs carry `party.ref` instead: the first 12 hex digits of an HMAC of the code (`src/utils/logRef.ts`), keyed by HKDF from `JWT_PRIVATE_KEY`. The same party always has the same ref, so its requests can be followed in the logs, but the code can't be worked out from it. Cloudflare's own request logs and traces record every request URL, so party routes take the code as `?code=` rather than in the path, and `redact_query_string` (`wrangler.jsonc`) drops query strings from those records. Durable Object calls made during an action show up as its child spans.
 
 Unexpected errors return a 500 with an `errorId`; the same id is logged with the error (`message: "Unhandled error"`), so a reported error can be looked up in Better Stack.
 

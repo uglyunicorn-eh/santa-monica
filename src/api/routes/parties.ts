@@ -3,9 +3,9 @@ import { Hono } from 'hono';
 import { action } from 'src/api/action';
 import { ApiContext, ApiEnv, RequestSession, clientIp } from 'src/api/context';
 import { fail, notSignedIn } from 'src/api/errors';
-import { idempotencyKey, readBody, readParams, send } from 'src/api/input';
+import { idempotencyKey, readBody, readPartyCode, send } from 'src/api/input';
 import { admitLegacyCode } from 'src/api/rateLimit';
-import { PARTY_CODE_ALPHABET, PARTY_CODE_LENGTH, bodies, params, party as partyJson } from 'src/api/schemas';
+import { PARTY_CODE_ALPHABET, PARTY_CODE_LENGTH, bodies, party as partyJson } from 'src/api/schemas';
 import { optionalSession, requireSession } from 'src/api/session';
 import { PartyResult, PartyView } from 'src/do/types';
 import { newObjectId } from 'src/utils/ids';
@@ -64,8 +64,8 @@ export const parties = new Hono<ApiEnv>();
  * Looks up a party by code. Anyone gets a limited view; members see more. A signed-in lookup checks the session at
  * the same time as it reads the party (one call each, in parallel); a revoked token sees what anyone sees.
  */
-parties.get('/:code', optionalSession, action('party', async (c, span) => {
-  const { code } = readParams(c, params.party);
+parties.get('/', optionalSession, action('party', async (c, span) => {
+  const code = readPartyCode(c);
   annotate({ 'party.ref': await partyRef(c.env, code) });
   await admitLookup(c);
   await admitLegacyCode(c.env, clientIp(c), code);
@@ -139,8 +139,8 @@ parties.post('/', requireSession, action('createParty', async c => {
  * Joins a party. The member comes from the session token and the name from the form; the party checks the session
  * in the call it makes to the user anyway. Joining twice keeps one membership.
  */
-parties.post('/:code/join', requireSession, action('joinParty', async c => {
-  const { code } = readParams(c, params.party);
+parties.post('/join', requireSession, action('joinParty', async c => {
+  const code = readPartyCode(c);
   const { name, password } = await readBody(c, bodies.joinParty);
   const s = session(c);
   annotate({ 'party.ref': await partyRef(c.env, code) });
@@ -160,24 +160,24 @@ parties.post('/:code/join', requireSession, action('joinParty', async c => {
 }));
 
 /** Leaves a party. Leaving one you're not in answers with the party as it is. */
-parties.post('/:code/leave', requireSession, action('leaveParty', async c => {
-  const { code } = readParams(c, params.party);
+parties.post('/leave', requireSession, action('leaveParty', async c => {
+  const code = readPartyCode(c);
   annotate({ 'party.ref': await partyRef(c.env, code) });
   const user = await verified(c);
   return sendParty(c, await c.env.PARTY.getByName(code).leave(user.id));
 }));
 
 /** Rolls the dice (host only). A repeat answers with the same draw; nothing is drawn or mailed again. */
-parties.post('/:code/draw', requireSession, action('closeParty', async c => {
-  const { code } = readParams(c, params.party);
+parties.post('/draw', requireSession, action('closeParty', async c => {
+  const code = readPartyCode(c);
   annotate({ 'party.ref': await partyRef(c.env, code) });
   const user = await verified(c);
   return sendParty(c, await c.env.PARTY.getByName(code).close(user.id));
 }));
 
 /** Deletes an open party (host only); it can be restored for a day. A repeat answers with the deleted party. */
-parties.delete('/:code', requireSession, action('deleteParty', async c => {
-  const { code } = readParams(c, params.party);
+parties.delete('/', requireSession, action('deleteParty', async c => {
+  const code = readPartyCode(c);
   annotate({ 'party.ref': await partyRef(c.env, code) });
   const user = await verified(c);
   return sendParty(c, await c.env.PARTY.getByName(code).delete(user.id));
@@ -188,8 +188,8 @@ parties.delete('/:code', requireSession, action('deleteParty', async c => {
  * it first, which also checks the session; otherwise the session is checked on its own. A repeat answers with the
  * party as it is, holding no slot.
  */
-parties.post('/:code/restore', requireSession, action('restoreParty', async c => {
-  const { code } = readParams(c, params.party);
+parties.post('/restore', requireSession, action('restoreParty', async c => {
+  const code = readPartyCode(c);
   annotate({ 'party.ref': await partyRef(c.env, code) });
   const s = session(c);
   const stub = c.env.PARTY.getByName(code);

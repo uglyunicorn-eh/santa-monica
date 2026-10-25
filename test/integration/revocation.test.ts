@@ -24,13 +24,13 @@ const ROUTES: Record<string, { revoked: 'unauthenticated' | 'anonymous' | 'no se
   'GET /me/parties': { revoked: 'unauthenticated', call: (f, token) => call('GET', '/v1/me/parties', { token }) },
   'POST /me/deletion': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/me/deletion', { token }) },
   'POST /me/email-change': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/me/email-change', { token, body: { email: uniqueEmail('ghost') } }) },
-  'GET /parties/:code': { revoked: 'anonymous', call: (f, token) => viewParty(f.drawn.code, { token }) },
+  'GET /parties': { revoked: 'anonymous', call: (f, token) => viewParty(f.drawn.code, { token }) },
   'POST /parties': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/parties', { token, body: { name: 'Ghost party' } }) },
-  'POST /parties/:code/join': { revoked: 'unauthenticated', call: (f, token) => joinParty({ token }, f.open, 'Ghost') },
-  'POST /parties/:code/leave': { revoked: 'unauthenticated', call: (f, token) => call('POST', `/v1/parties/${f.party.code}/leave`, { token }) },
-  'POST /parties/:code/draw': { revoked: 'unauthenticated', call: (f, token) => call('POST', `/v1/parties/${f.party.code}/draw`, { token }) },
-  'DELETE /parties/:code': { revoked: 'unauthenticated', call: (f, token) => call('DELETE', `/v1/parties/${f.party.code}`, { token }) },
-  'POST /parties/:code/restore': { revoked: 'unauthenticated', call: (f, token) => call('POST', `/v1/parties/${f.party.code}/restore`, { token }) },
+  'POST /parties/join': { revoked: 'unauthenticated', call: (f, token) => joinParty({ token }, f.open, 'Ghost') },
+  'POST /parties/leave': { revoked: 'unauthenticated', call: (f, token) => call('POST', `/v1/parties/leave?code=${f.party.code}`, { token }) },
+  'POST /parties/draw': { revoked: 'unauthenticated', call: (f, token) => call('POST', `/v1/parties/draw?code=${f.party.code}`, { token }) },
+  'DELETE /parties': { revoked: 'unauthenticated', call: (f, token) => call('DELETE', `/v1/parties?code=${f.party.code}`, { token }) },
+  'POST /parties/restore': { revoked: 'unauthenticated', call: (f, token) => call('POST', `/v1/parties/restore?code=${f.party.code}`, { token }) },
 };
 
 /** Someone who hosts an open party with a guest, is a guest in another open party, and has a drawn party with a target. */

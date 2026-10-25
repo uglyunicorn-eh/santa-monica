@@ -169,7 +169,7 @@ describe('joining a party', () => {
   it('needs a session', async () => {
     const host = await person('host');
     const party = await createParty(host);
-    expect((await call('POST', `/v1/parties/${party.code}/join`, { body: { name: 'Anon' } })).status).toBe(401);
+    expect((await call('POST', `/v1/parties/join?code=${party.code}`, { body: { name: 'Anon' } })).status).toBe(401);
   });
 
   it('checks the secret phrase, ignoring case', async () => {
@@ -296,7 +296,7 @@ describe('leaving a party', () => {
   it('needs a session', async () => {
     const host = await person('host');
     const party = await createParty(host);
-    expect((await call('POST', `/v1/parties/${party.code}/leave`)).status).toBe(401);
+    expect((await call('POST', `/v1/parties/leave?code=${party.code}`)).status).toBe(401);
   });
 
   it('does not let the host leave their own party', async () => {
@@ -313,7 +313,7 @@ describe('rolling the dice', () => {
   it('needs a session', async () => {
     const host = await person('host');
     const party = await createParty(host);
-    expect((await call('POST', `/v1/parties/${party.code}/draw`)).status).toBe(401);
+    expect((await call('POST', `/v1/parties/draw?code=${party.code}`)).status).toBe(401);
   });
 
   it('can only be done by the host', async () => {

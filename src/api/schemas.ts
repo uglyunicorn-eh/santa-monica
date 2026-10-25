@@ -137,10 +137,13 @@ export const queries = {
   }),
 };
 
-export const params = {
-  /** `:code`: anything that isn't a party code reads as a party that doesn't exist. */
-  party: v.object({ code: v.pipe(v.string(), v.toUpperCase(), v.regex(PARTY_CODE_RE)) }),
-};
+/**
+ * `?code=`: which party a party route is about. It travels in the query string, not the path, because Cloudflare's
+ * request logs and traces record the path but drop the query string (`redact_query_string` in wrangler.jsonc), and a
+ * party code lets anyone into a party without a secret phrase. Anything that isn't a party code reads as a party that
+ * doesn't exist.
+ */
+export const partyQuery = v.object({ code: v.pipe(v.string(), v.toUpperCase(), v.regex(PARTY_CODE_RE)) });
 
 export const headers = {
   /** `Idempotency-Key`: optional, and refused when malformed rather than ignored. */
