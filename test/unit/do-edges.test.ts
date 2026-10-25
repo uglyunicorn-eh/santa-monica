@@ -227,7 +227,7 @@ describe('UserDO', () => {
     const user = await stub.ensure(email);
     await stub.apply([
       { type: 'setName', name: 'Gone' },
-      { type: 'addParty', party: { slug: 'QQQQA', name: 'P', createdAt: 1, isHost: true, isProtected: false, isClosed: false } },
+      { type: 'addParty', party: { slug: 'QQQQA', name: 'P', createdAt: 1, isHost: true, isProtected: false, isClosed: false, closedAt: null } },
     ]);
 
     await stub.tombstone();
@@ -238,7 +238,7 @@ describe('UserDO', () => {
     // A late outbox delivery can't bring the record back.
     expect(await stub.apply([
       { type: 'setName', name: 'Resurrected' },
-      { type: 'addParty', party: { slug: 'QQQQB', name: 'Late', createdAt: 2, isHost: false, isProtected: false, isClosed: false } },
+      { type: 'addParty', party: { slug: 'QQQQB', name: 'Late', createdAt: 2, isHost: false, isProtected: false, isClosed: false, closedAt: null } },
     ])).toBeNull();
     expect(await stub.listParties(10)).toEqual([]);
     await runInDurableObject(stub, async (_instance, state) => {
@@ -257,7 +257,7 @@ describe('UserDO', () => {
     const email = `early-${++counter}@example.com`;
     const stub = env.USER.getByName(email);
     expect(await stub.apply([
-      { type: 'addParty', party: { slug: 'QQQQC', name: 'P', createdAt: 1, isHost: false, isProtected: false, isClosed: false } },
+      { type: 'addParty', party: { slug: 'QQQQC', name: 'P', createdAt: 1, isHost: false, isProtected: false, isClosed: false, closedAt: null } },
       { type: 'setNameIfEmpty', name: 'Nobody' },
       { type: 'setName', name: 'Nobody' },
     ])).toBeNull();
@@ -269,7 +269,7 @@ describe('UserDO', () => {
     const email = `session-${++counter}@example.com`;
     const stub = env.USER.getByName(email);
     const user = await stub.ensure(email);
-    const party = { slug: 'QQQQD', name: 'P', createdAt: 1, isHost: false, isProtected: false, isClosed: false };
+    const party = { slug: 'QQQQD', name: 'P', createdAt: 1, isHost: false, isProtected: false, isClosed: false, closedAt: null };
     const updates = [{ type: 'addParty' as const, party }, { type: 'setNameIfEmpty' as const, name: 'Intruder' }];
     for (const session of [{ userId: newObjectId() }, { userId: user.id, tokenVersion: 1 }]) {
       expect(await stub.apply(updates, session)).toEqual(user);
@@ -283,11 +283,11 @@ describe('UserDO', () => {
   it('leaves a tombstone even on an object that has no user yet', async () => {
     const email = `empty-tomb-${++counter}@example.com`;
     const stub = env.USER.getByName(email);
-    await stub.apply([{ type: 'addParty', party: { slug: 'QQQQE', name: 'P', createdAt: 1, isHost: false, isProtected: false, isClosed: false } }]);
+    await stub.apply([{ type: 'addParty', party: { slug: 'QQQQE', name: 'P', createdAt: 1, isHost: false, isProtected: false, isClosed: false, closedAt: null } }]);
     await stub.tombstone();
     expect(await stub.get()).toBeNull();
     expect(await stub.listParties(10)).toEqual([]);
-    expect(await stub.apply([{ type: 'addParty', party: { slug: 'QQQQF', name: 'Late', createdAt: 2, isHost: false, isProtected: false, isClosed: false } }])).toBeNull();
+    expect(await stub.apply([{ type: 'addParty', party: { slug: 'QQQQF', name: 'Late', createdAt: 2, isHost: false, isProtected: false, isClosed: false, closedAt: null } }])).toBeNull();
     expect(await stub.listParties(10)).toEqual([]);
     expect(await stub.ensure(email)).toMatchObject({ email, name: '', tokenVersion: 1 });
   });
@@ -296,7 +296,7 @@ describe('UserDO', () => {
     const email = `paging-${++counter}@example.com`;
     const stub = env.USER.getByName(email);
     const party = (slug: string, createdAt: number) =>
-      ({ type: 'addParty' as const, party: { slug, name: slug, createdAt, isHost: false, isProtected: false, isClosed: false } });
+      ({ type: 'addParty' as const, party: { slug, name: slug, createdAt, isHost: false, isProtected: false, isClosed: false, closedAt: null } });
     await stub.apply([party('QQQAA', 5), party('QQQAB', 7), party('QQQAC', 7), party('QQQAD', 7), party('QQQAE', 3)]);
 
     const seen: string[] = [];

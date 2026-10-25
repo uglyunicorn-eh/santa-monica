@@ -12,6 +12,10 @@ export type Party = Node & {
   isHost: boolean;
   isProtected: boolean;
   isClosed: boolean;
+  /** ISO 8601 UTC. */
+  createdAt: string;
+  /** ISO 8601 UTC, when the host drew the party. Null while open, and for parties drawn before it was recorded. */
+  rolledAt: string | null;
   deletedAt: string | null;
   restorableUntil: string | null;
   participantCount: number | null;

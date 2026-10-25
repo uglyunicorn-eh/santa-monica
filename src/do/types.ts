@@ -21,6 +21,8 @@ export type UserPartyRecord = {
   isHost: boolean;
   isProtected: boolean;
   isClosed: boolean;
+  /** When the host drew the party. Null while it is open, and for parties drawn before this was recorded. */
+  closedAt: number | null;
   /** When the host deleted the party (it can be restored for a day). Only the host keeps a deleted party in their list. */
   deletedAt?: number | null;
 };
@@ -61,6 +63,9 @@ export type PartyView = {
   isHost: boolean;
   isJoined: boolean;
   isClosed: boolean;
+  createdAt: number;
+  /** When the host drew the party; null while open, and for parties drawn before this was recorded. */
+  closedAt: number | null;
   /** Set when the host deleted the party; only the host can see a deleted party. */
   deletedAt: number | null;
   participantCount: number | null;

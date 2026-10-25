@@ -43,6 +43,8 @@ export function decodeCursor(cursor: string): PartyListCursor {
   return { createdAt: Number(match[1]), slug: match[2] };
 }
 
+/** A stored time (ms since the epoch) as ISO 8601 UTC. */
+const isoTime = (ms: number) => new Date(ms).toISOString();
 /** When a deleted party was deleted and until when it can be restored, as ISO strings (both null otherwise). */
 const deletion = (deletedAt: number | null | undefined) => ({
   deletedAt: deletedAt ? new Date(deletedAt).toISOString() : null,
@@ -64,6 +66,8 @@ export function partyViewToNode(view: PartyView | null): Party | null {
     participantCount: view.participantCount,
     participants: view.participants,
     isClosed: view.isClosed,
+    createdAt: isoTime(view.createdAt),
+    rolledAt: view.closedAt === null ? null : isoTime(view.closedAt),
     ...deletion(view.deletedAt),
     target: view.target
       ? { id: nodeIdToStr({ kind: 'User', id: view.target.id }), name: view.target.name }
@@ -79,7 +83,10 @@ export async function viewParty(env: Env, code: string, userId?: string): Promis
 }
 
 /** A party in the user's list: the summary fields from UserDO. The rest load lazily (see `partyFields`). */
-type PartySummaryNode = Pick<Party, 'id' | 'code' | 'name' | 'isHost' | 'isProtected' | 'isClosed' | 'isJoined' | 'deletedAt' | 'restorableUntil'>;
+type PartySummaryNode = Pick<
+  Party,
+  'id' | 'code' | 'name' | 'isHost' | 'isProtected' | 'isClosed' | 'isJoined' | 'createdAt' | 'rolledAt' | 'deletedAt' | 'restorableUntil'
+>;
 
 const summaryToNode = (summary: UserPartyRecord): PartySummaryNode => ({
   id: nodeIdToStr({ kind: 'Party', id: summary.slug }),
@@ -90,6 +97,8 @@ const summaryToNode = (summary: UserPartyRecord): PartySummaryNode => ({
   isClosed: summary.isClosed,
   ...deletion(summary.deletedAt),
   isJoined: true,
+  createdAt: isoTime(summary.createdAt),
+  rolledAt: summary.closedAt === null ? null : isoTime(summary.closedAt),
 });
 
 const isComplete = (item: UserPartyListItem): item is UserPartyListItem & UserPartyRecord =>
@@ -140,6 +149,7 @@ async function listParties(context: ApolloContext, userEmail: string, first: num
         slug: node.code, name: node.name, isHost: node.isHost, isProtected: node.isProtected, isClosed: node.isClosed,
         deletedAt: node.deletedAt ? Date.parse(node.deletedAt) : null,
         createdAt: stale.find(item => item.slug === node.code)!.createdAt,
+        closedAt: node.rolledAt === null ? null : Date.parse(node.rolledAt),
       },
     })));
   }

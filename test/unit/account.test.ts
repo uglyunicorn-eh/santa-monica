@@ -99,7 +99,7 @@ describe('UserDO account changes', () => {
     const email = uniqueEmail();
     const stub = env.USER.getByName(email);
     const user = await stub.ensure(email);
-    await stub.apply([{ type: 'addParty', party: { slug: 'QQQEA', name: 'P', createdAt: 1, isHost: true, isProtected: false, isClosed: false } }]);
+    await stub.apply([{ type: 'addParty', party: { slug: 'QQQEA', name: 'P', createdAt: 1, isHost: true, isProtected: false, isClosed: false, closedAt: null } }]);
     await runInDurableObject(stub, async (_i, state) => {
       state.storage.sql.exec("INSERT INTO parties (slug, name, created_at) VALUES ('QQQEB', 'Old row', 2)");
     });
@@ -143,10 +143,10 @@ describe('UserDO account changes', () => {
     const fresh = uniqueEmail('fresh');
     const stub = env.USER.getByName(fresh);
     // A party already sending to the new address since its membership moved: its row is newer and is kept.
-    await stub.apply([{ type: 'addParty', party: { slug: 'QQQFA', name: 'Newer', createdAt: 1, isHost: false, isProtected: false, isClosed: true } }]);
+    await stub.apply([{ type: 'addParty', party: { slug: 'QQQFA', name: 'Newer', createdAt: 1, isHost: false, isProtected: false, isClosed: true, closedAt: null } }]);
     const moved = await stub.receive({ ...record, email: fresh }, [
-      { slug: 'QQQFA', name: 'Older', createdAt: 1, isHost: false, isProtected: false, isClosed: false },
-      { slug: 'QQQFB', name: 'Copied', createdAt: 2, isHost: true, isProtected: true, isClosed: false },
+      { slug: 'QQQFA', name: 'Older', createdAt: 1, isHost: false, isProtected: false, isClosed: false, closedAt: null },
+      { slug: 'QQQFB', name: 'Copied', createdAt: 2, isHost: true, isProtected: true, isClosed: false, closedAt: null },
     ]);
     expect(moved).toEqual({ id: record.id, email: fresh, name: 'Mover', joined: 5, tokenVersion: 1 });
     expect(await stub.get()).toEqual(moved);

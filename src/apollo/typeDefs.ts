@@ -49,6 +49,10 @@ export const typeDefs = `#graphql
     isHost: Boolean!
     isProtected: Boolean!
     isClosed: Boolean!
+    "When the party was started: ISO 8601, UTC."
+    createdAt: String!
+    "When the host closed the party and rolled the dice: ISO 8601, UTC. Null while it is open, and for parties closed before this was recorded."
+    rolledAt: String
     "When the host deleted the party (ISO 8601). Only the host sees a deleted party."
     deletedAt: String
     "Until when the host can restore the deleted party (ISO 8601). After that it is gone for good."

@@ -509,17 +509,53 @@ describe('queries', () => {
     expect(partyViewToNode(null)).toBeNull();
     const view = {
       id: 'x', slug: 'QWERT', name: 'P', password: null, isProtected: false, isHost: false, isJoined: true,
-      isClosed: true, deletedAt: null, participantCount: 2, participants: ['A'], target: { id: 'a'.repeat(24), name: 'A' },
+      isClosed: true, createdAt: Date.UTC(2026, 11, 1, 18, 30), closedAt: Date.UTC(2026, 11, 20, 9, 0, 5, 250),
+      deletedAt: null, participantCount: 2, participants: ['A'], target: { id: 'a'.repeat(24), name: 'A' },
     };
-    expect(partyViewToNode(view)).toMatchObject({ id: nodeIdToStr({ kind: 'Party', id: 'QWERT' }), target: { id: nodeIdToStr({ kind: 'User', id: 'a'.repeat(24) }), name: 'A' } });
-    expect(partyViewToNode({ ...view, target: null })!.target).toBeNull();
+    expect(partyViewToNode(view)).toMatchObject({
+      id: nodeIdToStr({ kind: 'Party', id: 'QWERT' }), target: { id: nodeIdToStr({ kind: 'User', id: 'a'.repeat(24) }), name: 'A' },
+      createdAt: '2026-12-01T18:30:00.000Z', rolledAt: '2026-12-20T09:00:05.250Z',
+    });
+    expect(partyViewToNode({ ...view, target: null, closedAt: null })).toMatchObject({ target: null, rolledAt: null });
+  });
+});
+
+describe('party times', () => {
+  it('gives every party its start time, and its roll time once drawn, from the party and from the list alike', async () => {
+    const host = await signedIn('Host');
+    const guest = await signedIn('Guest');
+    const { node } = await createParty(host, 'Timed');
+    expect(node.createdAt).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+    expect(node.rolledAt).toBeNull();
+    await parties(null, {}, guest).joinParty({ input: { party: node.id, name: 'G' } }, guest);
+    expect((await partyHistory(null, { first: 10 }, guest) as any).items[0]).toMatchObject({ createdAt: node.createdAt, rolledAt: null });
+
+    const closed = await parties(null, {}, host).closeParty({ input: { party: node.id } }, host) as any;
+    expect(closed.node.rolledAt).toMatch(/Z$/);
+    expect(Date.parse(closed.node.rolledAt)).toBeGreaterThanOrEqual(Date.parse(node.createdAt));
+    expect(await party(null, { code: node.code }, { ...guest, partyNodes: undefined })).toMatchObject({ createdAt: node.createdAt, rolledAt: closed.node.rolledAt });
+    expect((await partyHistory(null, { first: 10 }, host) as any).items[0]).toMatchObject({ createdAt: node.createdAt, rolledAt: closed.node.rolledAt });
+  });
+
+  it('refreshes the roll time along with the rest of a stale summary', async () => {
+    const host = await signedIn('Host');
+    const guest = await signedIn('Guest');
+    const { node } = await createParty(host, 'Stale');
+    await parties(null, {}, guest).joinParty({ input: { party: node.id, name: 'G' } }, guest);
+    const closed = await parties(null, {}, host).closeParty({ input: { party: node.id } }, host) as any;
+    await runInDurableObject(env.USER.getByName(host.userEmail!), async (_i, state) => {
+      state.storage.sql.exec('UPDATE parties SET is_host = NULL, closed_at = NULL');
+    });
+    expect((await partyHistory(null, { first: 10 }, host) as any).items[0]).toMatchObject({ rolledAt: closed.node.rolledAt });
+    const [stored] = await env.USER.getByName(host.userEmail!).listParties(10);
+    expect(stored).toMatchObject({ isHost: true, closedAt: Date.parse(closed.node.rolledAt) });
   });
 });
 
 describe('party history', () => {
   const addParties = async (email: string, parties: [string, number][]) =>
     await env.USER.getByName(email).apply(parties.map(([slug, createdAt]) => ({
-      type: 'addParty' as const, party: { slug, name: slug, createdAt, isHost: false, isProtected: false, isClosed: false },
+      type: 'addParty' as const, party: { slug, name: slug, createdAt, isHost: false, isProtected: false, isClosed: false, closedAt: null },
     })));
 
   it('pages through my parties, newest first, without skipping or repeating parties created together', async () => {

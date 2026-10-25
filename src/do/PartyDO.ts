@@ -19,6 +19,8 @@ type PartyRow = {
   host_id: string;
   is_closed: number;
   created_at: number;
+  /** When the host drew the party. Parties drawn before this column existed have null. */
+  closed_at: number | null;
   deleted_at: number | null;
 };
 
@@ -55,6 +57,12 @@ export type JoinCheck = Pick<Session, 'tokenVersion'>;
 /** How long a deleted party can be restored. After that it is erased for good. */
 export const RESTORE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+// Columns added after the first release, by table. Parties created before them get the columns on their next start
+// (none are backfilled).
+const ADDED_COLUMNS: Record<string, Record<string, string>> = {
+  party: { closed_at: 'INTEGER', deleted_at: 'INTEGER' },
+};
+
 const MAX_ATTEMPTS = 15;
 const MAX_BACKOFF_MS = 60 * 60 * 1000;
 
@@ -83,22 +91,25 @@ export class PartyDO extends DurableObject<Env> {
   // The schema is created on the first write only, so looking up an unknown code does not store anything.
   private hasSchema(): boolean {
     if (!this.schemaReady && this.sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'party'").toArray().length) {
-      this.schemaReady = true;
       this.migrate();
     }
     return this.schemaReady;
   }
 
-  /** Parties created before deletion existed get the deleted_at column. */
+  /** Adds the columns introduced after a party was created. Runs once per start, when the party is first read. */
   private migrate() {
-    const columns = this.sql.exec<{ name: string }>('PRAGMA table_info(party)').toArray().map(c => c.name);
-    if (!columns.includes('deleted_at')) {
-      this.sql.exec('ALTER TABLE party ADD COLUMN deleted_at INTEGER');
+    this.schemaReady = true;
+    for (const [table, added] of Object.entries(ADDED_COLUMNS)) {
+      const columns = new Set(this.sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray().map(c => c.name));
+      for (const [column, definition] of Object.entries(added)) {
+        if (!columns.has(column)) {
+          this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+        }
+      }
     }
   }
 
   private ensureSchema() {
-    this.schemaReady = true;
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS party (
         id TEXT PRIMARY KEY,
@@ -108,6 +119,7 @@ export class PartyDO extends DurableObject<Env> {
         host_id TEXT NOT NULL,
         is_closed INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
+        closed_at INTEGER,
         deleted_at INTEGER
       );
       CREATE TABLE IF NOT EXISTS memberships (
@@ -130,7 +142,8 @@ export class PartyDO extends DurableObject<Env> {
         next_attempt_at INTEGER NOT NULL
       );
     `);
-    this.migrate(); // tables that existed before this code may lack newer columns
+    // An existing party's tables were left as they were: bring them up to date too.
+    this.migrate();
   }
 
   private party(): PartyRow | null {
@@ -182,6 +195,7 @@ export class PartyDO extends DurableObject<Env> {
       isHost: memberId === party.host_id,
       isProtected: Boolean(party.password),
       isClosed: Boolean(party.is_closed),
+      closedAt: party.closed_at,
       deletedAt: party.deleted_at,
     };
   }
@@ -229,6 +243,8 @@ export class PartyDO extends DurableObject<Env> {
       isHost,
       isJoined,
       isClosed,
+      createdAt: party.created_at,
+      closedAt: party.closed_at,
       deletedAt: party.deleted_at,
       participantCount: isJoined ? this.memberCount() : null,
       participants,
@@ -270,6 +286,7 @@ export class PartyDO extends DurableObject<Env> {
       host_id: input.host.id,
       is_closed: 0,
       created_at: now,
+      closed_at: null,
       deleted_at: null,
     };
     this.ctx.storage.transactionSync(() => {
@@ -423,6 +440,7 @@ export class PartyDO extends DurableObject<Env> {
     }
 
     const draws = santaShuffle(members, (a, b) => a.member_id === b.member_id);
+    const closedAt = Date.now();
     this.ctx.storage.transactionSync(() => {
       for (const { src, target } of draws) {
         this.sql.exec(
@@ -430,7 +448,7 @@ export class PartyDO extends DurableObject<Env> {
           target.member_id, target.name, src.member_id,
         );
       }
-      this.sql.exec('UPDATE party SET is_closed = 1');
+      this.sql.exec('UPDATE party SET is_closed = 1, closed_at = ?', closedAt);
       // Every member's party list shows the party as closed, and everyone gets the notification email.
       for (const member of members) {
         if (member.member_email) {
@@ -444,7 +462,7 @@ export class PartyDO extends DurableObject<Env> {
     const hostEmail = members.find(member => member.member_id === userId)?.member_email;
     await this.deliverHostNow(hostEmail);
     await this.deliverSoon();
-    return { ok: true, view: this.buildView({ ...party, is_closed: 1 }, userId) };
+    return { ok: true, view: this.buildView({ ...party, is_closed: 1, closed_at: closedAt }, userId) };
   }
 
   /**

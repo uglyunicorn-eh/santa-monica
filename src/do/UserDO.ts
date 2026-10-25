@@ -28,6 +28,7 @@ type PartyRow = {
   is_host: number | null;
   is_protected: number | null;
   is_closed: number | null;
+  closed_at: number | null;
   deleted_at: number | null;
 };
 
@@ -47,6 +48,7 @@ const ADDED_COLUMNS: Record<string, Record<string, string>> = {
     is_host: 'INTEGER',
     is_protected: 'INTEGER',
     is_closed: 'INTEGER',
+    closed_at: 'INTEGER',
     deleted_at: 'INTEGER',
   },
 };
@@ -87,6 +89,7 @@ export class UserDO extends DurableObject<Env> {
           is_host INTEGER,
           is_protected INTEGER,
           is_closed INTEGER,
+          closed_at INTEGER,
           deleted_at INTEGER
         );
         CREATE TABLE IF NOT EXISTS host_reservations (
@@ -214,10 +217,13 @@ export class UserDO extends DurableObject<Env> {
     return toRecord(row);
   }
 
-  private putParty({ slug, name, createdAt, isHost, isProtected, isClosed, deletedAt = null }: UserPartyRecord, insert: 'INSERT OR REPLACE' | 'INSERT OR IGNORE') {
+  private putParty(
+    { slug, name, createdAt, isHost, isProtected, isClosed, closedAt, deletedAt = null }: UserPartyRecord,
+    insert: 'INSERT OR REPLACE' | 'INSERT OR IGNORE',
+  ) {
     this.sql.exec(
-      `${insert} INTO parties (slug, name, created_at, is_host, is_protected, is_closed, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      slug, name, createdAt, Number(isHost), Number(isProtected), Number(isClosed), deletedAt,
+      `${insert} INTO parties (slug, name, created_at, is_host, is_protected, is_closed, closed_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      slug, name, createdAt, Number(isHost), Number(isProtected), Number(isClosed), closedAt, deletedAt,
     );
   }
 
@@ -335,7 +341,7 @@ export class UserDO extends DurableObject<Env> {
    * row of the previous page) continues exactly where that page ended.
    */
   listParties(first: number, after?: PartyListCursor | null): UserPartyListItem[] {
-    const columns = 'slug, name, created_at, is_host, is_protected, is_closed, deleted_at';
+    const columns = 'slug, name, created_at, is_host, is_protected, is_closed, closed_at, deleted_at';
     const order = 'ORDER BY created_at DESC, slug DESC LIMIT ?';
     const rows = after
       ? this.sql.exec<PartyRow>(
@@ -352,6 +358,7 @@ export class UserDO extends DurableObject<Env> {
         isHost: flag(row.is_host),
         isProtected: flag(row.is_protected),
         isClosed: flag(row.is_closed),
+        closedAt: row.closed_at,
         deletedAt: row.deleted_at,
       }));
   }

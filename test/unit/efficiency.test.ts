@@ -183,6 +183,19 @@ describe('Durable Object calls per operation', () => {
     expect(counting.calls.map(c => `${c.binding}.${c.method}`)).toEqual(['USER.listParties', 'USER.listParties']);
   });
 
+  it('gives party times in the history from the summaries alone', async () => {
+    const me = await person('Me');
+    const friend = await person('Friend');
+    const { node } = (await gql(env, CREATE, { name: 'Timed' }, me.token)).data.parties.createParty;
+    await gql(env, JOIN, { party: node.id, name: 'F' }, friend.token);
+    await gql(env, CLOSE, { party: node.id }, me.token);
+    await settle(node.code);
+    const counting = countingEnv();
+    const res = await gql(counting.env, `{ partyHistory(first: 10) { items { code createdAt rolledAt } } }`, {}, me.token);
+    expect(res.data.partyHistory.items).toEqual([{ code: node.code, createdAt: expect.any(String), rolledAt: expect.any(String) }]);
+    expect(counting.calls.map(c => `${c.binding}.${c.method}`)).toEqual(['USER.listParties']);
+  });
+
   it('refuses a join from a deleted account with no extra call', async () => {
     const host = await person('Host');
     const guest = await person('Guest');
@@ -467,7 +480,7 @@ describe('party lists saved before summaries existed', () => {
 
   it('skips parties that no longer exist while filling in', async () => {
     const me = await person('Me');
-    await env.USER.getByName(me.email).apply([{ type: 'addParty', party: { slug: 'QQQQZ', name: 'Gone', createdAt: 1, isHost: false, isProtected: false, isClosed: false } }]);
+    await env.USER.getByName(me.email).apply([{ type: 'addParty', party: { slug: 'QQQQZ', name: 'Gone', createdAt: 1, isHost: false, isProtected: false, isClosed: false, closedAt: null } }]);
     await runInDurableObject(env.USER.getByName(me.email), async (_i, state) => {
       state.storage.sql.exec('UPDATE parties SET is_host = NULL');
     });
@@ -485,7 +498,7 @@ describe('party lists saved before summaries existed', () => {
     });
     await evictDurableObject(stub);
     expect(await env.USER.getByName(email).listParties(10)).toEqual([
-      { slug: 'QQQQY', name: 'Before', createdAt: 5, isHost: null, isProtected: null, isClosed: null, deletedAt: null },
+      { slug: 'QQQQY', name: 'Before', createdAt: 5, isHost: null, isProtected: null, isClosed: null, closedAt: null, deletedAt: null },
     ]);
   });
 });
