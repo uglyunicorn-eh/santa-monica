@@ -154,11 +154,12 @@ describe('HTTP surface', () => {
   it('limits code checks through party writes per client, as for lookups: no way around the lookup limit', async () => {
     const who = await signIn(uniqueEmail('prober'));
     const ip = uniqueIp();
+    // The limit counts in one-minute windows, so the run may cross into the next one: 121 tries always fill one.
     const statuses = [];
-    for (let i = 0; i < 61; i++) {
+    for (let i = 0; i < 121 && statuses.at(-1) !== 429; i++) {
       statuses.push((await call('POST', '/v1/parties/leave', { token: who.token, ip, body: { code: `QQQQQQ${String.fromCharCode(65 + (i % 26))}${String.fromCharCode(65 + Math.floor(i / 26))}` } })).status);
     }
     expect(statuses.slice(0, 60).every(status => status === 404)).toBe(true);
-    expect(statuses[60]).toBe(429);
+    expect(statuses.at(-1)).toBe(429);
   });
 });

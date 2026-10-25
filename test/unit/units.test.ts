@@ -90,7 +90,7 @@ describe('mail templates', () => {
     const taken = renderEmailTakenNotice({ email: 'a&b@example.com', assetsUrl: 'https://api.test' });
     expect(taken.text).toContain('another Anonymous Ded Morozes account to a&b@example.com');
     expect(taken.html).toContain('a&amp;b@example.com');
-    expect(taken.html).not.toContain('href=');
+    expect([...taken.html.matchAll(/href="([^"]*)"/g)].map(m => m[1])).toEqual(['https://uglyunicorn.ca/']);
     for (const mail of [deletion, change, notice, taken]) {
       expect(`${mail.subject}${mail.html}${mail.text}`).not.toMatch(/\{\{|ACTION_ROW/);
     }

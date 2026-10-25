@@ -5,7 +5,7 @@ import * as v from 'valibot';
 import { adoptTypedAccount } from 'src/api/account';
 import { bodies } from 'src/api/schemas';
 import { EnterRequestToken } from 'src/api/types';
-import { canonicalEmail } from 'src/utils/email';
+import { canonicalEmail, undottedGmail } from 'src/utils/email';
 
 import { jwt, mailer, request, signIn, testEnv, uniqueEmail } from './helpers';
 
@@ -20,18 +20,24 @@ const signInLink = (payload: { email: string; typed?: string }) =>
 const enter = (token: string) => request('POST', '/v1/auth/session', { body: { token } });
 
 describe('canonicalEmail', () => {
-  it('lowercases every address; for Gmail it also drops dots and +tags, and uses gmail.com', () => {
+  it('lowercases every address; for Gmail it also drops +tags and uses gmail.com, but keeps the dots', () => {
     expect(canonicalEmail(' Some.One+Tag@Example.COM ')).toBe('some.one+tag@example.com');
-    expect(canonicalEmail('John.Doe+santa@Gmail.com')).toBe('johndoe@gmail.com');
-    expect(canonicalEmail('j.o.h.n.d.o.e@GoogleMail.com')).toBe('johndoe@gmail.com');
+    expect(canonicalEmail('John.Doe+santa@Gmail.com')).toBe('john.doe@gmail.com');
+    expect(canonicalEmail('j.o.h.n.d.o.e@GoogleMail.com')).toBe('j.o.h.n.d.o.e@gmail.com');
     expect(canonicalEmail('johndoe+a+b@gmail.com')).toBe('johndoe@gmail.com');
     expect(canonicalEmail('john.doe@mail.gmail.com')).toBe('john.doe@mail.gmail.com');
     expect(canonicalEmail('no-at-sign')).toBe('no-at-sign');
   });
 
+  it('gives the dot-less spelling of a dotted Gmail address, where older accounts may be kept', () => {
+    expect(undottedGmail('john.doe@gmail.com')).toBe('johndoe@gmail.com');
+    expect(undottedGmail('johndoe@gmail.com')).toBeNull();
+    expect(undottedGmail('john.doe@example.com')).toBeNull();
+  });
+
   it('is the email request bodies give back, along with the address as typed', () => {
     expect(v.parse(bodies.magicLink, { email: ' John.Doe+Santa@GoogleMail.com ' }))
-      .toEqual({ email: 'johndoe@gmail.com', typed: 'john.doe+santa@googlemail.com', party: undefined });
+      .toEqual({ email: 'john.doe@gmail.com', typed: 'john.doe+santa@googlemail.com', party: undefined });
     expect(v.parse(bodies.emailChange, { email: 'A@B.example' })).toEqual({ email: 'a@b.example', typed: 'a@b.example' });
     // Nothing is left of these once normalized.
     expect(v.safeParse(bodies.magicLink, { email: '+santa@gmail.com' }).success).toBe(false);
@@ -41,7 +47,7 @@ describe('canonicalEmail', () => {
 describe('signing in with a Gmail address', () => {
   it('mails the link to the normalized address and signs in to one account, however it is spelled', async () => {
     const id = gmailUser();
-    const email = `${id}@gmail.com`;
+    const email = `${dotted(id)}@gmail.com`;
     const { sent, EMAIL } = mailer();
     for (const spelling of [`${dotted(id)}+santa@GoogleMail.com`, email]) {
       expect((await request('POST', '/v1/auth/magic-link', { body: { email: spelling }, env: testEnv({ EMAIL }) })).status).toBe(202);
@@ -58,7 +64,7 @@ describe('signing in with a Gmail address', () => {
 
   it('moves an account kept under the address as typed to the normalized one, with its parties', async () => {
     const id = gmailUser();
-    const typed = `${dotted(id)}@gmail.com`;
+    const typed = `${id}+santa@gmail.com`;
     const old = await signIn(typed, 'Old');
     const party = (await request('POST', '/v1/parties', { token: old.token, body: { name: 'Kept' } })).body;
 
@@ -76,9 +82,18 @@ describe('signing in with a Gmail address', () => {
     expect((await enter(await signInLink({ email: typed }))).body.user).toEqual({ id: old.nodeId, name: '', email: `${id}@gmail.com` });
   });
 
+  it('moves an account kept without the dots to the dotted address it is signed in with', async () => {
+    const id = gmailUser();
+    const old = await signIn(`${id}@gmail.com`, 'Old');
+    const entered = await enter(await signInLink({ email: `${dotted(id)}@gmail.com` }));
+    expect(entered).toMatchObject({ status: 200, body: { user: { id: old.nodeId, name: 'Old', email: `${dotted(id)}@gmail.com` } } });
+    expect((await request('GET', '/v1/me', { token: old.token })).status).toBe(401);
+    expect(await env.USER.getByName(`${id}@gmail.com`).get()).toBeNull();
+  });
+
   it('leaves an account under the typed address alone when the normalized address has its own', async () => {
     const id = gmailUser();
-    const typed = `${dotted(id)}@gmail.com`;
+    const typed = `${id}+old@gmail.com`;
     const old = await signIn(typed);
     const current = await signIn(`${id}@gmail.com`);
     expect((await enter(await signInLink({ email: `${id}@gmail.com`, typed }))).body.user.id).toBe(current.nodeId);
@@ -102,7 +117,7 @@ describe('adoptTypedAccount', () => {
     };
     return { abort, env: fake as unknown as typeof env };
   };
-  const adopt = (e: typeof env) => adoptTypedAccount(e, 'a.b@gmail.com', 'ab@gmail.com', 'jti', Date.now() + 60_000);
+  const adopt = (e: typeof env) => adoptTypedAccount(e, ['a.b@gmail.com'], 'ab@gmail.com', 'jti', Date.now() + 60_000);
 
   it('signs in as usual when there is nothing to move, or it went away in the meantime', async () => {
     await expect(adopt(fakeEnv(null, user).env)).resolves.toBe('none');
@@ -125,16 +140,19 @@ describe('adoptTypedAccount', () => {
 describe('changing to a Gmail address', () => {
   const ask = (token: string, email: string, e?: typeof env) => request('POST', '/v1/me/email-change', { token, body: { email }, env: e });
 
-  it('treats every spelling as one address, also for accounts still kept under the typed one', async () => {
+  it('treats every spelling as one address, but a dot makes another one', async () => {
     const id = gmailUser();
     const who = await signIn(`${id}@gmail.com`);
-    expect(await ask(who.token, `${dotted(id)}+x@googlemail.com`)).toMatchObject({ status: 400, body: { error: { message: "That's already your email." } } });
+    expect(await ask(who.token, `${id}+x@googlemail.com`)).toMatchObject({ status: 400, body: { error: { message: "That's already your email." } } });
+    const dots = mailer();
+    expect((await ask(who.token, `${dotted(id)}@gmail.com`, testEnv({ EMAIL: dots.EMAIL }))).status).toBe(202);
+    expect(dots.sent.map(m => m.to)).toEqual([`${dotted(id)}@gmail.com`, `${id}@gmail.com`]);
 
     const other = gmailUser();
     await signIn(`${dotted(other)}@gmail.com`);
     const notified = mailer();
-    expect((await ask(who.token, `${dotted(other)}@gmail.com`, testEnv({ EMAIL: notified.EMAIL }))).status).toBe(202);
-    expect(notified.sent[0]).toMatchObject({ to: `${other}@gmail.com`, subject: 'Someone tried to use your email on Anonymous Ded Morozes' });
+    expect((await ask(who.token, `${dotted(other)}+x@googlemail.com`, testEnv({ EMAIL: notified.EMAIL }))).status).toBe(202);
+    expect(notified.sent[0]).toMatchObject({ to: `${dotted(other)}@gmail.com`, subject: 'Someone tried to use your email on Anonymous Ded Morozes' });
 
     const free = gmailUser();
     const { sent, EMAIL } = mailer();

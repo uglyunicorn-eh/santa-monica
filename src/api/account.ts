@@ -87,17 +87,19 @@ export async function moveAccount(env: Env, { userId, from, to, jti, expiresAt, 
 }
 
 /**
- * Accounts made before addresses were normalized are kept under the address as it was typed (lowercased). When
- * someone signs in with such an address and the normalized one has no account yet, their account moves there, the
+ * Accounts can still be kept under an older spelling of the address: as it was typed (lowercased), from before
+ * addresses were normalized, or a Gmail address without its dots, from while normalizing dropped them. When someone
+ * signs in and the normalized address has no account yet, the first account found under `older` moves there, the
  * way an email change does. Returns what happened, for the logs. Throws when the move has to be tried again, so the
  * sign-in doesn't start an empty account instead.
  */
-export async function adoptTypedAccount(env: Env, typed: string, email: string, jti: string, expiresAt: number, key?: string) {
-  const [current, old] = await Promise.all([env.USER.getByName(email).get(), env.USER.getByName(typed).get()]);
-  if (current || !old) {
+export async function adoptTypedAccount(env: Env, older: string[], email: string, jti: string, expiresAt: number, key?: string) {
+  const [current, ...found] = await Promise.all([email, ...older].map(address => env.USER.getByName(address).get()));
+  const index = found.findIndex(Boolean);
+  if (current || index < 0) {
     return 'none';
   }
-  const moved = await moveAccount(env, { userId: old.id, from: typed, to: email, jti, expiresAt, key });
+  const moved = await moveAccount(env, { userId: found[index]!.id, from: older[index], to: email, jti, expiresAt, key });
   if (moved.ok) {
     return 'moved';
   }

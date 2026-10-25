@@ -27,24 +27,25 @@ describe('Gmail addresses', () => {
     const email = `${id}@gmail.com`;
     const first = await signIn(email);
     // Three sign-ins: the per-address limit of 3 a minute counts every spelling together.
-    for (const spelling of [`${dotted(id)}+santa@gmail.com`, `${dotted(id).toUpperCase()}+x@GoogleMail.com`]) {
+    for (const spelling of [`${id}+santa@gmail.com`, `${id.toUpperCase()}+x@GoogleMail.com`]) {
       expect((await signInAs(spelling, email)).body.user).toEqual({ id: first.id, name: '', email });
     }
-    expect(await mailbox(`${dotted(id)}@gmail.com`)).toEqual([]);
+    expect(await mailbox(`${id}+santa@gmail.com`)).toEqual([]);
   });
 
   it('share one per-address rate limit', async () => {
     const id = gmailUser();
     const statuses = [];
-    for (const spelling of [`${id}@gmail.com`, `${dotted(id)}@gmail.com`, `${id}+a@gmail.com`, `${id}+b@googlemail.com`]) {
+    for (const spelling of [`${id}@gmail.com`, `${id}+a@gmail.com`, `${id}+b@googlemail.com`, `${id.toUpperCase()}@gmail.com`, `${dotted(id)}@gmail.com`]) {
       statuses.push((await requestMagicLink(spelling, { ip: uniqueIp() })).status);
     }
-    expect(statuses).toEqual([202, 202, 202, 429]);
+    // The dotted spelling is another address, with a limit of its own.
+    expect(statuses).toEqual([202, 202, 202, 429, 202]);
   });
 
   it('move an account made before addresses were normalized on its next sign-in, parties and all', async () => {
     const id = gmailUser();
-    const typed = `${dotted(id)}@gmail.com`;
+    const typed = `${id}+santa@gmail.com`;
     const email = `${id}@gmail.com`;
     // The account as it was kept before: under the address as typed.
     const record = await env.USER.getByName(typed).ensure(typed);
@@ -69,5 +70,18 @@ describe('Gmail addresses', () => {
 
     // Signing in again finds the moved account directly.
     expect((await signInAs(`${id}+again@gmail.com`, email)).body.user.id).toBe(old.id);
+  });
+
+  it('move an account kept without the dots to the dotted address it signs in with', async () => {
+    const id = gmailUser();
+    const email = `${dotted(id)}@gmail.com`;
+    const old = await signIn(`${id}@gmail.com`);
+    const party = await createParty(old, 'Mine');
+
+    const entered = await signInAs(email, email);
+    expect(entered.body.user).toEqual({ id: old.id, name: '', email });
+    const moved = { email, id: old.id, token: entered.body.userToken as string };
+    expect((await myParties(moved)).body.items.map(p => p.code)).toEqual([party.code]);
+    expect((await me(old)).status).toBe(401);
   });
 });
