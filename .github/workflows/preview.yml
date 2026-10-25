@@ -25,8 +25,11 @@ jobs:
 
   deploy:
     needs: ci
-    # Secrets are not available to pull requests from forks.
-    if: github.event.action != 'closed' && github.event.pull_request.head.repo.full_name == github.repository
+    # Secrets are not available to pull requests from forks, nor to Dependabot (it has its own secret store).
+    if: >-
+      github.event.action != 'closed'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
