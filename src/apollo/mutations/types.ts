@@ -25,6 +25,18 @@ export type RestorePartyInput = {
   party: string;
 }
 
+export type UpdateNameInput = {
+  name: string;
+}
+
+export type ConfirmTokenInput = {
+  token: string;
+}
+
+export type RequestEmailChangeInput = {
+  email: string;
+}
+
 export type EnterRequestInput = {
   email: string;
   party: string;

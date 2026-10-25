@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { renderPartyNotification, renderSignIn } from 'src/mail';
+import { renderAccountDeletion, renderEmailChange, renderEmailChangeNotice, renderPartyNotification, renderSignIn } from 'src/mail';
 import { isObjectId, newObjectId, objectIdTime } from 'src/utils/ids';
 import santaShuffle from 'src/utils/santaShuffle';
 import { nodeIdToStr, strToNodeId } from 'src/utils/strings/nodeId';
@@ -52,5 +52,23 @@ describe('mail templates', () => {
     expect(mail.html).not.toContain('Tom & Jerry <3');
     expect(mail.html).toContain('href="https://gnomik.me/p/QWERT/"');
     expect(mail.html + mail.text).not.toMatch(/\{\{|unsubscribe|sendgrid/i);
+  });
+
+  it('fills the account emails, escaping addresses in HTML only', () => {
+    const deletion = renderAccountDeletion({ url: 'https://gnomik.me/profile/delete/abc', assetsUrl: 'https://api.test' });
+    expect(deletion.text).toContain('https://gnomik.me/profile/delete/abc');
+    expect(deletion.html).toContain('href="https://gnomik.me/profile/delete/abc"');
+
+    const change = renderEmailChange({ url: 'https://gnomik.me/profile/email/abc', oldEmail: 'old@example.com', newEmail: 'a&b@example.com', assetsUrl: 'https://api.test' });
+    expect(change.text).toContain('from old@example.com to a&b@example.com');
+    expect(change.html).toContain('a&amp;b@example.com');
+    expect(change.html).toContain('href="https://gnomik.me/profile/email/abc"');
+
+    const notice = renderEmailChangeNotice({ oldEmail: 'old@example.com', newEmail: 'new@example.com', assetsUrl: 'https://api.test' });
+    expect(notice.text).toContain('from old@example.com to new@example.com');
+    expect(notice.html).not.toContain('href=');
+    for (const mail of [deletion, change, notice]) {
+      expect(`${mail.subject}${mail.html}${mail.text}`).not.toMatch(/\{\{|ACTION_ROW/);
+    }
   });
 });

@@ -2,10 +2,25 @@ import { DurableObject } from 'cloudflare:workers';
 
 import { Env } from 'src/env';
 import { newObjectId } from 'src/utils/ids';
+import { Session, sessionMatches } from 'src/utils/session';
 
-import { HostingStart, UserPartyListItem, UserRecord, UserUpdate } from './types';
+import { HostingStart, PartyListCursor, UserPartyListItem, UserPartyRecord, UserRecord, UserUpdate } from './types';
 
-type UserRow = { id: string; email: string; name: string; joined: number };
+type UserRow = {
+  id: string;
+  email: string;
+  name: string;
+  joined: number;
+  token_version: number;
+  deleted_at: number | null;
+  /** Set while the account is being deleted or moved to another email (see `startAccountChange`). */
+  changing_until?: number | null;
+};
+
+/** How long an account change holds the account at most, in case the request running it never finishes. */
+const ACCOUNT_CHANGE_MS = 60 * 1000;
+
+const isChanging = (row: UserRow) => Boolean(row.changing_until && row.changing_until > Date.now());
 type PartyRow = {
   slug: string;
   name: string;
@@ -18,6 +33,24 @@ type PartyRow = {
 
 const flag = (value: number | null) => (value === null ? null : Boolean(value));
 
+const toRecord = ({ id, email, name, joined, token_version }: UserRow): UserRecord =>
+  ({ id, email, name, joined, tokenVersion: token_version });
+
+// Columns added after the first release. Tables created before them get the columns on the next start.
+const ADDED_COLUMNS: Record<string, Record<string, string>> = {
+  user: {
+    token_version: 'INTEGER NOT NULL DEFAULT 0',
+    deleted_at: 'INTEGER',
+    changing_until: 'INTEGER',
+  },
+  parties: {
+    is_host: 'INTEGER',
+    is_protected: 'INTEGER',
+    is_closed: 'INTEGER',
+    deleted_at: 'INTEGER',
+  },
+};
+
 /** How long a slot held for a party being created lasts if the party never arrives (say, the create failed). */
 const HOST_RESERVATION_TTL_MS = 5 * 60 * 1000;
 
@@ -25,6 +58,10 @@ const HOST_RESERVATION_TTL_MS = 5 * 60 * 1000;
  * One instance per user, addressed by the lowercased email (`env.USER.getByName(email)`).
  * Holds the profile and the user's party list. The list carries a summary of each party (name, host, protected,
  * closed), kept up to date by `PartyDO`'s outbox through `apply`, so listing parties needs no call to any party.
+ *
+ * A deleted account leaves a tombstone: `get()` returns null and `apply` writes nothing, so late outbox deliveries
+ * can't bring the record back, and the token version is bumped so its session tokens stop working. The next sign-in
+ * with the same email starts a new account (new id) on top of it.
  */
 export class UserDO extends DurableObject<Env> {
   private sql: SqlStorage;
@@ -38,7 +75,10 @@ export class UserDO extends DurableObject<Env> {
           id TEXT PRIMARY KEY,
           email TEXT NOT NULL,
           name TEXT NOT NULL DEFAULT '',
-          joined INTEGER NOT NULL
+          joined INTEGER NOT NULL,
+          token_version INTEGER NOT NULL DEFAULT 0,
+          deleted_at INTEGER,
+          changing_until INTEGER
         );
         CREATE TABLE IF NOT EXISTS parties (
           slug TEXT PRIMARY KEY,
@@ -58,29 +98,38 @@ export class UserDO extends DurableObject<Env> {
           expires_at INTEGER NOT NULL
         );
       `);
-      // Lists created before party summaries existed get the columns added; their rows stay null until refreshed.
-      const columns = new Set(this.sql.exec<{ name: string }>('PRAGMA table_info(parties)').toArray().map(c => c.name));
-      for (const column of ['is_host', 'is_protected', 'is_closed', 'deleted_at']) {
-        if (!columns.has(column)) {
-          this.sql.exec(`ALTER TABLE parties ADD COLUMN ${column} INTEGER`);
+      // Party rows stored before summaries existed stay null until refreshed; users get version 0, not deleted.
+      for (const [table, added] of Object.entries(ADDED_COLUMNS)) {
+        const columns = new Set(this.sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray().map(c => c.name));
+        for (const [column, definition] of Object.entries(added)) {
+          if (!columns.has(column)) {
+            this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+          }
         }
       }
     });
   }
 
   private row(): UserRow | null {
-    return this.sql.exec<UserRow>('SELECT id, email, name, joined FROM user LIMIT 1').toArray()[0] ?? null;
+    return this.sql.exec<UserRow>('SELECT id, email, name, joined, token_version, deleted_at, changing_until FROM user LIMIT 1').toArray()[0] ?? null;
   }
 
-  /** Returns the user, creating it on the first sign-in. */
+  /** Returns the user, creating it on the first sign-in, or starting a new account after a deleted one. */
   ensure(email: string): UserRecord {
     const existing = this.row();
-    if (existing) {
-      return existing;
+    if (existing && existing.deleted_at === null) {
+      return toRecord(existing);
     }
-    const user = { id: newObjectId(), email, name: '', joined: Date.now() };
-    this.sql.exec('INSERT INTO user (id, email, name, joined) VALUES (?, ?, ?, ?)', user.id, user.email, user.name, user.joined);
-    return user;
+    // After a deleted account, the tombstone's token version is kept, so the old account's tokens stay revoked.
+    const row: UserRow = {
+      id: newObjectId(), email, name: '', joined: Date.now(), token_version: existing?.token_version ?? 0, deleted_at: null,
+    };
+    this.sql.exec('DELETE FROM user');
+    this.sql.exec(
+      'INSERT INTO user (id, email, name, joined, token_version) VALUES (?, ?, ?, ?, ?)',
+      row.id, row.email, row.name, row.joined, row.token_version,
+    );
+    return toRecord(row);
   }
 
   /**
@@ -88,26 +137,134 @@ export class UserDO extends DurableObject<Env> {
    * was already used. Used links are kept only until they expire.
    */
   redeemMagicLink(email: string, jti: string, expiresAt: number): UserRecord | null {
-    this.sql.exec('DELETE FROM used_magic_links WHERE expires_at < ?', Date.now());
-    if (this.sql.exec('SELECT 1 FROM used_magic_links WHERE jti = ?', jti).toArray().length) {
-      return null;
-    }
-    this.sql.exec('INSERT INTO used_magic_links (jti, expires_at) VALUES (?, ?)', jti, expiresAt);
-    return this.ensure(email);
+    return this.useLink(jti, expiresAt) ? this.ensure(email) : null;
   }
 
+  /** Marks an emailed link as used. False when it already was. Used links are kept only until they expire. */
+  private useLink(jti: string, expiresAt: number): boolean {
+    if (this.linkUsed(jti)) {
+      return false;
+    }
+    this.sql.exec('INSERT INTO used_magic_links (jti, expires_at) VALUES (?, ?)', jti, expiresAt);
+    return true;
+  }
+
+  /** Whether an emailed link was already used (forgetting used links that have expired). */
+  private linkUsed(jti: string): boolean {
+    this.sql.exec('DELETE FROM used_magic_links WHERE expires_at < ?', Date.now());
+    return this.sql.exec('SELECT 1 FROM used_magic_links WHERE jti = ?', jti).toArray().length > 0;
+  }
+
+  /**
+   * Starts deleting the account or moving it to another email, from an emailed link: checks the link is for this
+   * account (`userId`) and not used yet, marks it used, and returns the user with the slugs of all their parties.
+   * Until the change finishes (the account is tombstoned), is aborted, or a minute passes, the account is held: it
+   * reads as missing, refuses joins and profile changes, and no other change can start, so the party list can't
+   * change under the one running.
+   */
+  startAccountChange(userId: string, jti: string, expiresAt: number):
+    { ok: true; user: UserRecord; parties: string[] } | { ok: false; reason: 'gone' | 'used' | 'busy' } {
+    // A used link is reported as used even when the change it made left this account a tombstone.
+    if (this.linkUsed(jti)) {
+      return { ok: false, reason: 'used' };
+    }
+    const row = this.row();
+    if (!row || row.deleted_at !== null || row.id !== userId) {
+      return { ok: false, reason: 'gone' };
+    }
+    if (isChanging(row)) {
+      return { ok: false, reason: 'busy' };
+    }
+    this.sql.exec('INSERT INTO used_magic_links (jti, expires_at) VALUES (?, ?)', jti, expiresAt);
+    this.sql.exec('UPDATE user SET changing_until = ?', Date.now() + ACCOUNT_CHANGE_MS);
+    const parties = this.sql.exec<{ slug: string }>('SELECT slug FROM parties').toArray().map(r => r.slug);
+    return { ok: true, user: toRecord(row), parties };
+  }
+
+  /** Releases an account change that could not finish, and the link that started it, so the link can be tried again. */
+  abortAccountChange(jti: string): void {
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec('UPDATE user SET changing_until = NULL');
+      this.sql.exec('DELETE FROM used_magic_links WHERE jti = ?', jti);
+    });
+  }
+
+  /**
+   * Receives an account moved here from another email: the same user (id, name, joined, token version) and their
+   * party list. Refused (null) when a live account already uses this email. Party rows already here are newer (the
+   * parties have been sending to this email since they were moved), so they are kept.
+   */
+  receive(user: UserRecord, parties: UserPartyRecord[]): UserRecord | null {
+    const existing = this.row();
+    if (existing && existing.deleted_at === null) {
+      return null;
+    }
+    // Never go below a version this email's object already handed out.
+    const row: UserRow = { ...user, token_version: Math.max(user.tokenVersion, existing?.token_version ?? 0), deleted_at: null };
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec('DELETE FROM user');
+      this.sql.exec(
+        'INSERT INTO user (id, email, name, joined, token_version) VALUES (?, ?, ?, ?, ?)',
+        row.id, row.email, row.name, row.joined, row.token_version,
+      );
+      for (const party of parties) {
+        this.putParty(party, 'INSERT OR IGNORE');
+      }
+    });
+    return toRecord(row);
+  }
+
+  private putParty({ slug, name, createdAt, isHost, isProtected, isClosed, deletedAt = null }: UserPartyRecord, insert: 'INSERT OR REPLACE' | 'INSERT OR IGNORE') {
+    this.sql.exec(
+      `${insert} INTO parties (slug, name, created_at, is_host, is_protected, is_closed, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      slug, name, createdAt, Number(isHost), Number(isProtected), Number(isClosed), deletedAt,
+    );
+  }
+
+  /** The user, or null when there is none, the account was deleted, or it is being deleted or moved right now. */
   get(): UserRecord | null {
-    return this.row();
+    const row = this.row();
+    return row && row.deleted_at === null && !isChanging(row) ? toRecord(row) : null;
+  }
+
+  /**
+   * Sets the profile name, the default name for parties the user joins later. Parties already joined keep the
+   * name the user joined them with. Returns null, changing nothing, when the session no longer belongs to this user.
+   */
+  updateName(name: string, session: Session): UserRecord | null {
+    const user = this.get();
+    if (!sessionMatches(user, session)) {
+      return null;
+    }
+    this.sql.exec('UPDATE user SET name = ?', name);
+    return { ...user!, name };
+  }
+
+  /**
+   * Deletes the account, leaving a tombstone: the profile and party list are wiped, and every session token issued
+   * so far is revoked. An object without a user yet gets a tombstone too, so nothing can be written to it.
+   */
+  tombstone(): void {
+    this.ctx.storage.transactionSync(() => {
+      const now = Date.now();
+      if (this.row()) {
+        this.sql.exec("UPDATE user SET name = '', deleted_at = ?, token_version = token_version + 1", now);
+      } else {
+        this.sql.exec("INSERT INTO user (id, email, name, joined, token_version, deleted_at) VALUES (?, '', '', ?, 1, ?)", newObjectId(), now, now);
+      }
+      this.sql.exec('DELETE FROM parties');
+    });
   }
 
   /**
    * Checks the open-party limit and, when there is room, holds a slot for the party about to be created, in one step:
    * concurrent creates each see the slots the others hold. The slot is released when the new party lands in the list
-   * (`releaseHostSlot`) or after HOST_RESERVATION_TTL_MS. Returns null when the user has no profile.
+   * (`releaseHostSlot`) or after HOST_RESERVATION_TTL_MS. Returns null when there is no user or the session no longer
+   * belongs to them.
    */
-  startHosting(limit: number): HostingStart | null {
-    const user = this.row();
-    if (!user) {
+  startHosting(limit: number, session: Session): HostingStart | null {
+    const user = this.get();
+    if (!sessionMatches(user, session)) {
       return null;
     }
     const now = Date.now();
@@ -117,31 +274,52 @@ export class UserDO extends DurableObject<Env> {
       .one().n;
     const held = this.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM host_reservations').one().n;
     if (open + held >= limit) {
-      return { ...user, openHostedParties: open + held, allowed: false };
+      return { ...user!, openHostedParties: open + held, allowed: false };
     }
     const reservation = newObjectId();
     this.sql.exec('INSERT INTO host_reservations (id, expires_at) VALUES (?, ?)', reservation, now + HOST_RESERVATION_TTL_MS);
-    return { ...user, openHostedParties: open + held, allowed: true, reservation };
+    return { ...user!, openHostedParties: open + held, allowed: true, reservation };
   }
 
-  /** Applies a batch of changes from a party, in order, in one transaction. Safe to retry. */
-  apply(updates: UserUpdate[]): void {
+  /**
+   * Applies a batch of changes from a party, in order, in one transaction. Safe to retry.
+   * Writes nothing to a deleted account, and nothing when `session` is given and no longer belongs to this user (or
+   * the account is held by an account change), so a party can verify a joining session in the call it makes anyway. Returns the user as it is afterwards (null if
+   * there is none or it was deleted).
+   */
+  apply(updates: UserUpdate[], session?: Session): UserRecord | null {
+    const row = this.row();
+    if (row?.deleted_at) {
+      return null;
+    }
+    const user = row && toRecord(row);
+    if (session && !sessionMatches(user, session)) {
+      return user;
+    }
+    if (session && isChanging(row!)) {
+      // Held by an account change: a join now would be missed by it.
+      return null;
+    }
+    let name = user?.name;
     this.ctx.storage.transactionSync(() => {
       for (const update of updates) {
         switch (update.type) {
-          case 'addParty': {
-            const { slug, name, createdAt, isHost, isProtected, isClosed, deletedAt = null } = update.party;
-            this.sql.exec(
-              'INSERT OR REPLACE INTO parties (slug, name, created_at, is_host, is_protected, is_closed, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-              slug, name, createdAt, Number(isHost), Number(isProtected), Number(isClosed), deletedAt,
-            );
+          case 'addParty':
+            this.putParty(update.party, 'INSERT OR REPLACE');
             break;
-          }
           case 'removeParty':
             this.sql.exec('DELETE FROM parties WHERE slug = ?', update.slug);
             break;
           case 'setName':
-            this.sql.exec('UPDATE user SET name = ?', update.name);
+            name = update.name;
+            this.sql.exec('UPDATE user SET name = ?', name);
+            break;
+          case 'setNameIfEmpty':
+            // Only the account that joined: a join checked late (by the alarm) must not name a newer account.
+            if (user && name === '' && (update.userId ?? user.id) === user.id) {
+              name = update.name;
+              this.sql.exec('UPDATE user SET name = ?', name);
+            }
             break;
           case 'releaseHostSlot':
             this.sql.exec('DELETE FROM host_reservations WHERE id = ?', update.reservation);
@@ -149,13 +327,23 @@ export class UserDO extends DurableObject<Env> {
         }
       }
     });
+    return user && { ...user, name: name! };
   }
 
-  listParties(first: number): UserPartyListItem[] {
-    return this.sql
-      .exec<PartyRow>(
-        'SELECT slug, name, created_at, is_host, is_protected, is_closed, deleted_at FROM parties ORDER BY created_at DESC LIMIT ?', first,
+  /**
+   * The user's parties, newest first. Parties created at the same time are ordered by slug, so `after` (the last
+   * row of the previous page) continues exactly where that page ended.
+   */
+  listParties(first: number, after?: PartyListCursor | null): UserPartyListItem[] {
+    const columns = 'slug, name, created_at, is_host, is_protected, is_closed, deleted_at';
+    const order = 'ORDER BY created_at DESC, slug DESC LIMIT ?';
+    const rows = after
+      ? this.sql.exec<PartyRow>(
+        `SELECT ${columns} FROM parties WHERE created_at < ? OR (created_at = ? AND slug < ?) ${order}`,
+        after.createdAt, after.createdAt, after.slug, first,
       )
+      : this.sql.exec<PartyRow>(`SELECT ${columns} FROM parties ${order}`, first);
+    return rows
       .toArray()
       .map(row => ({
         slug: row.slug,

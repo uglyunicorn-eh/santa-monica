@@ -9,11 +9,14 @@ export const typeDefs = `#graphql
     user: User
     party(code: String!): Party
     parties(first: Int = 25): [Party!]
+    "The signed-in user's parties, newest first, a page at a time (first: 1 to 100). Null without a session."
+    partyHistory(first: Int = 10, after: String): PartyPage
   }
 
   type Mutation {
     parties: PartiesOpts!
     auth: AuthOpts!
+    profile: ProfileOpts!
   }
 
   type App {
@@ -25,6 +28,16 @@ export const typeDefs = `#graphql
   type User implements Node {
     id: ID!
     name: String!
+    "Only for the signed-in user; null for anyone else (such as a party target)."
+    email: String
+  }
+
+  type PartyPage {
+    items: [Party!]!
+    "Whether there are more parties after this page."
+    hasMore: Boolean!
+    "Pass as the after argument to get the next page. Null when the page is empty."
+    endCursor: String
   }
 
   type Party implements Node {
@@ -131,6 +144,63 @@ export const typeDefs = `#graphql
     status: MutationStatus!
     userErrors: [UserError!]
     node: Party
+  }
+
+  "updateName, requestAccountDeletion and requestEmailChange need a session; the confirm mutations work from the emailed link alone."
+  type ProfileOpts {
+    updateName(input: UpdateNameInput!): UpdateNamePayload!
+    "Emails a link to <baseUrl>/profile/delete/<token> to the account's address."
+    requestAccountDeletion: RequestAccountDeletionPayload!
+    "Deletes the account. On status ok the account is gone: clear the stored session token."
+    confirmAccountDeletion(input: ConfirmAccountDeletionInput!): ConfirmAccountDeletionPayload!
+    "Emails a link to <baseUrl>/profile/email/<token> to the new address, and a notice to the current one."
+    requestEmailChange(input: RequestEmailChangeInput!): RequestEmailChangePayload!
+    "Moves the account to the new address. Returns a new session token for it; tokens issued before stop working."
+    confirmEmailChange(input: ConfirmEmailChangeInput!): ConfirmEmailChangePayload!
+  }
+
+  type RequestAccountDeletionPayload implements MutationPayload {
+    status: MutationStatus!
+    userErrors: [UserError!]
+  }
+
+  input ConfirmAccountDeletionInput {
+    token: String!
+  }
+
+  type ConfirmAccountDeletionPayload implements MutationPayload {
+    status: MutationStatus!
+    userErrors: [UserError!]
+  }
+
+  input RequestEmailChangeInput {
+    email: String!
+  }
+
+  type RequestEmailChangePayload implements MutationPayload {
+    status: MutationStatus!
+    userErrors: [UserError!]
+  }
+
+  input ConfirmEmailChangeInput {
+    token: String!
+  }
+
+  type ConfirmEmailChangePayload implements MutationPayload {
+    status: MutationStatus!
+    userErrors: [UserError!]
+    userToken: String
+    user: User
+  }
+
+  input UpdateNameInput {
+    name: String!
+  }
+
+  type UpdateNamePayload implements MutationPayload {
+    status: MutationStatus!
+    userErrors: [UserError!]
+    user: User
   }
 
   type AuthOpts {

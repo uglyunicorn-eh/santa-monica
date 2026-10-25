@@ -146,12 +146,17 @@ describe('joining a party', () => {
     expect(right).toMatchObject({ status: 'ok', node: { isJoined: true, isHost: false, participantCount: 2, password: null } });
   });
 
-  it('sets the person\'s name from the name they joined with', async () => {
+  it('fills in an empty profile name from the name they joined with, and never overwrites it', async () => {
     const host = await person('host');
     const guest = await person('guest');
     const party = await createParty(host);
+    const other = await createParty(host, 'Other party');
     await joinParty(guest, party, 'Santa\'s Helper');
     expect((await gql('{ user { name } }', {}, { token: guest.token })).data.user.name).toBe('Santa\'s Helper');
+
+    await joinParty(guest, other, 'Elf');
+    expect((await gql('{ user { name } }', {}, { token: guest.token })).data.user.name).toBe('Santa\'s Helper');
+    expect((await gql(PARTY, { code: other.code }, { token: host.token })).data.party.participants).toEqual(['', 'Elf']);
   });
 
   it('is idempotent: joining twice keeps one membership', async () => {
