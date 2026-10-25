@@ -3,9 +3,9 @@ import { DurableObject } from 'cloudflare:workers';
 import { Env } from 'src/env';
 import { isPermanentMailError, renderPartyNotification, sendMail } from 'src/mail';
 import santaShuffle from 'src/utils/santaShuffle';
-import { sessionMatches } from 'src/utils/session';
+import { Session, sessionMatches } from 'src/utils/session';
 
-import { CreatePartyInput, Member, PartyResult, PartyView, UserRecord, UserUpdate } from './types';
+import { CreatePartyInput, Member, PartyResult, PartyView, UserPartyRecord, UserRecord, UserUpdate } from './types';
 
 import { baseUrl } from 'src/config.json';
 
@@ -41,16 +41,15 @@ type OutboxRow = { id: number; payload: string; attempts: number; next_attempt_a
 
 type OutboxBatch = { key: string; rows: OutboxRow[]; messages: OutboxMessage[] };
 
-/** What each user's UserDO reported back (see `UserDO.apply`) for the batches delivered in an outbox run, by email. */
-type DeliveredUsers = Map<string, UserRecord | null>;
-
-/** Checks the joining session against the user's record. Tokens without a version count as version 0. */
-export type JoinCheck = { tokenVersion?: number };
+/** The joining session's token version, checked against the user's record (see `Session`). */
+export type JoinCheck = Pick<Session, 'tokenVersion'>;
 
 const MAX_ATTEMPTS = 15;
 const MAX_BACKOFF_MS = 60 * 60 * 1000;
 
 const fail = (fieldName: string | null, message: string): PartyResult => ({ ok: false, error: { fieldName, message } });
+
+const closedToNewMembers = fail('party', 'Party is already packed. Sorry, we cannot accept a new participant...');
 
 /**
  * One instance per party, addressed by the party slug (`env.PARTY.getByName(slug)`).
@@ -63,7 +62,7 @@ export class PartyDO extends DurableObject<Env> {
   private sql: SqlStorage;
   private schemaReady = false;
   // Outbox runs (inline and from the alarm) are chained so a message is never delivered twice at the same time.
-  private outboxRun: Promise<unknown> = Promise.resolve();
+  private outboxRun: Promise<void> = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -129,8 +128,27 @@ export class PartyDO extends DurableObject<Env> {
   }
 
   /** Delivers queued user updates now, so the caller's party list and name are current when the mutation returns. */
-  private async deliverUserUpdates(): Promise<DeliveredUsers> {
-    return await this.runOutbox(message => message.kind.startsWith('user.'));
+  private async deliverUserUpdates() {
+    await this.runOutbox(message => message.kind.startsWith('user.'));
+  }
+
+  /** Whether the outbox still holds changes for this user (waiting for a retry, or being delivered). */
+  private hasQueuedUserUpdates(email: string): boolean {
+    return this.sql.exec(
+      "SELECT 1 FROM outbox WHERE json_extract(payload, '$.kind') LIKE 'user.%' AND json_extract(payload, '$.email') = ? LIMIT 1", email,
+    ).toArray().length > 0;
+  }
+
+  /** The party's summary in a member's list. */
+  private summary(party: PartyRow, memberId: string): UserPartyRecord {
+    return {
+      slug: party.slug,
+      name: party.name,
+      createdAt: party.created_at,
+      isHost: memberId === party.host_id,
+      isProtected: Boolean(party.password),
+      isClosed: Boolean(party.is_closed),
+    };
   }
 
   /** The party as a member sees it in their list, or its removal if they are no longer a member. */
@@ -142,17 +160,7 @@ export class PartyDO extends DurableObject<Env> {
     if (!membership) {
       return { type: 'removeParty', slug: party.slug };
     }
-    return {
-      type: 'addParty',
-      party: {
-        slug: party.slug,
-        name: party.name,
-        createdAt: party.created_at,
-        isHost: membership.member_id === party.host_id,
-        isProtected: Boolean(party.password),
-        isClosed: Boolean(party.is_closed),
-      },
-    };
+    return { type: 'addParty', party: this.summary(party, membership.member_id) };
   }
 
   private buildView(party: PartyRow, userId?: string): PartyView {
@@ -230,10 +238,11 @@ export class PartyDO extends DurableObject<Env> {
   }
 
   /**
-   * Adds a member. With `check`, the session that asked is verified against the member's UserDO through the update
-   * this join sends it anyway (no extra call): if the account was deleted or the token revoked, the membership is
-   * undone and the join fails. While that runs, no other request reaches the party, so nobody sees the membership
-   * before it is confirmed. If the update can't be delivered right now (it waits for a retry), the join stands.
+   * Adds a member. With `check`, the joining session is verified in the call that updates the member's UserDO anyway
+   * (no extra call), before the membership is stored: the UserDO gets the party summary and the name together with the
+   * session, and writes nothing if the account was deleted or the token revoked. Then the join fails and nothing was
+   * stored anywhere. If the user can't be reached, or older changes for them are still queued (sending this one first
+   * would reorder them), the join goes through the outbox unchecked, as joins without `check` do.
    */
   async join(member: Member, name: string, password: string | null, check?: JoinCheck): Promise<PartyResult> {
     const party = this.party();
@@ -244,7 +253,7 @@ export class PartyDO extends DurableObject<Env> {
       return { ok: true, view: this.buildView(party, member.id) };
     }
     if (party.is_closed) {
-      return fail('party', 'Party is already packed. Sorry, we cannot accept a new participant...');
+      return closedToNewMembers;
     }
     if ((party.password || '').toUpperCase() !== (password || '').toUpperCase()) {
       return fail('password', "Hmm... Seems you've got a wrong secret phrase. Please try a different one or ask your friend for a hint.");
@@ -254,7 +263,14 @@ export class PartyDO extends DurableObject<Env> {
       return fail('name', 'We were unable to get your name.');
     }
 
-    const insert = () => this.ctx.storage.transactionSync(() => {
+    if (check && member.email && !this.hasQueuedUserUpdates(member.email)) {
+      const checked = await this.checkedJoin(party, { ...member, email: member.email }, displayName, check);
+      if (checked) {
+        return checked;
+      }
+    }
+
+    this.ctx.storage.transactionSync(() => {
       this.sql.exec(
         'INSERT INTO memberships (member_id, member_email, name, joined_at) VALUES (?, ?, ?, ?)',
         member.id, member.email, displayName, Date.now(),
@@ -264,27 +280,45 @@ export class PartyDO extends DurableObject<Env> {
         this.enqueue({ kind: 'user.setNameIfEmpty', email: member.email, name: displayName, memberId: member.id });
       }
     });
+    await this.deliverUserUpdates();
+    return { ok: true, view: this.buildView(party, member.id) };
+  }
 
-    if (!check || !member.email) {
-      insert();
-      await this.deliverUserUpdates();
-      return { ok: true, view: this.buildView(party, member.id) };
+  /**
+   * Updates the member's UserDO with the session check first, then stores the membership. Returns undefined when the
+   * user couldn't be reached, so the caller falls back to the outbox.
+   */
+  private async checkedJoin(party: PartyRow, member: Member & { email: string }, displayName: string, check: JoinCheck): Promise<PartyResult | undefined> {
+    const session = { userId: member.id, tokenVersion: check.tokenVersion };
+    let user: UserRecord | null;
+    try {
+      user = await this.env.USER.getByName(member.email).apply([
+        { type: 'addParty', party: this.summary(party, member.id) },
+        { type: 'setNameIfEmpty', name: displayName, userId: member.id },
+      ], session);
+    } catch (error) {
+      console.warn('Unable to update the joining user, joining through the outbox', { error: String(error) });
+      return undefined;
+    }
+    if (!sessionMatches(user, session)) {
+      return fail(null, 'You must be logged in before joining the party.');
     }
 
-    const email = member.email;
-    return await this.ctx.blockConcurrencyWhile(async () => {
-      insert();
-      const delivered = await this.deliverUserUpdates();
-      if (delivered.has(email) && !sessionMatches(delivered.get(email), { userId: member.id, tokenVersion: check.tokenVersion })) {
-        this.ctx.storage.transactionSync(() => {
-          this.sql.exec('DELETE FROM memberships WHERE member_id = ?', member.id);
-          this.enqueue({ kind: 'user.sync', email });
-        });
+    // Other requests may have reached the party while the user was being updated.
+    const current = this.party()!;
+    if (!this.membership(member.id)) {
+      if (current.is_closed) {
+        // Too late: take the party back off the user's list.
+        this.enqueue({ kind: 'user.sync', email: member.email });
         await this.deliverUserUpdates();
-        return fail(null, 'You must be logged in before joining the party.');
+        return closedToNewMembers;
       }
-      return { ok: true, view: this.buildView(party, member.id) };
-    });
+      this.sql.exec(
+        'INSERT INTO memberships (member_id, member_email, name, joined_at) VALUES (?, ?, ?, ?)',
+        member.id, member.email, displayName, Date.now(),
+      );
+    }
+    return { ok: true, view: this.buildView(current, member.id) };
   }
 
   async leave(userId: string): Promise<PartyResult> {
@@ -348,18 +382,14 @@ export class PartyDO extends DurableObject<Env> {
   }
 
 
-  /**
-   * Delivers a batch: one email, or all queued changes for one user in a single UserDO call. For a user batch,
-   * returns what the UserDO reported back.
-   */
-  private async deliver({ messages }: OutboxBatch): Promise<{ email: string; user: UserRecord | null } | undefined> {
+  /** Delivers a batch: one email, or all queued changes for one user in a single UserDO call. */
+  private async deliver({ messages }: OutboxBatch) {
     const [first] = messages;
     if (first.kind === 'mail.partyNotification') {
-      await sendMail(this.env, first.email, renderPartyNotification({
+      return await sendMail(this.env, first.email, renderPartyNotification({
         party: { name: first.partyName, url: `${baseUrl}/p/${first.slug}/` },
         assetsUrl: this.env.PUBLIC_URL,
       }));
-      return;
     }
     const updates: UserUpdate[] = [];
     let synced = false;
@@ -371,23 +401,22 @@ export class PartyDO extends DurableObject<Env> {
         updates.push(this.memberUpdate(first.email));
       }
     }
-    return { email: first.email, user: await this.env.USER.getByName(first.email).apply(updates) };
+    return await this.env.USER.getByName(first.email).apply(updates);
   }
 
   async alarm() {
     await this.runOutbox(() => true);
   }
 
-  private runOutbox(filter: (message: OutboxMessage) => boolean): Promise<DeliveredUsers> {
+  private runOutbox(filter: (message: OutboxMessage) => boolean): Promise<void> {
     const run = this.outboxRun.then(() => this.processOutbox(filter));
     this.outboxRun = run.catch(() => undefined);
     return run;
   }
 
-  private async processOutbox(filter: (message: OutboxMessage) => boolean): Promise<DeliveredUsers> {
-    const delivered: DeliveredUsers = new Map();
+  private async processOutbox(filter: (message: OutboxMessage) => boolean) {
     if (!this.hasSchema()) {
-      return delivered;
+      return;
     }
     const now = Date.now();
     const rows = this.sql
@@ -420,10 +449,7 @@ export class PartyDO extends DurableObject<Env> {
     await Promise.all([...batches.values()].map(async batch => {
       const ids = batch.rows.map(row => row.id);
       try {
-        const result = await this.deliver(batch);
-        if (result) {
-          delivered.set(result.email, result.user);
-        }
+        await this.deliver(batch);
         this.sql.exec(`DELETE FROM outbox WHERE id IN (${ids.map(() => '?').join(',')})`, ...ids);
       } catch (error) {
         const attempts = batch.rows[0].attempts + 1;
@@ -446,7 +472,6 @@ export class PartyDO extends DurableObject<Env> {
     if (next !== null) {
       await this.ctx.storage.setAlarm(Math.max(next, Date.now()));
     }
-    return delivered;
   }
 
   /** Number of undelivered outbox messages. Used by tests. */

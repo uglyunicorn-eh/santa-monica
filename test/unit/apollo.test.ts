@@ -291,7 +291,10 @@ describe('party history', () => {
     await addParties(me.userEmail!, [['QQQCA', 1], ['QQQCB', 2]]);
     expect(await partyHistory(null, { first: 2, after: null }, me)).toMatchObject({ hasMore: false });
     expect(await partyHistory(null, { first: 1000 }, me)).toMatchObject({ hasMore: false });
-    expect(await partyHistory(null, { first: -1 }, me)).toEqual({ items: [], hasMore: true, endCursor: null });
+    // At least one per page, so "more" always comes with a cursor.
+    for (const first of [0, -1]) {
+      expect(await partyHistory(null, { first }, me)).toMatchObject({ items: [{ code: 'QQQCB' }], hasMore: true, endCursor: expect.any(String) });
+    }
   });
 
   it('is null without a session, and rejects a malformed cursor', async () => {

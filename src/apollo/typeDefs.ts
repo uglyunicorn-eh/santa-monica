@@ -9,7 +9,7 @@ export const typeDefs = `#graphql
     user: User
     party(code: String!): Party
     parties(first: Int = 25): [Party!]
-    "The signed-in user's parties, newest first, a page at a time. Null without a session."
+    "The signed-in user's parties, newest first, a page at a time (first: 1 to 100). Null without a session."
     partyHistory(first: Int = 10, after: String): PartyPage
   }
 

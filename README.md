@@ -17,7 +17,7 @@ Keeping Durable Object calls low:
 - A party updates its members' summaries through its outbox. All of a user's queued changes go out in one `UserDO.apply` call, built from the party's current state when it's sent.
 - The session token is checked once per request. Joining uses the session's email and doesn't read the profile.
 - Party history (`partyHistory`) is paged from the same summaries: one call per page.
-- Revoked sessions (deleted accounts, see below) are not checked against the `UserDO` on every request, only where a call to it happens anyway: reading the profile (`user`, `createParty`), `updateName`, and joining, where the party's update to the user reports the user back.
+- Revoked sessions (deleted accounts, see below) are not checked against the `UserDO` on every request, only where a call to it happens anyway: reading the profile (`user`, `createParty`), `updateName`, and joining, where the party sends the session along with its update to the user, before storing the membership.
 - `test/unit/efficiency.test.ts` counts the calls each operation makes.
 
 ```bash

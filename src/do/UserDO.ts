@@ -88,27 +88,22 @@ export class UserDO extends DurableObject<Env> {
     return this.sql.exec<UserRow>('SELECT id, email, name, joined, token_version, deleted_at FROM user LIMIT 1').toArray()[0] ?? null;
   }
 
-  /** The live user record: null when there is none or the account was deleted. */
-  private live(): UserRecord | null {
-    const row = this.row();
-    return row && row.deleted_at === null ? toRecord(row) : null;
-  }
-
   /** Returns the user, creating it on the first sign-in, or starting a new account after a deleted one. */
   ensure(email: string): UserRecord {
     const existing = this.row();
     if (existing && existing.deleted_at === null) {
       return toRecord(existing);
     }
-    const id = newObjectId();
-    const joined = Date.now();
-    if (existing) {
-      // The tombstone's token version is kept, so tokens of the deleted account stay revoked.
-      this.sql.exec("UPDATE user SET id = ?, email = ?, name = '', joined = ?, deleted_at = NULL", id, email, joined);
-      return { id, email, name: '', joined, tokenVersion: existing.token_version };
-    }
-    this.sql.exec('INSERT INTO user (id, email, name, joined) VALUES (?, ?, ?, ?)', id, email, '', joined);
-    return { id, email, name: '', joined, tokenVersion: 0 };
+    // After a deleted account, the tombstone's token version is kept, so the old account's tokens stay revoked.
+    const row: UserRow = {
+      id: newObjectId(), email, name: '', joined: Date.now(), token_version: existing?.token_version ?? 0, deleted_at: null,
+    };
+    this.sql.exec('DELETE FROM user');
+    this.sql.exec(
+      'INSERT INTO user (id, email, name, joined, token_version) VALUES (?, ?, ?, ?, ?)',
+      row.id, row.email, row.name, row.joined, row.token_version,
+    );
+    return toRecord(row);
   }
 
   /**
@@ -126,7 +121,8 @@ export class UserDO extends DurableObject<Env> {
 
   /** The user, or null when there is none or the account was deleted. */
   get(): UserRecord | null {
-    return this.live();
+    const row = this.row();
+    return row && row.deleted_at === null ? toRecord(row) : null;
   }
 
   /**
@@ -134,7 +130,7 @@ export class UserDO extends DurableObject<Env> {
    * name the user joined them with. Returns null, changing nothing, when the session no longer belongs to this user.
    */
   updateName(name: string, session: Session): UserRecord | null {
-    const user = this.live();
+    const user = this.get();
     if (!sessionMatches(user, session)) {
       return null;
     }
@@ -144,24 +140,36 @@ export class UserDO extends DurableObject<Env> {
 
   /**
    * Deletes the account, leaving a tombstone: the profile and party list are wiped, and every session token issued
-   * so far is revoked.
+   * so far is revoked. An object without a user yet gets a tombstone too, so nothing can be written to it.
    */
   tombstone(): void {
     this.ctx.storage.transactionSync(() => {
-      this.sql.exec("UPDATE user SET name = '', deleted_at = ?, token_version = token_version + 1", Date.now());
+      const now = Date.now();
+      if (this.row()) {
+        this.sql.exec("UPDATE user SET name = '', deleted_at = ?, token_version = token_version + 1", now);
+      } else {
+        this.sql.exec("INSERT INTO user (id, email, name, joined, token_version, deleted_at) VALUES (?, '', '', ?, 1, ?)", newObjectId(), now, now);
+      }
       this.sql.exec('DELETE FROM parties');
     });
   }
 
   /**
    * Applies a batch of changes from a party, in order, in one transaction. Safe to retry.
-   * Writes nothing to a deleted account. Returns the user as it is afterwards (null if there is none or it was
-   * deleted), so a party can tell whether the session that joined it is still valid without another call.
+   * Writes nothing to a deleted account, and nothing when `session` is given and no longer belongs to this user, so a
+   * party can verify a joining session in the call it makes anyway. Returns the user as it is afterwards (null if
+   * there is none or it was deleted).
    */
-  apply(updates: UserUpdate[]): UserRecord | null {
-    if (this.row()?.deleted_at) {
+  apply(updates: UserUpdate[], session?: Session): UserRecord | null {
+    const row = this.row();
+    if (row?.deleted_at) {
       return null;
     }
+    const user = row && toRecord(row);
+    if (session && !sessionMatches(user, session)) {
+      return user;
+    }
+    let name = user?.name;
     this.ctx.storage.transactionSync(() => {
       for (const update of updates) {
         switch (update.type) {
@@ -177,15 +185,20 @@ export class UserDO extends DurableObject<Env> {
             this.sql.exec('DELETE FROM parties WHERE slug = ?', update.slug);
             break;
           case 'setName':
-            this.sql.exec('UPDATE user SET name = ?', update.name);
+            name = update.name;
+            this.sql.exec('UPDATE user SET name = ?', name);
             break;
           case 'setNameIfEmpty':
-            this.sql.exec("UPDATE user SET name = ? WHERE name = '' AND id = coalesce(?, id)", update.name, update.userId ?? null);
+            // Only the account that joined: a join checked late (by the alarm) must not name a newer account.
+            if (user && name === '' && (update.userId ?? user.id) === user.id) {
+              name = update.name;
+              this.sql.exec('UPDATE user SET name = ?', name);
+            }
             break;
         }
       }
     });
-    return this.live();
+    return user && { ...user, name: name! };
   }
 
   /**

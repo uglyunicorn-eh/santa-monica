@@ -6,6 +6,7 @@ import { PartyDO } from 'src/do/PartyDO';
 import { UserUpdate } from 'src/do/types';
 import { app } from 'src/index';
 import { createJwtHelpers } from 'src/utils/jwt';
+import { Session } from 'src/utils/session';
 import { nodeIdToStr } from 'src/utils/strings/nodeId';
 
 import { domain } from 'src/config.json';
@@ -209,9 +210,9 @@ const recordUserCalls = (code: string) => {
       ...self.env,
       USER: {
         getByName: (email: string) => ({
-          apply: async (updates: UserUpdate[]) => {
+          apply: async (updates: UserUpdate[], session?: Session) => {
             applied.push({ email, updates });
-            return await users.getByName(email).apply(updates);
+            return await users.getByName(email).apply(updates, session);
           },
         }),
       },
@@ -231,7 +232,7 @@ describe('party → user updates', () => {
     await done;
     await gql(env, JOIN, { party: node.id, name: 'Guesty' }, guest.token);
 
-    // One call to the guest's UserDO: the party summary and the name, which also tells the party the session is valid.
+    // One call to the guest's UserDO: the party summary and the name, sent with the session, which the UserDO checks.
     expect(applied).toHaveLength(1);
     expect(applied[0]).toEqual({
       email: guest.email,

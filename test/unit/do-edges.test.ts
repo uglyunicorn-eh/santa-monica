@@ -1,7 +1,8 @@
 import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { PartyDO } from 'src/do/PartyDO';
+import { UserDO } from 'src/do/UserDO';
 import { newObjectId } from 'src/utils/ids';
 
 let counter = 0;
@@ -154,7 +155,7 @@ describe('PartyDO outbox', () => {
     await runInDurableObject(stub, async (instance: PartyDO) => {
       const runOutbox = (instance as unknown as { runOutbox: (filter: () => boolean) => Promise<void> }).runOutbox.bind(instance);
       await expect(runOutbox(() => { throw new Error('boom'); })).rejects.toThrow('boom');
-      await expect(runOutbox(() => true)).resolves.toBeInstanceOf(Map);
+      await expect(runOutbox(() => true)).resolves.toBeUndefined();
     });
   });
 });
@@ -255,8 +256,40 @@ describe('UserDO', () => {
   it('applies party updates even before the user signs in, and reports no user', async () => {
     const email = `early-${++counter}@example.com`;
     const stub = env.USER.getByName(email);
-    expect(await stub.apply([{ type: 'addParty', party: { slug: 'QQQQC', name: 'P', createdAt: 1, isHost: false, isProtected: false, isClosed: false } }])).toBeNull();
+    expect(await stub.apply([
+      { type: 'addParty', party: { slug: 'QQQQC', name: 'P', createdAt: 1, isHost: false, isProtected: false, isClosed: false } },
+      { type: 'setNameIfEmpty', name: 'Nobody' },
+      { type: 'setName', name: 'Nobody' },
+    ])).toBeNull();
     expect(await stub.listParties(10)).toHaveLength(1);
+    expect(await stub.ensure(email)).toMatchObject({ name: '' });
+  });
+
+  it('writes nothing for a session that no longer belongs to the user', async () => {
+    const email = `session-${++counter}@example.com`;
+    const stub = env.USER.getByName(email);
+    const user = await stub.ensure(email);
+    const party = { slug: 'QQQQD', name: 'P', createdAt: 1, isHost: false, isProtected: false, isClosed: false };
+    const updates = [{ type: 'addParty' as const, party }, { type: 'setNameIfEmpty' as const, name: 'Intruder' }];
+    for (const session of [{ userId: newObjectId() }, { userId: user.id, tokenVersion: 1 }]) {
+      expect(await stub.apply(updates, session)).toEqual(user);
+    }
+    expect(await stub.listParties(10)).toEqual([]);
+    expect(await env.USER.getByName(`nobody-${++counter}@example.com`).apply(updates, { userId: user.id })).toBeNull();
+    expect(await stub.apply(updates, { userId: user.id, tokenVersion: 0 })).toEqual({ ...user, name: 'Intruder' });
+    expect(await stub.listParties(10)).toHaveLength(1);
+  });
+
+  it('leaves a tombstone even on an object that has no user yet', async () => {
+    const email = `empty-tomb-${++counter}@example.com`;
+    const stub = env.USER.getByName(email);
+    await stub.apply([{ type: 'addParty', party: { slug: 'QQQQE', name: 'P', createdAt: 1, isHost: false, isProtected: false, isClosed: false } }]);
+    await stub.tombstone();
+    expect(await stub.get()).toBeNull();
+    expect(await stub.listParties(10)).toEqual([]);
+    expect(await stub.apply([{ type: 'addParty', party: { slug: 'QQQQF', name: 'Late', createdAt: 2, isHost: false, isProtected: false, isClosed: false } }])).toBeNull();
+    expect(await stub.listParties(10)).toEqual([]);
+    expect(await stub.ensure(email)).toMatchObject({ email, name: '', tokenVersion: 1 });
   });
 
   it('pages through parties created at the same moment without skipping or repeating any', async () => {
@@ -307,7 +340,7 @@ describe('PartyDO join session check', () => {
     expect(await stub.join(legacy, 'Legacy', null, {})).toMatchObject({ ok: true, view: { isJoined: true, participantCount: 3 } });
   });
 
-  it('undoes the membership when the account was deleted', async () => {
+  it('refuses a deleted account without storing anything', async () => {
     const { stub, host } = await party();
     const guest = await signedUp('deleted');
     await env.USER.getByName(guest.email).tombstone();
@@ -319,7 +352,7 @@ describe('PartyDO join session check', () => {
     expect(await env.USER.getByName(guest.email).listParties(10)).toEqual([]);
   });
 
-  it('undoes the membership for a revoked token, and takes the party back off the user\'s list', async () => {
+  it('refuses a revoked token, writing nothing to the newer account under the same email', async () => {
     const { stub, host } = await party();
     const guest = await signedUp('revoked');
     // The account was deleted and the email signed up again: the old token has the old id and version.
@@ -343,6 +376,60 @@ describe('PartyDO join session check', () => {
     await env.USER.getByName(guest.email).tombstone();
     await insertOutbox(stub, { kind: 'user.sync', email: guest.email }, 1, Date.now() + 60_000);
     expect(await stub.join(guest, 'Waiting', null, {})).toMatchObject({ ok: true, view: { isJoined: true } });
+  });
+
+  it('joins through the outbox, unchecked, when the user can\'t be reached', async () => {
+    const { stub, slug } = await party();
+    const guest = await signedUp('unreachable');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    await runInDurableObject(stub, async (instance: PartyDO) => {
+      const self = instance as unknown as { env: typeof env };
+      self.env = { ...self.env, USER: { getByName: () => ({ apply: async () => { throw new Error('unreachable'); } }) } } as unknown as typeof env;
+    });
+    expect(await stub.join(guest, 'Guest', null, {})).toMatchObject({ ok: true, view: { isJoined: true } });
+    expect(await stub.pendingOutbox()).toBe(2);
+    expect(warn).toHaveBeenCalledWith('Unable to update the joining user, joining through the outbox', expect.anything());
+    warn.mockRestore();
+    expect(slug).toHaveLength(5);
+  });
+
+  /** Makes the guest's UserDO call run `meanwhile` inside the party first, as a request arriving during the call. */
+  const duringUserCall = (stub: DurableObjectStub<PartyDO>, meanwhile: (instance: PartyDO) => Promise<unknown>) =>
+    runInDurableObject(stub, async (instance: PartyDO) => {
+      const self = instance as unknown as { env: typeof env };
+      const users = self.env.USER;
+      self.env = {
+        ...self.env,
+        USER: {
+          getByName: (email: string) => ({
+            apply: async (...args: Parameters<UserDO['apply']>) => {
+              self.env = { ...self.env, USER: users };
+              await meanwhile(instance);
+              return await users.getByName(email).apply(...args);
+            },
+          }),
+        },
+      } as unknown as typeof env;
+    });
+
+  it('refuses a join when the party was drawn while the user was being updated, and takes it off their list', async () => {
+    const { stub, host } = await party();
+    const other = member('other');
+    await stub.join(other, 'Other', null);
+    const guest = await signedUp('late');
+    await duringUserCall(stub, instance => instance.close(host.id));
+    expect(await stub.join(guest, 'Late', null, {})).toEqual({
+      ok: false, error: { fieldName: 'party', message: 'Party is already packed. Sorry, we cannot accept a new participant...' },
+    });
+    expect(await stub.view(host.id)).toMatchObject({ isClosed: true, participantCount: 2 });
+    expect(await env.USER.getByName(guest.email).listParties(10)).toEqual([]);
+  });
+
+  it('keeps one membership when the same person joined while the user was being updated', async () => {
+    const { stub } = await party();
+    const guest = await signedUp('twice');
+    await duringUserCall(stub, instance => instance.join(guest, 'First', null));
+    expect(await stub.join(guest, 'Second', null, {})).toMatchObject({ ok: true, view: { isJoined: true, participantCount: 2 } });
   });
 
   it('skips the check for members without an email (legacy users)', async () => {

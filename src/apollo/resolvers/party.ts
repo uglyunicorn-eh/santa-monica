@@ -24,7 +24,7 @@ export const PARTY_CODE_RE = /^[QWERTYUIPASDFGHJKLZXCVBNMO]{5}$/;
 
 const MAX_PARTIES = 100;
 
-const clampPageSize = (first: number) => Math.max(0, Math.min(first, MAX_PARTIES));
+const clampPageSize = (first: number, min = 0) => Math.max(min, Math.min(first, MAX_PARTIES));
 
 /** Cursors are opaque to clients: the last row's creation time and slug, base64-encoded. */
 export const encodeCursor = ({ createdAt, slug }: PartyListCursor) => btoa(`${createdAt}:${slug}`);
@@ -167,7 +167,8 @@ export default {
       if (!userId || !userEmail) {
         return null;
       }
-      const page = await listParties(context, userEmail, clampPageSize(first), after ? decodeCursor(after) : undefined);
+      // At least one party per page, so a page that says there are more always carries the cursor to them.
+      const page = await listParties(context, userEmail, clampPageSize(first, 1), after ? decodeCursor(after) : undefined);
       span.setAttributes({ 'parties.count': page.count, 'parties.refreshed': page.refreshed, 'parties.has_more': page.hasMore });
       return { items: page.nodes, hasMore: page.hasMore, endCursor: page.endCursor };
     }),
