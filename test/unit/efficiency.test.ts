@@ -117,6 +117,43 @@ describe('Durable Object calls per operation', () => {
     expect(counting.calls.map(c => `${c.binding}.${c.method}`)).toEqual(['USER.get', 'PARTY.create']);
   });
 
+  it('reads my profile with one call, and none without a session', async () => {
+    const me = await person('Me');
+    const counting = countingEnv();
+    expect((await gql(counting.env, `{ user { id name } }`, {}, me.token)).data.user).toMatchObject({ name: 'Me' });
+    expect(counting.calls).toEqual([{ binding: 'USER', name: me.email, method: 'get' }]);
+
+    counting.reset();
+    expect((await gql(counting.env, `{ user { id } parties { code } }`)).data).toEqual({ user: null, parties: null });
+    expect(counting.count()).toBe(0);
+  });
+
+  it('signs in with one call, whether the link is fresh, used or invalid', async () => {
+    const email = `eff-enter-${++counter}@example.com`;
+    const token = await jwt.issueToken('EnterRequest', { email, jti: crypto.randomUUID() }, { ttl: 60 });
+    const ENTER = `mutation ($token: String!) { auth { enter(input: { enterRequestToken: $token }) { status userToken user { id name } } } }`;
+    const counting = countingEnv();
+
+    expect((await gql(counting.env, ENTER, { token })).data.auth.enter.status).toBe('ok');
+    expect(counting.calls).toEqual([{ binding: 'USER', name: email, method: 'redeemMagicLink' }]);
+
+    counting.reset();
+    expect((await gql(counting.env, ENTER, { token })).data.auth.enter.status).toBe('error');
+    expect(counting.calls).toEqual([{ binding: 'USER', name: email, method: 'redeemMagicLink' }]);
+
+    counting.reset();
+    expect((await gql(counting.env, ENTER, { token: 'garbage' })).data.auth.enter.status).toBe('error');
+    expect(counting.count()).toBe(0);
+  });
+
+  it('requests a magic link without touching any Durable Object', async () => {
+    const counting = countingEnv();
+    const bindings = { ...counting.env, EMAIL: { send: async () => ({ messageId: 'm' }) } } as unknown as typeof env;
+    const res = await gql(bindings, `mutation ($email: String!) { auth { enterRequest(input: { email: $email }) { status } } }`, { email: `eff-link-${++counter}@example.com` });
+    expect(res.data.auth.enterRequest.status).toBe('ok');
+    expect(counting.count()).toBe(0);
+  });
+
   it('leaves and closes with one call each', async () => {
     const host = await person('Host');
     const guest = await person('Guest');
