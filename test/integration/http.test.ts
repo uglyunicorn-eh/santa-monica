@@ -5,12 +5,14 @@ import { MAX_BODY_BYTES } from 'src/api/limits';
 
 import { api, apiError, call, signIn, uniqueEmail, uniqueIp } from './support';
 
+import { version } from 'package.json';
+
 describe('HTTP surface', () => {
   it('serves the app info with the usual headers', async () => {
     const res = await api('/');
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
-      status: 'ok', name: 'santa-monica', version: '4.0.0', github: 'https://github.com/uglyunicorn-eh/santa-monica',
+      status: 'ok', name: 'santa-monica', version, github: 'https://github.com/uglyunicorn-eh/santa-monica',
     });
     expect(res.headers.get('X-Powered-By')).toBe('Maple syrup and magic, eh!');
     expect(res.headers.get('X-Developed-By')).toContain('Ugly Unicorn');

@@ -5,6 +5,8 @@ import { isObjectId, newObjectId, objectIdTime } from 'src/utils/ids';
 import santaShuffle from 'src/utils/santaShuffle';
 import { nodeIdToStr, strToNodeId } from 'src/utils/strings/nodeId';
 
+import { version } from 'package.json';
+
 describe('santaShuffle', () => {
   it('always gives everyone exactly one target who is not themselves', () => {
     for (let n = 2; n <= 12; n++) {
@@ -40,7 +42,7 @@ describe('mail templates', () => {
     const mail = renderSignIn({ magicLink: 'https://gnomik.me/enter/abc.def', assetsUrl: 'https://api.test' });
     expect(mail.subject).toBe('Sign in to Anonymous Ded Morozes');
     expect(mail.html).toContain('href="https://gnomik.me/enter/abc.def"');
-    expect(mail.html).toContain('https://api.test/email/gnomik.png?v=4.0.0');
+    expect(mail.html).toContain(`https://api.test/email/gnomik.png?v=${version}`);
     expect(mail.html).toContain('href="https://gnomik.me/terms/"');
     expect(mail.text).toContain('https://gnomik.me/enter/abc.def');
     expect(mail.html + mail.text).not.toMatch(/\{\{|sendgrid|sing in/);

@@ -5,6 +5,8 @@ import { originAllowed } from 'src/api/cors';
 import { fail } from 'src/api/errors';
 import worker, { app } from 'src/index';
 
+import { version } from 'package.json';
+
 // Routes that fail, to exercise the app's error handler. Routes can only be added before the first request.
 app.get('/__test/throw', () => { throw new Error('boom'); });
 app.get('/__test/expected', () => { throw fail('conflict', 'Expected failure.', 'thing'); });
@@ -12,7 +14,7 @@ app.get('/__test/expected', () => { throw fail('conflict', 'Expected failure.', 
 describe('Hono app', () => {
   it('answers / with the app info and the custom headers', async () => {
     const res = await app.request('/', {}, env);
-    expect(await res.json()).toEqual({ status: 'ok', name: 'santa-monica', version: '4.0.0', github: 'https://github.com/uglyunicorn-eh/santa-monica' });
+    expect(await res.json()).toEqual({ status: 'ok', name: 'santa-monica', version, github: 'https://github.com/uglyunicorn-eh/santa-monica' });
     expect(res.headers.get('X-Developed-By')).toContain('Ugly Unicorn');
   });
 
