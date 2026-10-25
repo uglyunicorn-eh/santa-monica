@@ -87,7 +87,7 @@ export type MailQuota = { limit: number; always?: boolean };
 
 /**
  * One instance per user, addressed by the normalized email (`canonicalEmail`, `env.USER.getByName(email)`). Accounts
- * made before addresses were normalized are kept under the address as typed, lowercased, until their next sign-in.
+ * saved under an older spelling (as typed, or a Gmail address without its dots) stay there until their next sign-in.
  * Holds the profile and the user's party list. The list carries a summary of each party (name, host, protected,
  * closed), kept up to date by `PartyDO`'s outbox through `apply`, so listing parties needs no call to any party.
  *

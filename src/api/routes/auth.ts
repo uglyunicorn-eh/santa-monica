@@ -11,7 +11,7 @@ import { accepted, bodies, session, tokens } from 'src/api/schemas';
 import { EnterRequestToken } from 'src/api/types';
 import { issueSession, sendRequestedMail } from 'src/api/users';
 import { renderSignIn } from 'src/mail';
-import { canonicalEmail } from 'src/utils/email';
+import { canonicalEmail, undottedGmail } from 'src/utils/email';
 import { partyRef } from 'src/utils/logRef';
 import { annotate } from 'src/utils/tracing';
 
@@ -75,8 +75,8 @@ auth.post('/magic-link', action('enterRequest', async c => {
 
 /**
  * Signs in with a magic link. Each link works once; repeating the same request (same Idempotency-Key) signs in
- * again, so a retry after a dropped response doesn't strand the person. An account still kept under the address as
- * typed moves to the normalized one first (`adoptTypedAccount`).
+ * again, so a retry after a dropped response doesn't strand the person. An account still kept under an older spelling
+ * of the address moves to the normalized one first (`adoptTypedAccount`).
  */
 auth.post('/session', action('enter', async c => {
   const { env } = c;
@@ -99,8 +99,9 @@ auth.post('/session', action('enter', async c => {
   // Links sent before addresses were normalized carry the address as typed in `email`.
   const { jti, exp, typed = link.output.email } = link.output;
   const email = canonicalEmail(link.output.email);
-  if (typed !== email) {
-    annotate({ 'auth.typed_account': await adoptTypedAccount(env, typed, email, jti, exp * 1000, key) });
+  const older = [...new Set([typed, undottedGmail(email)])].filter((address): address is string => !!address && address !== email);
+  if (older.length) {
+    annotate({ 'auth.typed_account': await adoptTypedAccount(env, older, email, jti, exp * 1000, key) });
   }
   const user = await env.USER.getByName(email).redeemMagicLink(email, jti, exp * 1000, key);
   annotate({ 'auth.magic_link': user ? 'redeemed' : 'already_used', 'user.id': user?.id });

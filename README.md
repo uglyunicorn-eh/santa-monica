@@ -60,7 +60,7 @@ JSON in, JSON out. A signed-in request sends `Authorization: Bearer <session tok
 
 **Emailed links.** Sign-in links last 5 minutes; account links (email change, deletion, cancel) last an hour. Each works once. Account links carry the token version they were issued for, so any version bump voids every pending one: someone with a stolen session may have asked for several.
 
-**Email addresses.** Accounts are keyed by the normalized address (`canonicalEmail` in `src/utils/email.ts`): lowercased, and for Gmail also without dots or a `+tag`, with `googlemail.com` read as `gmail.com`, since Gmail delivers all of those to one mailbox. Accounts that were saved under a different spelling move to the normalized one on their owner's next sign-in. Asking to move an account to an address that already has one answers like any other request, and that address gets a notice instead of a link, so the API never reveals which addresses have accounts.
+**Email addresses.** Accounts are keyed by the normalized address (`canonicalEmail` in `src/utils/email.ts`): lowercased, and for Gmail also without a `+tag`, with `googlemail.com` read as `gmail.com`, since Gmail delivers those to one mailbox. Dots are kept, so the address reads the way its owner typed it. Accounts saved under an older spelling (as typed, or a Gmail address without its dots) move to the normalized one on their owner's next sign-in. Asking to move an account to an address that already has one answers like any other request, and that address gets a notice instead of a link, so the API never reveals which addresses have accounts.
 
 **Limits.** A party code is the key to a party without a secret phrase, so codes are hard to guess and slow to try:
 
