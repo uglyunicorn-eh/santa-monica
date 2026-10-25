@@ -425,6 +425,15 @@ describe('PartyDO join session check', () => {
     expect(await env.USER.getByName(guest.email).listParties(10)).toEqual([]);
   });
 
+  it('refuses a join when the host cancelled the party meanwhile, and takes it off the user\'s list', async () => {
+    const { stub, host } = await party();
+    const guest = await signedUp('cancelled');
+    await duringUserCall(stub, instance => instance.cancel(host.id));
+    expect(await stub.join(guest, 'Guest', null, {})).toEqual({ ok: false, error: { fieldName: 'party', message: 'Party does not exist.' } });
+    expect(await env.USER.getByName(guest.email).listParties(10)).toEqual([]);
+    expect(await stub.view()).toBeNull();
+  });
+
   it('keeps one membership when the same person joined while the user was being updated', async () => {
     const { stub } = await party();
     const guest = await signedUp('twice');

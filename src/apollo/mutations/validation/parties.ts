@@ -20,3 +20,7 @@ export const leavePartyInputSchema = yup.object().shape({
 export const closePartyInputSchema = yup.object().shape({
   party: YupHelpers.string('Party ID').max(100).required(),
 });
+
+export const cancelPartyInputSchema = yup.object().shape({
+  party: YupHelpers.string('Party ID').max(100).required(),
+});

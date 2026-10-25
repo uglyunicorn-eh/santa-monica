@@ -35,6 +35,7 @@ export type UserUpdate =
   | { type: 'addParty'; party: UserPartyRecord }
   | { type: 'removeParty'; slug: string }
   | { type: 'setName'; name: string }
+  | { type: 'releaseHostSlot'; reservation: string }
   /**
    * Sent when the user joins a party: the name they joined with becomes their profile name only if they have none,
    * and only on the account that joined (`userId`), not on a newer account under the same email.
@@ -71,8 +72,18 @@ export type PartyResult =
   | { ok: true; view: PartyView }
   | { ok: false; error: PartyUserError };
 
+export type CancelResult = { ok: true } | { ok: false; error: PartyUserError };
+
+/** UserDO.startHosting: whether the user may host another party, holding a slot for it when they may. */
+export type HostingStart = UserRecord & { openHostedParties: number } & (
+  | { allowed: true; reservation: string }
+  | { allowed: false }
+);
+
 export type CreatePartyInput = {
   name: string;
   password: string | null;
   host: Member;
+  /** The host's slot from UserDO.startHosting, released once the party is in their list. */
+  reservation?: string;
 };
