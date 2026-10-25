@@ -60,7 +60,8 @@ describe('PartyDO', () => {
     const late = await signIn('late3@example.com', 'Late');
     expect(await env.PARTY.getByName('ZXCVB').join(late.member, 'Late', null)).toMatchObject({ ok: false, error: { fieldName: 'party' } });
     expect(await env.PARTY.getByName('ZXCVB').leave(guests[0].id)).toMatchObject({ ok: false, error: { fieldName: 'party' } });
-    expect(await env.PARTY.getByName('ZXCVB').close(host.id)).toMatchObject({ ok: false, error: { message: 'Party is already closed.' } });
+    // Drawing again answers with the same draw.
+    expect(await env.PARTY.getByName('ZXCVB').close(host.id)).toMatchObject({ ok: true, view: { isClosed: true } });
 
     // Five notification emails plus the party-list updates go out through the local email binding.
     await drainOutbox('ZXCVB');
@@ -81,12 +82,12 @@ describe('PartyDO', () => {
 
     // Delivered before join() returned, no alarm needed.
     expect(await stub.pendingOutbox()).toBe(0);
-    expect((await env.USER.getByName('host5@example.com').listParties(10)).map((p: { slug: string }) => p.slug)).toEqual(['LKJHG']);
-    expect((await env.USER.getByName('guest5@example.com').listParties(10)).map((p: { slug: string }) => p.slug)).toEqual(['LKJHG']);
+    expect((await env.USER.getByName('host5@example.com').listParties(10))!.map((p: { slug: string }) => p.slug)).toEqual(['LKJHG']);
+    expect((await env.USER.getByName('guest5@example.com').listParties(10))!.map((p: { slug: string }) => p.slug)).toEqual(['LKJHG']);
     expect((await env.USER.getByName('guest5@example.com').get())!.name).toBe('Old name');
 
     await stub.leave(guest.id);
-    expect(await env.USER.getByName('guest5@example.com').listParties(10)).toEqual([]);
+    expect(await env.USER.getByName('guest5@example.com').listParties(10))!.toEqual([]);
   });
 
   it('keeps a user\'s messages in order while an earlier one waits for a retry', async () => {
@@ -107,14 +108,14 @@ describe('PartyDO', () => {
 
     await stub.leave(guest.id);
     expect(await stub.pendingOutbox()).toBe(2);
-    expect((await env.USER.getByName('guest6@example.com').listParties(10)).map((p: { slug: string }) => p.slug)).toEqual(['HGFDS']);
+    expect((await env.USER.getByName('guest6@example.com').listParties(10))!.map((p: { slug: string }) => p.slug)).toEqual(['HGFDS']);
 
     await runInDurableObject(stub, async (_instance, state) => {
       state.storage.sql.exec('UPDATE outbox SET next_attempt_at = 0');
     });
     await drainOutbox('HGFDS');
     expect((await env.USER.getByName('guest6@example.com').get())!.name).toBe('Guest');
-    expect(await env.USER.getByName('guest6@example.com').listParties(10)).toEqual([]);
+    expect(await env.USER.getByName('guest6@example.com').listParties(10))!.toEqual([]);
   });
 
   it('records when the party was started and when it was drawn, for the party and every member\'s list', async () => {
@@ -127,7 +128,7 @@ describe('PartyDO', () => {
     expect(created.view.closedAt).toBeNull();
     const stub = env.PARTY.getByName('MNBVC');
     await stub.join(guest.member, 'Guest', null);
-    expect((await env.USER.getByName('guest7@example.com').listParties(10))[0]).toMatchObject({ createdAt: created.view.createdAt, closedAt: null });
+    expect((await env.USER.getByName('guest7@example.com').listParties(10))![0]).toMatchObject({ createdAt: created.view.createdAt, closedAt: null });
 
     const closing = Date.now();
     const closed = await stub.close(host.id);
@@ -136,7 +137,7 @@ describe('PartyDO', () => {
     expect(await stub.view(guest.id)).toMatchObject({ createdAt: created.view.createdAt, closedAt: closed.view.closedAt });
     await drainOutbox('MNBVC');
     for (const email of ['host7@example.com', 'guest7@example.com']) {
-      expect((await env.USER.getByName(email).listParties(10))[0]).toMatchObject({ isClosed: true, closedAt: closed.view.closedAt });
+      expect((await env.USER.getByName(email).listParties(10))![0]).toMatchObject({ isClosed: true, closedAt: closed.view.closedAt });
     }
   });
 

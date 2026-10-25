@@ -21,6 +21,7 @@ const bindings = {
   TEST_PUBLIC_KEY: keyPair.publicKey.export({ type: 'spki', format: 'pem' }) as string,
   TEST_OTHER_PRIVATE_KEY: otherKeyPair.privateKey.export({ type: 'pkcs8', format: 'pem' }) as string,
   PUBLIC_URL: 'https://api.test',
+  FRONTEND_URL: 'https://gnomik.me',
 };
 
 export default defineConfig({

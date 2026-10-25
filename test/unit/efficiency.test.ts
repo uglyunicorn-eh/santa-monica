@@ -1,20 +1,17 @@
 import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 
-import { UserToken } from 'src/apollo/types';
+import { routeList } from 'src/api';
 import { PartyDO, RESTORE_WINDOW_MS } from 'src/do/PartyDO';
 import { UserUpdate } from 'src/do/types';
-import { app } from 'src/index';
-import { createJwtHelpers } from 'src/utils/jwt';
 import { Session } from 'src/utils/session';
-import { nodeIdToStr } from 'src/utils/strings/nodeId';
 
-import { domain } from 'src/config.json';
+import { jwt, mailer, request, signIn, testEnv, uniqueEmail } from './helpers';
 
 type Call = { binding: 'PARTY' | 'USER'; name: string; method: string };
 
 /** Wraps the PARTY and USER bindings so a test can count the Durable Object calls a request makes. */
-function countingEnv() {
+function countingEnv(overrides: Partial<typeof env> = {}) {
   const calls: Call[] = [];
   const wrap = (binding: Call['binding'], namespace: { getByName(name: string): object }) => ({
     getByName: (name: string) => {
@@ -29,242 +26,271 @@ function countingEnv() {
   });
   return {
     calls,
-    env: { ...env, PARTY: wrap('PARTY', env.PARTY), USER: wrap('USER', env.USER) } as typeof env,
+    env: testEnv({ PARTY: wrap('PARTY', env.PARTY) as any, USER: wrap('USER', env.USER) as any, EMAIL: mailer().EMAIL, ...overrides }),
     count: (binding?: Call['binding']) => calls.filter(c => !binding || c.binding === binding).length,
+    methods: () => calls.map(c => `${c.binding}.${c.method}`),
     reset: () => { calls.length = 0; },
   };
 }
 
-const jwt = createJwtHelpers({ privateKey: env.JWT_PRIVATE_KEY, issuer: domain });
-let counter = 0;
+const person = (name = 'Person') => signIn(uniqueEmail('eff'), name);
+const create = async (token: string, name = 'Party') => (await request('POST', '/v1/parties', { token, body: { name } })).body;
+const join = (token: string, code: string, name = 'Guest') => request('POST', `/v1/parties/${code}/join`, { token, body: { name } });
+const key = () => crypto.randomUUID();
 
-async function person(name: string) {
-  const email = `eff-${Date.now().toString(36)}-${++counter}@example.com`;
-  const user = await env.USER.getByName(email).ensure(email);
-  await env.USER.getByName(email).apply([{ type: 'setName', name }]);
-  const token = await jwt.issueToken<UserToken>('UserToken', { sub: nodeIdToStr({ kind: 'User', id: user.id }), email }, { ttl: 3600 });
-  return { email, id: user.id, token };
-}
-
-async function gql(bindings: typeof env, query: string, variables: Record<string, unknown> = {}, token?: string) {
-  const res = await app.request('/graph/', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
-    body: JSON.stringify({ query, variables }),
-  }, bindings);
-  return await res.json() as { data: any; errors?: unknown[] };
-}
-
-const CREATE = `mutation ($name: String!) { parties { createParty(input: { name: $name }) { status node { id code } } } }`;
-const JOIN = `mutation ($party: ID!, $name: String!) { parties { joinParty(input: { party: $party, name: $name }) { status } } }`;
-const LEAVE = `mutation ($party: ID!) { parties { leaveParty(input: { party: $party }) { status } } }`;
-const DELETE = `mutation ($party: ID!) { parties { deleteParty(input: { party: $party }) { status } } }`;
-const RESTORE = `mutation ($party: ID!) { parties { restoreParty(input: { party: $party }) { status userErrors { messages } } } }`;
-const CLOSE = `mutation ($party: ID!) { parties { closeParty(input: { party: $party }) { status } } }`;
-
-/** Delivers a party's queued messages (user updates and mail) right away. */
+/** Runs a party's alarm until its outbox is empty. */
 const settle = async (code: string) => {
   for (let i = 0; i < 20 && await env.PARTY.getByName(code).pendingOutbox(); i++) {
     await runDurableObjectAlarm(env.PARTY.getByName(code));
   }
 };
 
-describe('Durable Object calls per operation', () => {
-  it('lists my parties with one call, however many parties there are', async () => {
-    const me = await person('Me');
-    const counting = countingEnv();
-    // Three hosted (the most one person can have open) and three joined as a guest.
-    for (let i = 0; i < 3; i++) {
-      await gql(env, CREATE, { name: `Party ${i}` }, me.token);
-      const other = await person('Other');
-      const { node } = (await gql(env, CREATE, { name: `Other ${i}` }, other.token)).data.parties.createParty;
-      await gql(env, JOIN, { party: node.id, name: 'Me' }, me.token);
-    }
+/**
+ * Worker → Durable Object calls per route: exact counts by binding. Every route the API serves has a row (checked
+ * below). "+n" routes fan out to each of the user's parties, one call each, by design.
+ */
+const BUDGETS: Record<string, { USER: number | string; PARTY: number | string }> = {
+  'POST /auth/magic-link': { USER: '0, or 2 with an Idempotency-Key', PARTY: '0, or 1 with a party code' },
+  'POST /auth/session': { USER: 1, PARTY: 0 },
+  'GET /me': { USER: 1, PARTY: 0 },
+  'PATCH /me': { USER: 1, PARTY: 0 },
+  'GET /me/parties': { USER: 1, PARTY: 0 },
+  'POST /me/deletion': { USER: 1, PARTY: 0 },
+  'POST /me/email-change': { USER: 2, PARTY: 0 },
+  'POST /me/deletion/confirm': { USER: 2, PARTY: '1 per party' },
+  'POST /me/email-change/confirm': { USER: 4, PARTY: '1 per party' },
+  'GET /parties/:code': { USER: '0 anonymous, 1 signed in', PARTY: 1 },
+  'POST /parties': { USER: 1, PARTY: 1 },
+  'POST /parties/:code/join': { USER: 0, PARTY: 1 },
+  'POST /parties/:code/leave': { USER: 1, PARTY: 1 },
+  'POST /parties/:code/draw': { USER: 1, PARTY: 1 },
+  'DELETE /parties/:code': { USER: 1, PARTY: 1 },
+  'POST /parties/:code/restore': { USER: 1, PARTY: 2 },
+};
 
-    const list = await gql(counting.env, `{ parties { code name isHost isClosed isProtected isJoined } }`, {}, me.token);
-    expect(list.data.parties).toHaveLength(6);
-    expect(list.data.parties.filter((p: any) => p.isHost)).toHaveLength(3);
-    expect(list.data.parties.every((p: any) => p.isJoined && !p.isClosed && !p.isProtected)).toBe(true);
-    expect(counting.calls).toEqual([{ binding: 'USER', name: me.email, method: 'listParties' }]);
+describe('Durable Object call budgets', () => {
+  it('has a budget for every route the API serves', () => {
+    expect(new Set(routeList().filter(r => !r.includes('/__test')))).toEqual(new Set(Object.keys(BUDGETS)));
   });
 
-  it('asks a party only for fields the summary does not carry, once per party', async () => {
-    const me = await person('Me');
-    for (let i = 0; i < 3; i++) {
-      await gql(env, CREATE, { name: `Party ${i}` }, me.token);
-    }
+  it('POST /auth/magic-link: none, two with a key (look up, then claim), one more with a party code', async () => {
+    const host = await person();
+    const party = await create(host.token);
     const counting = countingEnv();
-    const list = await gql(counting.env, `{ parties { code participantCount participants password } }`, {}, me.token);
-    expect(list.data.parties.map((p: any) => p.participantCount)).toEqual([1, 1, 1]);
-    expect(counting.count('USER')).toBe(1);
-    expect(counting.calls.filter(c => c.binding === 'PARTY').map(c => c.method)).toEqual(['view', 'view', 'view']);
-  });
-
-  it('looks up a party with one call, whatever fields are asked for', async () => {
-    const me = await person('Me');
-    const created = await gql(env, CREATE, { name: 'One' }, me.token);
-    const counting = countingEnv();
-    const res = await gql(counting.env, `query ($code: String!) { party(code: $code) { name participantCount participants password target { id } isHost } }`, { code: created.data.parties.createParty.node.code }, me.token);
-    expect(res.data.party).toMatchObject({ name: 'One', participantCount: 1, isHost: true });
-    expect(counting.calls).toEqual([{ binding: 'PARTY', name: created.data.parties.createParty.node.code, method: 'view' }]);
-  });
-
-  it('joins with one call from the Worker (the party updates the user itself, in one call)', async () => {
-    const host = await person('Host');
-    const guest = await person('Guest');
-    const { node } = (await gql(env, CREATE, { name: 'Join' }, host.token)).data.parties.createParty;
-    const counting = countingEnv();
-    expect((await gql(counting.env, JOIN, { party: node.id, name: 'Guesty' }, guest.token)).data.parties.joinParty.status).toBe('ok');
-    expect(counting.calls).toEqual([{ binding: 'PARTY', name: node.code, method: 'join' }]);
-  });
-
-  it('creates a party with two calls: a held slot and the party', async () => {
-    const host = await person('Host');
-    const counting = countingEnv();
-    await gql(counting.env, CREATE, { name: 'Create' }, host.token);
-    expect(counting.calls.map(c => `${c.binding}.${c.method}`)).toEqual(['USER.startHosting', 'PARTY.create']);
-  });
-
-  it('reads my profile with one call, and none without a session', async () => {
-    const me = await person('Me');
-    const counting = countingEnv();
-    expect((await gql(counting.env, `{ user { id name email } }`, {}, me.token)).data.user).toMatchObject({ name: 'Me', email: me.email });
-    expect(counting.calls).toEqual([{ binding: 'USER', name: me.email, method: 'get' }]);
+    expect((await request('POST', '/v1/auth/magic-link', { body: { email: uniqueEmail() }, env: counting.env })).status).toBe(202);
+    expect(counting.count()).toBe(0);
 
     counting.reset();
-    expect((await gql(counting.env, `{ user { id } parties { code } }`)).data).toEqual({ user: null, parties: null });
+    const k = key();
+    const email = uniqueEmail();
+    await request('POST', '/v1/auth/magic-link', { key: k, body: { email, party: party.code }, env: counting.env });
+    expect(counting.methods()).toEqual(['USER.seenMailRequest', 'PARTY.view', 'USER.claimMailRequest']);
+
+    counting.reset();
+    await request('POST', '/v1/auth/magic-link', { key: k, body: { email, party: party.code }, env: counting.env });
+    expect(counting.methods()).toEqual(['USER.seenMailRequest']);
+  });
+
+  it('POST /auth/session: one call, whether the link is fresh, used or repeated; none when it is invalid', async () => {
+    const email = uniqueEmail();
+    const token = await jwt().issueToken('EnterRequest', { email, jti: crypto.randomUUID() }, { ttl: 60 });
+    const counting = countingEnv();
+    const k = key();
+    for (const options of [{ key: k }, { key: k }, {}]) {
+      counting.reset();
+      await request('POST', '/v1/auth/session', { ...options, body: { token }, env: counting.env });
+      expect(counting.calls).toEqual([{ binding: 'USER', name: email, method: 'redeemMagicLink' }]);
+    }
+    counting.reset();
+    await request('POST', '/v1/auth/session', { body: { token: 'garbage' }, env: counting.env });
     expect(counting.count()).toBe(0);
   });
 
-  it('signs in with one call, whether the link is fresh, used or invalid', async () => {
-    const email = `eff-enter-${++counter}@example.com`;
-    const token = await jwt.issueToken('EnterRequest', { email, jti: crypto.randomUUID() }, { ttl: 60 });
-    const ENTER = `mutation ($token: String!) { auth { enter(input: { enterRequestToken: $token }) { status userToken user { id name } } } }`;
+  it('GET and PATCH /me, GET /me/parties: one call each (the rename and the list check the session themselves)', async () => {
+    const who = await person('Me');
+    await create(who.token);
     const counting = countingEnv();
-
-    expect((await gql(counting.env, ENTER, { token })).data.auth.enter.status).toBe('ok');
-    expect(counting.calls).toEqual([{ binding: 'USER', name: email, method: 'redeemMagicLink' }]);
-
-    counting.reset();
-    expect((await gql(counting.env, ENTER, { token })).data.auth.enter.status).toBe('error');
-    expect(counting.calls).toEqual([{ binding: 'USER', name: email, method: 'redeemMagicLink' }]);
+    await request('GET', '/v1/me', { token: who.token, env: counting.env });
+    await request('PATCH', '/v1/me', { token: who.token, body: { name: 'Renamed' }, env: counting.env });
+    await request('GET', '/v1/me/parties', { token: who.token, env: counting.env });
+    expect(counting.methods()).toEqual(['USER.get', 'USER.updateName', 'USER.listParties']);
 
     counting.reset();
-    expect((await gql(counting.env, ENTER, { token: 'garbage' })).data.auth.enter.status).toBe('error');
+    expect((await request('GET', '/v1/me', { env: counting.env })).status).toBe(401);
     expect(counting.count()).toBe(0);
   });
 
-  it('requests a magic link without touching any Durable Object', async () => {
+  it('POST /me/deletion: one call (session, request id); /me/email-change: one more for the new address', async () => {
+    const who = await person();
     const counting = countingEnv();
-    const bindings = { ...counting.env, EMAIL: { send: async () => ({ messageId: 'm' }) } } as unknown as typeof env;
-    const res = await gql(bindings, `mutation ($email: String!) { auth { enterRequest(input: { email: $email }) { status } } }`, { email: `eff-link-${++counter}@example.com` });
-    expect(res.data.auth.enterRequest.status).toBe('ok');
-    expect(counting.count()).toBe(0);
+    expect((await request('POST', '/v1/me/deletion', { token: who.token, key: key(), env: counting.env })).status).toBe(202);
+    expect(counting.methods()).toEqual(['USER.beginMailRequest']);
+
+    counting.reset();
+    const newEmail = uniqueEmail('new');
+    expect((await request('POST', '/v1/me/email-change', { token: who.token, body: { email: newEmail }, env: counting.env })).status).toBe(202);
+    expect(counting.calls.map(c => `${c.name === who.email ? 'old' : 'new'}.${c.method}`)).toEqual(['old.beginMailRequest', 'new.get']);
   });
 
-  it('updates the profile name with one call, which also checks the session', async () => {
-    const me = await person('Me');
-    const counting = countingEnv();
-    const res = await gql(counting.env, `mutation { profile { updateName(input: { name: "Renamed" }) { status user { name } } } }`, {}, me.token);
-    expect(res.data.profile.updateName).toEqual({ status: 'ok', user: { name: 'Renamed' } });
-    expect(counting.calls).toEqual([{ binding: 'USER', name: me.email, method: 'updateName' }]);
-  });
-
-  it('reads a page of party history with one call', async () => {
-    const me = await person('Me');
-    for (let i = 0; i < 3; i++) {
-      await gql(env, CREATE, { name: `Party ${i}` }, me.token);
+  it('confirming a deletion: two calls to the user and one per party, however many parties', async () => {
+    for (const parties of [1, 3]) {
+      const who = await person();
+      for (let i = 0; i < parties; i++) {
+        await create(who.token, `P${i}`);
+      }
+      const token = await jwt().issueToken('AccountDeletion', { sub: who.nodeId, email: who.email, jti: crypto.randomUUID() }, { ttl: 60 });
+      const counting = countingEnv();
+      expect((await request('POST', '/v1/me/deletion/confirm', { body: { token }, env: counting.env })).status).toBe(200);
+      expect([counting.count('USER'), counting.count('PARTY')]).toEqual([2, parties]);
+      expect(counting.methods().filter(m => m.startsWith('USER'))).toEqual(['USER.startAccountChange', 'USER.tombstone']);
     }
-    const counting = countingEnv();
-    const HISTORY = `query ($after: String) { partyHistory(first: 2, after: $after) { items { code name isHost } hasMore endCursor } }`;
-    const first = (await gql(counting.env, HISTORY, {}, me.token)).data.partyHistory;
-    const second = (await gql(counting.env, HISTORY, { after: first.endCursor }, me.token)).data.partyHistory;
-    expect([first.items.length, first.hasMore, second.items.length, second.hasMore]).toEqual([2, true, 1, false]);
-    expect(counting.calls.map(c => `${c.binding}.${c.method}`)).toEqual(['USER.listParties', 'USER.listParties']);
   });
 
-  it('gives party times in the history from the summaries alone', async () => {
-    const me = await person('Me');
-    const friend = await person('Friend');
-    const { node } = (await gql(env, CREATE, { name: 'Timed' }, me.token)).data.parties.createParty;
-    await gql(env, JOIN, { party: node.id, name: 'F' }, friend.token);
-    await gql(env, CLOSE, { party: node.id }, me.token);
-    await settle(node.code);
-    const counting = countingEnv();
-    const res = await gql(counting.env, `{ partyHistory(first: 10) { items { code createdAt rolledAt } } }`, {}, me.token);
-    expect(res.data.partyHistory.items).toEqual([{ code: node.code, createdAt: expect.any(String), rolledAt: expect.any(String) }]);
-    expect(counting.calls.map(c => `${c.binding}.${c.method}`)).toEqual(['USER.listParties']);
+  it('confirming an email change: four calls to the two addresses and one per party, however many parties', async () => {
+    for (const parties of [1, 3]) {
+      const who = await person();
+      for (let i = 0; i < parties; i++) {
+        await create(who.token, `P${i}`);
+      }
+      const newEmail = uniqueEmail('moved');
+      const token = await jwt().issueToken('EmailChange', { sub: who.nodeId, email: who.email, newEmail, jti: crypto.randomUUID() }, { ttl: 60 });
+      const counting = countingEnv();
+      expect((await request('POST', '/v1/me/email-change/confirm', { body: { token }, env: counting.env })).status).toBe(200);
+      expect([counting.count('USER'), counting.count('PARTY')]).toEqual([4, parties]);
+      expect(counting.calls.filter(c => c.binding === 'USER').map(c => `${c.name === who.email ? 'old' : 'new'}.${c.method}`))
+        .toEqual(['new.get', 'old.startAccountChange', 'new.receive', 'old.tombstone']);
+    }
   });
 
-  it('refuses a join from a deleted account with no extra call', async () => {
+  it('GET /parties/:code: one call anonymous, two signed in (made at the same time), whatever the party holds', async () => {
+    for (const members of [1, 12]) {
+      const host = await person('Host');
+      const party = await create(host.token);
+      for (let i = 1; i < members; i++) {
+        await join((await person()).token, party.code);
+      }
+      const counting = countingEnv();
+      await request('GET', `/v1/parties/${party.code}`, { env: counting.env });
+      expect(counting.methods()).toEqual(['PARTY.view']);
+      counting.reset();
+      const { body } = await request('GET', `/v1/parties/${party.code}`, { token: host.token, env: counting.env });
+      expect(body.participants).toHaveLength(members);
+      expect(counting.methods().sort()).toEqual(['PARTY.view', 'USER.get']);
+    }
+  });
+
+  it('POST /parties: a held slot and the party; join: one call (the party checks the session itself)', async () => {
     const host = await person('Host');
     const guest = await person('Guest');
-    const { node } = (await gql(env, CREATE, { name: 'Revoked' }, host.token)).data.parties.createParty;
-    await env.USER.getByName(guest.email).tombstone();
     const counting = countingEnv();
-    expect((await gql(counting.env, JOIN, { party: node.id, name: 'Ghost' }, guest.token)).data.parties.joinParty.status).toBe('error');
-    expect(counting.calls).toEqual([{ binding: 'PARTY', name: node.code, method: 'join' }]);
-  });
-
-  it('requests an account email with one profile read (two for an email change: also the new address)', async () => {
-    const me = await person('Me');
-    const counting = countingEnv();
-    const bindings = { ...counting.env, EMAIL: { send: async () => ({ messageId: 'm' }) } } as unknown as typeof env;
-    expect((await gql(bindings, `mutation { profile { requestAccountDeletion { status } } }`, {}, me.token)).data.profile.requestAccountDeletion.status).toBe('ok');
-    expect(counting.calls.map(c => `${c.binding}.${c.method}`)).toEqual(['USER.get']);
-
+    const { body: party } = await request('POST', '/v1/parties', { token: host.token, body: { name: 'Create' }, env: counting.env });
+    expect(counting.methods()).toEqual(['USER.startHosting', 'PARTY.create']);
     counting.reset();
-    const newEmail = `eff-new-${++counter}@example.com`;
-    const res = await gql(bindings, `mutation ($email: String!) { profile { requestEmailChange(input: { email: $email }) { status } } }`, { email: newEmail }, me.token);
-    expect(res.data.profile.requestEmailChange.status).toBe('ok');
-    expect(counting.calls.map(c => `${c.binding}:${c.name === me.email ? 'old' : 'new'}.${c.method}`).sort()).toEqual(['USER:new.get', 'USER:old.get']);
+    await request('POST', `/v1/parties/${party.code}/join`, { token: guest.token, body: { name: 'G' }, env: counting.env });
+    expect(counting.methods()).toEqual(['PARTY.join']);
+
+    // A deleted account's join is refused in that same call.
+    const ghost = await person();
+    await env.USER.getByName(ghost.email).tombstone();
+    counting.reset();
+    expect((await request('POST', `/v1/parties/${party.code}/join`, { token: ghost.token, body: { name: 'G' }, env: counting.env })).status).toBe(401);
+    expect(counting.methods()).toEqual(['PARTY.join']);
   });
 
-  it('deletes an account with one call per party, plus two to the user', async () => {
-    const me = await person('Me');
-    const friend = await person('Friend');
-    const mine = (await gql(env, CREATE, { name: 'Mine' }, me.token)).data.parties.createParty.node;
-    const theirs = (await gql(env, CREATE, { name: 'Theirs' }, friend.token)).data.parties.createParty.node;
-    await gql(env, JOIN, { party: theirs.id, name: 'Me' }, me.token);
-    const token = await jwt.issueToken('AccountDeletion', { sub: nodeIdToStr({ kind: 'User', id: me.id }), email: me.email, jti: crypto.randomUUID() }, { ttl: 60 });
-
-    const counting = countingEnv();
-    const res = await gql(counting.env, `mutation ($token: String!) { profile { confirmAccountDeletion(input: { token: $token }) { status } } }`, { token });
-    expect(res.data.profile.confirmAccountDeletion.status).toBe('ok');
-    const calls = counting.calls.map(c => `${c.binding}.${c.method}`);
-    expect(calls[0]).toBe('USER.startAccountChange');
-    expect(calls.slice(1, 3).sort()).toEqual(['PARTY.forgetMember', 'PARTY.forgetMember']);
-    expect(calls.slice(3)).toEqual(['USER.tombstone']);
-    expect(counting.calls.filter(c => c.binding === 'PARTY').map(c => c.name).sort()).toEqual([mine.code, theirs.code].sort());
+  it('leave, draw and delete: the session check and the party, whatever the party holds', async () => {
+    for (const members of [2, 30]) {
+      const host = await person('Host');
+      const party = await create(host.token);
+      const guests = [];
+      for (let i = 1; i < members; i++) {
+        const guest = await person();
+        await join(guest.token, party.code);
+        guests.push(guest);
+      }
+      const counting = countingEnv();
+      await request('POST', `/v1/parties/${party.code}/leave`, { token: guests[0].token, env: counting.env });
+      await request('POST', `/v1/parties/${party.code}/draw`, { token: host.token, env: counting.env });
+      const other = await create(host.token, 'Other');
+      counting.reset();
+      await request('DELETE', `/v1/parties/${other.code}`, { token: host.token, env: counting.env });
+      expect(counting.methods()).toEqual(['USER.get', 'PARTY.delete']);
+    }
   });
 
-  it('changes the email with one call per party, plus four to the two addresses', async () => {
-    const me = await person('Me');
-    const friend = await person('Friend');
-    const theirs = (await gql(env, CREATE, { name: 'Theirs' }, friend.token)).data.parties.createParty.node;
-    await gql(env, JOIN, { party: theirs.id, name: 'Me' }, me.token);
-    const newEmail = `eff-moved-${++counter}@example.com`;
-    const token = await jwt.issueToken('EmailChange', { sub: nodeIdToStr({ kind: 'User', id: me.id }), email: me.email, newEmail, jti: crypto.randomUUID() }, { ttl: 60 });
-
-    const counting = countingEnv();
-    const res = await gql(counting.env, `mutation ($token: String!) { profile { confirmEmailChange(input: { token: $token }) { status userToken } } }`, { token });
-    expect(res.data.profile.confirmEmailChange.status).toBe('ok');
-    expect(counting.calls.map(c => `${c.binding}:${c.name === me.email ? 'old' : c.name === newEmail ? 'new' : 'party'}.${c.method}`)).toEqual([
-      'USER:new.get', 'USER:old.startAccountChange', 'PARTY:party.changeMemberEmail', 'USER:new.receive', 'USER:old.tombstone',
-    ]);
-  });
-
-  it('leaves and closes with one call each', async () => {
+  it('restore: the party, a slot (or the session check for a closed party), and the party again', async () => {
     const host = await person('Host');
     const guest = await person('Guest');
-    const other = await person('Other');
-    const { node } = (await gql(env, CREATE, { name: 'Close' }, host.token)).data.parties.createParty;
-    await gql(env, JOIN, { party: node.id, name: 'G' }, guest.token);
-    await gql(env, JOIN, { party: node.id, name: 'O' }, other.token);
+    const open = await create(host.token, 'Open');
+    const closed = await create(host.token, 'Closed');
+    await join(guest.token, closed.code);
+    await request('POST', `/v1/parties/${closed.code}/draw`, { token: host.token });
+    await request('DELETE', `/v1/parties/${open.code}`, { token: host.token });
+    // Rolled parties can't be deleted any more; this one was deleted before that rule.
+    await runInDurableObject(env.PARTY.getByName(closed.code), async (instance: PartyDO) => {
+      (instance as any).setDeleted(Date.now());
+      await (instance as any).deliverSoon();
+    });
+
     const counting = countingEnv();
-    await gql(counting.env, LEAVE, { party: node.id }, other.token);
-    await gql(counting.env, CLOSE, { party: node.id }, host.token);
-    expect(counting.calls.map(c => `${c.binding}.${c.method}`)).toEqual(['PARTY.leave', 'PARTY.close']);
+    expect((await request('POST', `/v1/parties/${open.code}/restore`, { token: host.token, env: counting.env })).status).toBe(200);
+    expect(counting.methods()).toEqual(['PARTY.view', 'USER.startHosting', 'PARTY.restore']);
+    counting.reset();
+    expect((await request('POST', `/v1/parties/${closed.code}/restore`, { token: host.token, env: counting.env })).status).toBe(200);
+    expect(counting.methods()).toEqual(['PARTY.view', 'USER.get', 'PARTY.restore']);
+    // The slot held for the open party was released when it came back to the host's list.
+    expect(await runInDurableObject(env.USER.getByName(host.email), async (_i, state) =>
+      state.storage.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM host_reservations').one().n)).toBe(0);
+  });
+
+  it('repeats cost no more than the first request', async () => {
+    const host = await person('Host');
+    const guest = await person('Guest');
+    const party = await create(host.token);
+    await join(guest.token, party.code);
+    for (const [method, path, body] of [
+      ['POST', `/v1/parties/${party.code}/join`, { name: 'G' }],
+      ['POST', `/v1/parties/${party.code}/draw`, undefined],
+    ] as const) {
+      const token = method === 'POST' && path.endsWith('/join') ? guest.token : host.token;
+      const first = countingEnv();
+      await request(method, path, { token, body, env: first.env });
+      const again = countingEnv();
+      await request(method, path, { token, body, env: again.env });
+      expect(again.count()).toBeLessThanOrEqual(first.count());
+    }
+  });
+});
+
+describe('lists do not grow with what is in them (no N+1)', () => {
+  it('lists my parties with one call, from 1 to 6 parties, joined or hosted', async () => {
+    for (const size of [1, 6]) {
+      const who = await person('Me');
+      for (let i = 0; i < size; i++) {
+        if (i < 3) {
+          await create(who.token, `Mine ${i}`);
+        } else {
+          const other = await person();
+          await join(who.token, (await create(other.token, `Theirs ${i}`)).code, 'Me');
+        }
+      }
+      const counting = countingEnv();
+      const { body } = await request('GET', '/v1/me/parties?first=100', { token: who.token, env: counting.env });
+      expect(body.items).toHaveLength(size);
+      expect(counting.calls).toEqual([{ binding: 'USER', name: who.email, method: 'listParties' }]);
+    }
+  });
+
+  it('gives party times in the list from the summaries alone', async () => {
+    const who = await person('Me');
+    const friend = await person('Friend');
+    const party = await create(who.token, 'Timed');
+    await join(friend.token, party.code);
+    await request('POST', `/v1/parties/${party.code}/draw`, { token: who.token });
+    await settle(party.code);
+    const counting = countingEnv();
+    const { body } = await request('GET', '/v1/me/parties', { token: who.token, env: counting.env });
+    expect(body.items).toMatchObject([{ code: party.code, createdAt: expect.any(String), rolledAt: expect.any(String) }]);
+    expect(counting.methods()).toEqual(['USER.listParties']);
   });
 });
 
@@ -294,96 +320,72 @@ describe('party → user updates', () => {
   it('sends one call per user, with all their changes batched, and keeps each user\'s summary right', async () => {
     const host = await person('Host');
     const guest = await person('Guest');
-    const { node } = (await gql(env, CREATE, { name: 'Batched' }, host.token)).data.parties.createParty;
+    const party = await create(host.token, 'Batched');
 
-    const { applied, done } = recordUserCalls(node.code);
+    const { applied, done } = recordUserCalls(party.code);
     await done;
-    await gql(env, JOIN, { party: node.id, name: 'Guesty' }, guest.token);
+    await join(guest.token, party.code, 'Guesty');
 
     // One call to the guest's UserDO: the party summary and the name, sent with the session, which the UserDO checks.
-    expect(applied).toHaveLength(1);
-    expect(applied[0]).toEqual({
+    expect(applied).toEqual([{
       email: guest.email,
       updates: [
-        { type: 'addParty', party: expect.objectContaining({ slug: node.code, name: 'Batched', isHost: false, isClosed: false, isProtected: false }) },
+        { type: 'addParty', party: expect.objectContaining({ slug: party.code, name: 'Batched', isHost: false, isClosed: false, isProtected: false }) },
         { type: 'setNameIfEmpty', name: 'Guesty', userId: guest.id },
       ],
-    });
+    }]);
     // The guest already had a profile name: joining doesn't overwrite it.
     expect((await env.USER.getByName(guest.email).get())!.name).toBe('Guest');
   });
 
-  it('marks the party closed in every member\'s list when it closes', async () => {
+  it('draws a 30-person party with one update per member, not one per change', async () => {
     const host = await person('Host');
-    const guest = await person('Guest');
-    const { node } = (await gql(env, CREATE, { name: 'Closing' }, host.token)).data.parties.createParty;
-    await gql(env, JOIN, { party: node.id, name: 'G' }, guest.token);
-    await gql(env, CLOSE, { party: node.id }, host.token);
-    await settle(node.code);
-
-    for (const p of [host, guest]) {
-      const [summary] = await env.USER.getByName(p.email).listParties(10);
-      expect(summary).toMatchObject({ slug: node.code, isClosed: true, isHost: p === host });
+    const party = await create(host.token, 'Big draw');
+    const guests = [];
+    for (let i = 1; i < 30; i++) {
+      const guest = await person();
+      await join(guest.token, party.code);
+      guests.push(guest);
+    }
+    const { applied, done } = recordUserCalls(party.code);
+    await done;
+    await request('POST', `/v1/parties/${party.code}/draw`, { token: host.token });
+    await runInDurableObject(env.PARTY.getByName(party.code), async (instance: PartyDO) => { await instance.alarm(); });
+    expect(applied).toHaveLength(30);
+    expect(new Set(applied.map(a => a.email)).size).toBe(30);
+    for (const p of [host, guests[0]]) {
+      const [summary] = (await env.USER.getByName(p.email).listParties(10))!;
+      expect(summary).toMatchObject({ slug: party.code, isClosed: true, isHost: p === host });
     }
   });
 
-  it("deletes with one call from the Worker: the host's list updates before it returns, the guests' on the alarm", async () => {
+  it("deletes with one call from the Worker beyond the session check: the host's list updates before it returns, the guests' on the alarm", async () => {
     const host = await person('Host');
     const guest = await person('Guest');
-    const { node } = (await gql(env, CREATE, { name: 'Deleted' }, host.token)).data.parties.createParty;
-    await gql(env, JOIN, { party: node.id, name: 'G' }, guest.token);
-    const { applied, done } = recordUserCalls(node.code);
+    const party = await create(host.token, 'Deleted');
+    await join(guest.token, party.code);
+    const { applied, done } = recordUserCalls(party.code);
     await done;
-    const counting = countingEnv();
-    const res = await gql(counting.env, DELETE, { party: node.id }, host.token);
-    expect(res.data.parties.deleteParty.status).toBe('ok');
-    expect(counting.calls).toEqual([{ binding: 'PARTY', name: node.code, method: 'delete' }]);
-    expect(applied).toEqual([{ email: host.email, updates: [{ type: 'addParty', party: expect.objectContaining({ slug: node.code, deletedAt: expect.any(Number) }) }] }]);
+    expect((await request('DELETE', `/v1/parties/${party.code}`, { token: host.token })).status).toBe(200);
+    expect(applied).toEqual([{ email: host.email, updates: [{ type: 'addParty', party: expect.objectContaining({ slug: party.code, deletedAt: expect.any(Number) }) }] }]);
 
-    await runInDurableObject(env.PARTY.getByName(node.code), async (instance: PartyDO) => { await instance.alarm(); });
-    expect(applied.slice(1)).toEqual([{ email: guest.email, updates: [{ type: 'removeParty', slug: node.code }] }]);
-  });
-
-  it('restores an open party with three calls (it needs a slot), a closed one with two', async () => {
-    const host = await person('Host');
-    const guest = await person('Guest');
-    const open = (await gql(env, CREATE, { name: 'Open' }, host.token)).data.parties.createParty.node;
-    const closed = (await gql(env, CREATE, { name: 'Closed' }, host.token)).data.parties.createParty.node;
-    await gql(env, JOIN, { party: closed.id, name: 'G' }, guest.token);
-    await gql(env, CLOSE, { party: closed.id }, host.token);
-    await gql(env, DELETE, { party: open.id }, host.token);
-    // Rolled parties can't be deleted any more; this one was deleted before that rule.
-    await runInDurableObject(env.PARTY.getByName(closed.code), async (instance: PartyDO) => {
-      (instance as any).setDeleted(Date.now());
-      await (instance as any).deliverSoon();
-    });
-
-    const counting = countingEnv();
-    expect((await gql(counting.env, RESTORE, { party: open.id }, host.token)).data.parties.restoreParty.status).toBe('ok');
-    expect(counting.calls.map(c => `${c.binding}.${c.method}`)).toEqual(['PARTY.view', 'USER.startHosting', 'PARTY.restore']);
-
-    counting.reset();
-    expect((await gql(counting.env, RESTORE, { party: closed.id }, host.token)).data.parties.restoreParty.status).toBe('ok');
-    expect(counting.calls.map(c => `${c.binding}.${c.method}`)).toEqual(['PARTY.view', 'PARTY.restore']);
-
-    // The slot held for the open party was released when it came back to the host's list.
-    expect(await runInDurableObject(env.USER.getByName(host.email), async (_i, state) =>
-      state.storage.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM host_reservations').one().n)).toBe(0);
+    await runInDurableObject(env.PARTY.getByName(party.code), async (instance: PartyDO) => { await instance.alarm(); });
+    expect(applied.slice(1)).toEqual([{ email: guest.email, updates: [{ type: 'removeParty', slug: party.code }] }]);
   });
 
   it('sends nothing for a sync left queued for a party that was erased', async () => {
     const host = await person('Host');
-    const { node } = (await gql(env, CREATE, { name: 'Gone' }, host.token)).data.parties.createParty;
-    await gql(env, DELETE, { party: node.id }, host.token);
-    await runInDurableObject(env.PARTY.getByName(node.code), async (instance: PartyDO, state) => {
+    const party = await create(host.token, 'Gone');
+    await request('DELETE', `/v1/parties/${party.code}`, { token: host.token });
+    await runInDurableObject(env.PARTY.getByName(party.code), async (instance: PartyDO, state) => {
       state.storage.sql.exec('UPDATE party SET deleted_at = ?', Date.now() - RESTORE_WINDOW_MS - 1000);
       await instance.alarm();
     });
     expect(await env.USER.getByName(host.email).listParties(10)).toEqual([]);
 
-    const { applied, done } = recordUserCalls(node.code);
+    const { applied, done } = recordUserCalls(party.code);
     await done;
-    await runInDurableObject(env.PARTY.getByName(node.code), async (instance: PartyDO, state) => {
+    await runInDurableObject(env.PARTY.getByName(party.code), async (instance: PartyDO, state) => {
       state.storage.sql.exec('INSERT INTO outbox (payload, next_attempt_at) VALUES (?, 0)', JSON.stringify({ kind: 'user.sync', email: host.email }));
       await instance.alarm();
       expect(await instance.pendingOutbox()).toBe(0);
@@ -393,8 +395,8 @@ describe('party → user updates', () => {
 
   it('holds the limit when one host creates parties in parallel', async () => {
     const host = await person('Host');
-    const results = await Promise.all(Array.from({ length: 5 }, (_, i) => gql(env, CREATE, { name: `Rush ${i}` }, host.token)));
-    expect(results.map(r => r.data.parties.createParty.status).sort()).toEqual(['error', 'error', 'ok', 'ok', 'ok']);
+    const results = await Promise.all(Array.from({ length: 5 }, (_, i) => request('POST', '/v1/parties', { token: host.token, body: { name: `Rush ${i}` } })));
+    expect(results.map(r => r.status).sort()).toEqual([201, 201, 201, 409, 409]);
     expect(await env.USER.getByName(host.email).listParties(10)).toHaveLength(3);
   });
 
@@ -403,15 +405,15 @@ describe('party → user updates', () => {
     const reservations = () => runInDurableObject(env.USER.getByName(host.email), async (_i, state) =>
       state.storage.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM host_reservations').one().n);
 
-    await gql(env, CREATE, { name: 'One' }, host.token);
+    await create(host.token, 'One');
     expect(await reservations()).toBe(0);
 
     // Two slots held by creates that never finished: only the expired one stops counting.
     await runInDurableObject(env.USER.getByName(host.email), async (_i, state) => {
       state.storage.sql.exec("INSERT INTO host_reservations (id, expires_at) VALUES ('stale', 1), ('live', ?)", Date.now() + 60_000);
     });
-    expect((await gql(env, CREATE, { name: 'Two' }, host.token)).data.parties.createParty.status).toBe('ok');
-    expect((await gql(env, CREATE, { name: 'Three' }, host.token)).data.parties.createParty.status).toBe('error');
+    expect((await request('POST', '/v1/parties', { token: host.token, body: { name: 'Two' } })).status).toBe(201);
+    expect((await request('POST', '/v1/parties', { token: host.token, body: { name: 'Three' } })).status).toBe(409);
     expect(await reservations()).toBe(1);
   });
 
@@ -423,85 +425,90 @@ describe('party → user updates', () => {
     });
     const outbox = (code: string) => runInDurableObject(env.PARTY.getByName(code), async (instance: PartyDO) => await instance.pendingOutbox());
 
-    const deleted = (await gql(env, CREATE, { name: 'To delete' }, host.token)).data.parties.createParty.node;
+    const deleted = await create(host.token, 'To delete');
     await waiting(deleted.code);
-    await gql(env, DELETE, { party: deleted.id }, host.token);
+    await request('DELETE', `/v1/parties/${deleted.code}`, { token: host.token });
     expect(await outbox(deleted.code)).toBe(0);
 
-    const closed = (await gql(env, CREATE, { name: 'To close' }, host.token)).data.parties.createParty.node;
-    await gql(env, JOIN, { party: closed.id, name: 'G' }, guest.token);
+    const closed = await create(host.token, 'To close');
+    await join(guest.token, closed.code);
     await waiting(closed.code);
-    await gql(env, CLOSE, { party: closed.id }, host.token);
+    await request('POST', `/v1/parties/${closed.code}/draw`, { token: host.token });
 
-    const list = await env.USER.getByName(host.email).listParties(10);
-    expect(list.find((p: any) => p.slug === deleted.code)!.deletedAt).toEqual(expect.any(Number));
-    expect(list.find((p: any) => p.slug === closed.code)!.isClosed).toBe(true);
+    const list = (await env.USER.getByName(host.email).listParties(10))!;
+    expect(list.find(p => p.slug === deleted.code)!.deletedAt).toEqual(expect.any(Number));
+    expect(list.find(p => p.slug === closed.code)!.isClosed).toBe(true);
   });
 
   it('removes the party from the list of someone who left', async () => {
     const host = await person('Host');
     const guest = await person('Guest');
-    const { node } = (await gql(env, CREATE, { name: 'Leaving' }, host.token)).data.parties.createParty;
-    await gql(env, JOIN, { party: node.id, name: 'G' }, guest.token);
-    await gql(env, LEAVE, { party: node.id }, guest.token);
+    const party = await create(host.token, 'Leaving');
+    await join(guest.token, party.code);
+    await request('POST', `/v1/parties/${party.code}/leave`, { token: guest.token });
     expect(await env.USER.getByName(guest.email).listParties(10)).toEqual([]);
   });
 
   it('delivers older queued messages (from before summaries) as one sync per user', async () => {
     const host = await person('Host');
-    const { node } = (await gql(env, CREATE, { name: 'Legacy' }, host.token)).data.parties.createParty;
+    const party = await create(host.token, 'Legacy');
     // Record first, then deliver by calling the alarm handler directly: a real alarm could fire before the recorder is in place.
-    const { applied, done } = recordUserCalls(node.code);
+    const { applied, done } = recordUserCalls(party.code);
     await done;
-    await runInDurableObject(env.PARTY.getByName(node.code), async (instance: PartyDO, state) => {
+    await runInDurableObject(env.PARTY.getByName(party.code), async (instance: PartyDO, state) => {
       for (const kind of ['user.removeParty', 'user.addParty']) {
-        state.storage.sql.exec('INSERT INTO outbox (payload, next_attempt_at) VALUES (?, 0)', JSON.stringify({ kind, email: host.email, party: { slug: node.code } }));
+        state.storage.sql.exec('INSERT INTO outbox (payload, next_attempt_at) VALUES (?, 0)', JSON.stringify({ kind, email: host.email, party: { slug: party.code } }));
       }
       await instance.alarm();
     });
-    expect(applied).toEqual([{ email: host.email, updates: [{ type: 'addParty', party: expect.objectContaining({ slug: node.code, isHost: true }) }] }]);
+    expect(applied).toEqual([{ email: host.email, updates: [{ type: 'addParty', party: expect.objectContaining({ slug: party.code, isHost: true }) }] }]);
   });
 });
 
 describe('party lists saved before summaries existed', () => {
   it('fills in missing summaries once, from the parties, and stores them', async () => {
-    const me = await person('Me');
-    const { node } = (await gql(env, CREATE, { name: 'Old row' }, me.token)).data.parties.createParty;
-    await runInDurableObject(env.USER.getByName(me.email), async (_i, state) => {
+    const who = await person('Me');
+    const party = await create(who.token, 'Old row');
+    await runInDurableObject(env.USER.getByName(who.email), async (_i, state) => {
       state.storage.sql.exec('UPDATE parties SET is_host = NULL, is_protected = NULL, is_closed = NULL');
     });
 
     const first = countingEnv();
-    const list = await gql(first.env, `{ parties { code name isHost isClosed } }`, {}, me.token);
-    expect(list.data.parties).toEqual([{ code: node.code, name: 'Old row', isHost: true, isClosed: false }]);
-    expect(first.calls.map(c => `${c.binding}.${c.method}`).sort()).toEqual(['PARTY.view', 'USER.apply', 'USER.listParties']);
+    const { body } = await request('GET', '/v1/me/parties', { token: who.token, env: first.env });
+    expect(body.items).toMatchObject([{ code: party.code, name: 'Old row', isHost: true, isClosed: false }]);
+    expect(first.methods().sort()).toEqual(['PARTY.view', 'USER.apply', 'USER.listParties']);
 
     const second = countingEnv();
-    await gql(second.env, `{ parties { code isHost } }`, {}, me.token);
-    expect(second.calls.map(c => `${c.binding}.${c.method}`)).toEqual(['USER.listParties']);
+    await request('GET', '/v1/me/parties', { token: who.token, env: second.env });
+    expect(second.methods()).toEqual(['USER.listParties']);
   });
 
   it('skips parties that no longer exist while filling in', async () => {
-    const me = await person('Me');
-    await env.USER.getByName(me.email).apply([{ type: 'addParty', party: { slug: 'QQQQZ', name: 'Gone', createdAt: 1, isHost: false, isProtected: false, isClosed: false, closedAt: null } }]);
-    await runInDurableObject(env.USER.getByName(me.email), async (_i, state) => {
+    const who = await person('Me');
+    await env.USER.getByName(who.email).apply([{ type: 'addParty', party: { slug: 'QQQQZ', name: 'Gone', createdAt: 1, isHost: false, isProtected: false, isClosed: false, closedAt: null } }]);
+    await runInDurableObject(env.USER.getByName(who.email), async (_i, state) => {
       state.storage.sql.exec('UPDATE parties SET is_host = NULL');
     });
-    expect((await gql(env, `{ parties { code } }`, {}, me.token)).data.parties).toEqual([]);
+    expect((await request('GET', '/v1/me/parties', { token: who.token })).body.items).toEqual([]);
   });
 
-  it('adds the summary columns to an existing list', async () => {
-    const email = `eff-migrate-${++counter}@example.com`;
+  it('adds the summary and request columns to existing tables', async () => {
+    const email = uniqueEmail('migrate');
     const stub = env.USER.getByName(email);
     await stub.ensure(email);
     await runInDurableObject(stub, async (_i, state) => {
       state.storage.sql.exec('DROP TABLE parties');
       state.storage.sql.exec('CREATE TABLE parties (slug TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL)');
       state.storage.sql.exec("INSERT INTO parties VALUES ('QQQQY', 'Before', 5)");
+      state.storage.sql.exec('DROP TABLE used_magic_links');
+      state.storage.sql.exec('CREATE TABLE used_magic_links (jti TEXT PRIMARY KEY, expires_at INTEGER NOT NULL)');
+      state.storage.sql.exec('DROP TABLE create_requests');
+      state.storage.sql.exec('CREATE TABLE create_requests (key TEXT PRIMARY KEY, party_id TEXT NOT NULL, slug TEXT NOT NULL, expires_at INTEGER NOT NULL)');
     });
     await evictDurableObject(stub);
     expect(await env.USER.getByName(email).listParties(10)).toEqual([
       { slug: 'QQQQY', name: 'Before', createdAt: 5, isHost: null, isProtected: null, isClosed: null, closedAt: null, deletedAt: null },
     ]);
+    expect(await env.USER.getByName(email).redeemMagicLink(email, 'j', Date.now() + 60_000, 'hash')).toMatchObject({ email });
   });
 });

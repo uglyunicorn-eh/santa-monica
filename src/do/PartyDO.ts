@@ -7,9 +7,8 @@ import { Session, sessionMatches } from 'src/utils/session';
 
 import { newObjectId } from 'src/utils/ids';
 
-import { CreatePartyInput, ForgetMemberResult, Member, PartyResult, PartyView, UserPartyRecord, UserRecord, UserUpdate } from './types';
+import { CreatePartyInput, ForgetMemberResult, Member, PartyErrorCode, PartyResult, PartyView, UserPartyRecord, UserRecord, UserUpdate } from './types';
 
-import { baseUrl } from 'src/config.json';
 
 type PartyRow = {
   id: string;
@@ -70,9 +69,12 @@ export const PHRASE_GUESS_WINDOW_MS = 15 * 60 * 1000;
 const MAX_ATTEMPTS = 15;
 const MAX_BACKOFF_MS = 60 * 60 * 1000;
 
-const fail = (fieldName: string | null, message: string) => ({ ok: false as const, error: { fieldName, message } });
+const fail = (code: PartyErrorCode, fieldName: string | null, message: string) => ({ ok: false as const, error: { code, fieldName, message } });
 
-const closedToNewMembers = fail('party', 'Party is already packed. Sorry, we cannot accept a new participant...');
+const notLoggedIn = fail('unauthenticated', null, 'You must be logged in before joining the party.');
+const tryAgain = fail('unavailable', null, "We couldn't reach your account. Please try again in a minute.");
+
+const closedToNewMembers = fail('conflict', 'party', 'Party is already packed. Sorry, we cannot accept a new participant...');
 
 /**
  * One instance per party, addressed by the party slug (`env.PARTY.getByName(slug)`).
@@ -348,13 +350,14 @@ export class PartyDO extends DurableObject<Env> {
    * Adds a member. With `check`, the joining session is verified in the call that updates the member's UserDO anyway
    * (no extra call), before the membership is stored: the UserDO gets the party summary and the name together with the
    * session, and writes nothing if the account was deleted or the token revoked. Then the join fails and nothing was
-   * stored anywhere. If the user can't be reached, or older changes for them are still queued (sending this one first
-   * would reorder them), the join goes through the outbox unchecked, as joins without `check` do.
+   * stored anywhere. When older changes for them are still queued (sending this one first would reorder them), the
+   * session is checked on its own and the join goes through the outbox. If the user can't be reached, the join is
+   * refused: it never goes through unchecked. Joins without `check` (only tests and internal callers) skip the check.
    */
   async join(member: Member, name: string, password: string | null, check?: JoinCheck): Promise<PartyResult> {
     const party = this.liveParty();
     if (!party) {
-      return fail('party', 'Party does not exist.');
+      return fail('not_found', 'party', 'Party does not exist.');
     }
     if (this.membership(member.id)) {
       return { ok: true, view: this.buildView(party, member.id) };
@@ -365,22 +368,42 @@ export class PartyDO extends DurableObject<Env> {
     const lockedFor = this.guessLockout(member.id);
     if (lockedFor) {
       const minutes = Math.ceil(lockedFor / 60_000);
-      return fail('password', `That's a lot of wrong guesses! Please ask your friend for the secret phrase and try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`);
+      return fail('rate_limited', 'password', `That's a lot of wrong guesses! Please ask your friend for the secret phrase and try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`);
     }
     if ((party.password || '').toUpperCase() !== (password || '').toUpperCase()) {
       this.recordWrongGuess(member.id);
-      return fail('password', "Hmm... Seems you've got a wrong secret phrase. Please try a different one or ask your friend for a hint.");
+      return fail('forbidden', 'password', "Hmm... Seems you've got a wrong secret phrase. Please try a different one or ask your friend for a hint.");
     }
     this.sql.exec('DELETE FROM phrase_guesses WHERE member_id = ?', member.id);
     const displayName = name || member.name;
     if (!displayName) {
-      return fail('name', 'We were unable to get your name.');
+      return fail('invalid', 'name', 'We were unable to get your name.');
     }
 
-    if (check && member.email && !this.hasQueuedUserUpdates(member.email)) {
-      const checked = await this.checkedJoin(party, { ...member, email: member.email }, displayName, check);
-      if (checked) {
-        return checked;
+    if (check && member.email) {
+      if (!this.hasQueuedUserUpdates(member.email)) {
+        return await this.checkedJoin(party, { ...member, email: member.email }, displayName, check);
+      }
+      let user: UserRecord | null;
+      try {
+        user = await this.env.USER.getByName(member.email).get();
+      } catch (error) {
+        console.warn('Unable to check the joining user', { error: String(error) });
+        return tryAgain;
+      }
+      if (!sessionMatches(user, { userId: member.id, tokenVersion: check.tokenVersion })) {
+        return notLoggedIn;
+      }
+      // Other requests may have reached the party meanwhile.
+      const current = this.liveParty();
+      if (!current) {
+        return fail('not_found', 'party', 'Party does not exist.');
+      }
+      if (this.membership(member.id)) {
+        return { ok: true, view: this.buildView(current, member.id) };
+      }
+      if (current.is_closed) {
+        return closedToNewMembers;
       }
     }
 
@@ -399,10 +422,10 @@ export class PartyDO extends DurableObject<Env> {
   }
 
   /**
-   * Updates the member's UserDO with the session check first, then stores the membership. Returns undefined when the
-   * user couldn't be reached, so the caller falls back to the outbox.
+   * Updates the member's UserDO with the session check first, then stores the membership. Refuses the join when the
+   * user can't be reached.
    */
-  private async checkedJoin(party: PartyRow, member: Member & { email: string }, displayName: string, check: JoinCheck): Promise<PartyResult | undefined> {
+  private async checkedJoin(party: PartyRow, member: Member & { email: string }, displayName: string, check: JoinCheck): Promise<PartyResult> {
     const session = { userId: member.id, tokenVersion: check.tokenVersion };
     let user: UserRecord | null;
     try {
@@ -411,11 +434,11 @@ export class PartyDO extends DurableObject<Env> {
         { type: 'setNameIfEmpty', name: displayName, userId: member.id },
       ], session);
     } catch (error) {
-      console.warn('Unable to update the joining user, joining through the outbox', { error: String(error) });
-      return undefined;
+      console.warn('Unable to update the joining user', { error: String(error) });
+      return tryAgain;
     }
     if (!sessionMatches(user, session)) {
-      return fail(null, 'You must be logged in before joining the party.');
+      return notLoggedIn;
     }
 
     // Other requests may have reached the party while the user was being updated. The host may even have deleted it,
@@ -424,7 +447,7 @@ export class PartyDO extends DurableObject<Env> {
     if (!current) {
       this.enqueue({ kind: 'user.partyPurged', email: member.email, slug: party.slug });
       await this.deliverUserUpdates();
-      return fail('party', 'Party does not exist.');
+      return fail('not_found', 'party', 'Party does not exist.');
     }
     if (!this.membership(member.id)) {
       if (current.is_closed) {
@@ -444,7 +467,7 @@ export class PartyDO extends DurableObject<Env> {
   async leave(userId: string): Promise<PartyResult> {
     const party = this.liveParty();
     if (!party) {
-      return fail('party', 'Party does not exist.');
+      return fail('not_found', 'party', 'Party does not exist.');
     }
     const membership = this.membership(userId);
     if (!membership) {
@@ -452,10 +475,10 @@ export class PartyDO extends DurableObject<Env> {
     }
     // The open-party limit counts the parties in the host's list, so leaving would dodge it: hosts delete instead.
     if (party.host_id === userId) {
-      return fail('party', "As the host, you can't leave your own party. Delete it instead, or close it once others have joined.");
+      return fail('conflict', 'party', "As the host, you can't leave your own party. Delete it instead, or close it once others have joined.");
     }
     if (party.is_closed) {
-      return fail('party', 'Party is already at that stage when you cannot really run away... Sorry but you have to get the gift');
+      return fail('conflict', 'party', 'Party is already at that stage when you cannot really run away... Sorry but you have to get the gift');
     }
 
     this.ctx.storage.transactionSync(() => {
@@ -471,17 +494,18 @@ export class PartyDO extends DurableObject<Env> {
   async close(userId: string): Promise<PartyResult> {
     const party = this.liveParty();
     if (!party) {
-      return fail('party', 'Party does not exist.');
+      return fail('not_found', 'party', 'Party does not exist.');
     }
     if (party.host_id !== userId) {
-      return fail('party', 'You must be the host to close the party.');
+      return fail('forbidden', 'party', 'You must be the host to close the party.');
     }
     if (party.is_closed) {
-      return fail('party', 'Party is already closed.');
+      // Already drawn: a repeat gets the same draw. Nothing is drawn or mailed again.
+      return { ok: true, view: this.buildView(party, userId) };
     }
     const members = this.sql.exec<MembershipRow>('SELECT * FROM memberships').toArray();
     if (members.length < 2) {
-      return fail('party', 'You need at least two participants to close the party.');
+      return fail('conflict', 'party', 'You need at least two participants to close the party.');
     }
 
     const draws = santaShuffle(members, (a, b) => a.member_id === b.member_id);
@@ -516,15 +540,21 @@ export class PartyDO extends DurableObject<Env> {
    * RESTORE_WINDOW_MS; after that the alarm erases it for good.
    */
   async delete(userId: string): Promise<PartyResult> {
-    const party = this.liveParty();
+    const party = this.party();
     if (!party) {
-      return fail('party', 'Party does not exist.');
+      return fail('not_found', 'party', 'Party does not exist.');
+    }
+    if (party.deleted_at) {
+      // Already deleted: the host gets it back as it is (a repeat), anyone else sees no party, as for a lookup.
+      return party.host_id === userId && !this.restoreExpired(party)
+        ? { ok: true, view: this.buildView(party, userId) }
+        : fail('not_found', 'party', 'Party does not exist.');
     }
     if (party.host_id !== userId) {
-      return fail('party', 'You must be the host to delete the party.');
+      return fail('forbidden', 'party', 'You must be the host to delete the party.');
     }
     if (party.is_closed) {
-      return fail('party', 'The dice have already been rolled, so this party can no longer be deleted.');
+      return fail('conflict', 'party', 'The dice have already been rolled, so this party can no longer be deleted.');
     }
     const deletedAt = Date.now();
     this.setDeleted(deletedAt);
@@ -540,11 +570,20 @@ export class PartyDO extends DurableObject<Env> {
    */
   async restore(userId: string, reservation?: string): Promise<PartyResult> {
     const party = this.party();
+    if (party && !party.deleted_at && party.host_id === userId) {
+      // Not deleted (any more): a repeat, or a restore that raced another. Give back a slot held for it, if any.
+      const hostEmail = this.membership(userId)?.member_email;
+      if (reservation && hostEmail) {
+        this.enqueue({ kind: 'user.sync', email: hostEmail, reservation });
+        await this.deliverHostNow(hostEmail);
+      }
+      return { ok: true, view: this.buildView(party, userId) };
+    }
     if (!party || !party.deleted_at || party.host_id !== userId) {
-      return fail('party', 'There is no deleted party to restore.');
+      return fail('not_found', 'party', 'There is no deleted party to restore.');
     }
     if (this.restoreExpired(party)) {
-      return fail('party', 'This party was deleted more than a day ago and can no longer be restored.');
+      return fail('conflict', 'party', 'This party was deleted more than a day ago and can no longer be restored.');
     }
     this.setDeleted(null, reservation);
     await this.deliverHostNow(this.membership(userId)?.member_email);
@@ -674,7 +713,7 @@ export class PartyDO extends DurableObject<Env> {
     const [first] = messages;
     if (first.kind === 'mail.partyNotification') {
       return await sendMail(this.env, first.email, renderPartyNotification({
-        party: { name: first.partyName, url: `${baseUrl}/p/${first.slug}/` },
+        party: { name: first.partyName, url: `${this.env.FRONTEND_URL}/p/${first.slug}/` },
         assetsUrl: this.env.PUBLIC_URL,
       }));
     }

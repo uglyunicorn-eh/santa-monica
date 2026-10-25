@@ -51,6 +51,16 @@ const ADDED_COLUMNS: Record<string, Record<string, string>> = {
     closed_at: 'INTEGER',
     deleted_at: 'INTEGER',
   },
+  // What a create request was for (the party name): the same key with another name is a new request.
+  create_requests: {
+    detail: 'TEXT',
+  },
+  // The hashed Idempotency-Key a link was used with, and what it did (the new email, for an email change), so that
+  // repeating the same request answers the same; anyone else gets "already used".
+  used_magic_links: {
+    request_key: 'TEXT',
+    outcome: 'TEXT',
+  },
 };
 
 /** How long a slot held for a party being created lasts if the party never arrives (say, the create failed). */
@@ -104,7 +114,8 @@ export class UserDO extends DurableObject<Env> {
           key TEXT PRIMARY KEY,
           party_id TEXT NOT NULL,
           slug TEXT NOT NULL,
-          expires_at INTEGER NOT NULL
+          expires_at INTEGER NOT NULL,
+          detail TEXT
         );
         CREATE TABLE IF NOT EXISTS mail_requests (
           key TEXT PRIMARY KEY,
@@ -113,7 +124,9 @@ export class UserDO extends DurableObject<Env> {
         );
         CREATE TABLE IF NOT EXISTS used_magic_links (
           jti TEXT PRIMARY KEY,
-          expires_at INTEGER NOT NULL
+          expires_at INTEGER NOT NULL,
+          request_key TEXT,
+          outcome TEXT
         );
       `);
       // Party rows stored before summaries existed stay null until refreshed; users get version 0, not deleted.
@@ -152,25 +165,24 @@ export class UserDO extends DurableObject<Env> {
 
   /**
    * Signs in with a magic link: returns the user (creating it on the first sign-in), or null when this link
-   * was already used. Used links are kept only until they expire.
+   * was already used. A repeat of the request that used it (same `requestKey`) gets the user again. Used links are
+   * kept only until they expire.
    */
-  redeemMagicLink(email: string, jti: string, expiresAt: number): UserRecord | null {
-    return this.useLink(jti, expiresAt) ? this.ensure(email) : null;
-  }
-
-  /** Marks an emailed link as used. False when it already was. Used links are kept only until they expire. */
-  private useLink(jti: string, expiresAt: number): boolean {
-    if (this.linkUsed(jti)) {
-      return false;
+  redeemMagicLink(email: string, jti: string, expiresAt: number, requestKey?: string): UserRecord | null {
+    const used = this.usedLink(jti);
+    if (used) {
+      return requestKey && used.request_key === requestKey ? this.get() : null;
     }
-    this.sql.exec('INSERT INTO used_magic_links (jti, expires_at) VALUES (?, ?)', jti, expiresAt);
-    return true;
+    this.sql.exec('INSERT INTO used_magic_links (jti, expires_at, request_key) VALUES (?, ?, ?)', jti, expiresAt, requestKey ?? null);
+    return this.ensure(email);
   }
 
-  /** Whether an emailed link was already used (forgetting used links that have expired). */
-  private linkUsed(jti: string): boolean {
+  /** How an emailed link was used, or null if it wasn't (forgetting used links that have expired). */
+  private usedLink(jti: string): { request_key: string | null; outcome: string | null } | null {
     this.sql.exec('DELETE FROM used_magic_links WHERE expires_at < ?', Date.now());
-    return this.sql.exec('SELECT 1 FROM used_magic_links WHERE jti = ?', jti).toArray().length > 0;
+    return this.sql
+      .exec<{ request_key: string | null; outcome: string | null }>('SELECT request_key, outcome FROM used_magic_links WHERE jti = ?', jti)
+      .toArray()[0] ?? null;
   }
 
   /**
@@ -180,11 +192,17 @@ export class UserDO extends DurableObject<Env> {
    * reads as missing, refuses joins and profile changes, and no other change can start, so the party list can't
    * change under the one running.
    */
-  startAccountChange(userId: string, jti: string, expiresAt: number):
-    { ok: true; user: UserRecord; parties: string[] } | { ok: false; reason: 'gone' | 'used' | 'busy' } {
-    // A used link is reported as used even when the change it made left this account a tombstone.
-    if (this.linkUsed(jti)) {
-      return { ok: false, reason: 'used' };
+  startAccountChange(userId: string, jti: string, expiresAt: number, request?: { key?: string; outcome?: string }):
+    | { ok: true; user: UserRecord; parties: string[] }
+    | { ok: false; reason: 'gone' | 'used' | 'busy' }
+    | { ok: false; reason: 'repeat'; outcome: string | null } {
+    // A used link is reported as used even when the change it made left this account a tombstone, unless this is a
+    // repeat of the request that used it.
+    const used = this.usedLink(jti);
+    if (used) {
+      return request?.key && used.request_key === request.key
+        ? { ok: false, reason: 'repeat', outcome: used.outcome }
+        : { ok: false, reason: 'used' };
     }
     const row = this.row();
     if (!row || row.deleted_at !== null || row.id !== userId) {
@@ -193,7 +211,10 @@ export class UserDO extends DurableObject<Env> {
     if (isChanging(row)) {
       return { ok: false, reason: 'busy' };
     }
-    this.sql.exec('INSERT INTO used_magic_links (jti, expires_at) VALUES (?, ?)', jti, expiresAt);
+    this.sql.exec(
+      'INSERT INTO used_magic_links (jti, expires_at, request_key, outcome) VALUES (?, ?, ?, ?)',
+      jti, expiresAt, request?.key ?? null, request?.outcome ?? null,
+    );
     this.sql.exec('UPDATE user SET changing_until = ?', Date.now() + ACCOUNT_CHANGE_MS);
     const parties = this.sql.exec<{ slug: string }>('SELECT slug FROM parties').toArray().map(r => r.slug);
     return { ok: true, user: toRecord(row), parties };
@@ -283,7 +304,7 @@ export class UserDO extends DurableObject<Env> {
    * (`releaseHostSlot`) or after HOST_RESERVATION_TTL_MS. Returns null when there is no user or the session no longer
    * belongs to them.
    */
-  startHosting(limit: number, session: Session, request?: { key: string; id: string; slug: string }): HostingStart | null {
+  startHosting(limit: number, session: Session, request?: { key: string; id: string; slug: string; detail?: string }): HostingStart | null {
     const user = this.get();
     if (!sessionMatches(user, session)) {
       return null;
@@ -295,9 +316,11 @@ export class UserDO extends DurableObject<Env> {
       .exec<{ n: number }>('SELECT COUNT(*) AS n FROM parties WHERE is_host = 1 AND NOT COALESCE(is_closed, 0) AND deleted_at IS NULL')
       .one().n;
     const held = this.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM host_reservations').one().n;
-    const repeated = request && this.sql
-      .exec<{ party_id: string; slug: string }>('SELECT party_id, slug FROM create_requests WHERE key = ?', request.key)
+    const previous = request && this.sql
+      .exec<{ party_id: string; slug: string; detail: string | null }>('SELECT party_id, slug, detail FROM create_requests WHERE key = ?', request.key)
       .toArray()[0];
+    // The same key for a different party (another name) is a new request: it replaces the old one below.
+    const repeated = previous && (previous.detail ?? undefined) === request.detail ? previous : undefined;
     if (repeated) {
       // The same request again: it holds no new slot, and gets the party the first one made (or is making).
       return { ...user!, openHostedParties: open + held, allowed: true, request: { id: repeated.party_id, slug: repeated.slug } };
@@ -308,7 +331,10 @@ export class UserDO extends DurableObject<Env> {
     const reservation = newObjectId();
     this.sql.exec('INSERT INTO host_reservations (id, expires_at) VALUES (?, ?)', reservation, now + HOST_RESERVATION_TTL_MS);
     if (request) {
-      this.sql.exec('INSERT INTO create_requests (key, party_id, slug, expires_at) VALUES (?, ?, ?, ?)', request.key, request.id, request.slug, now + CREATE_REQUEST_TTL_MS);
+      this.sql.exec(
+        'INSERT OR REPLACE INTO create_requests (key, party_id, slug, expires_at, detail) VALUES (?, ?, ?, ?, ?)',
+        request.key, request.id, request.slug, now + CREATE_REQUEST_TTL_MS, request.detail ?? null,
+      );
     }
     return { ...user!, openHostedParties: open + held, allowed: true, reservation, request: request && { id: request.id, slug: request.slug } };
   }
@@ -337,6 +363,32 @@ export class UserDO extends DurableObject<Env> {
   /** Frees a claimed request whose email didn't go out, so a retry of it sends one. */
   releaseMailRequest(key: string, detail: string): void {
     this.sql.exec('DELETE FROM mail_requests WHERE key = ? AND detail = ?', key, detail);
+  }
+
+  /**
+   * Whether this request (same key and detail) was already claimed and is still remembered. Only reads: requests
+   * without a session look first, run the rate limits, and claim only then, so nobody can fill this table for free.
+   */
+  seenMailRequest(key: string, detail: string): boolean {
+    return this.sql
+      .exec('SELECT 1 FROM mail_requests WHERE key = ? AND detail = ? AND expires_at >= ?', key, detail, Date.now())
+      .toArray().length > 0;
+  }
+
+  /**
+   * Starts an account email request from a signed-in user, in one call: checks the session, then claims the request
+   * id when there is one. Returns the user, `'repeat'` for a request already claimed, or null when the session no
+   * longer belongs to this user.
+   */
+  beginMailRequest(session: Session, key: string | undefined, detail: string): UserRecord | 'repeat' | null {
+    const user = this.get();
+    if (!sessionMatches(user, session)) {
+      return null;
+    }
+    if (key && !this.claimMailRequest(key, detail)) {
+      return 'repeat';
+    }
+    return user;
   }
 
   /**
@@ -392,7 +444,11 @@ export class UserDO extends DurableObject<Env> {
    * The user's parties, newest first. Parties created at the same time are ordered by slug, so `after` (the last
    * row of the previous page) continues exactly where that page ended.
    */
-  listParties(first: number, after?: PartyListCursor | null): UserPartyListItem[] {
+  listParties(first: number, after?: PartyListCursor | null, session?: Session): UserPartyListItem[] | null {
+    // With a session, the list is only for the account the session belongs to (not a newer one on the same email).
+    if (session && !sessionMatches(this.get(), session)) {
+      return null;
+    }
     const columns = 'slug, name, created_at, is_host, is_protected, is_closed, closed_at, deleted_at';
     const order = 'ORDER BY created_at DESC, slug DESC LIMIT ?';
     const rows = after

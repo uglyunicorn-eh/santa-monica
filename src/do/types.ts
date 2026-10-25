@@ -73,7 +73,11 @@ export type PartyView = {
   target: { id: string; name: string } | null;
 };
 
+/** How a party operation failed. The API answers each code with its own status (see src/api/errors.ts). */
+export type PartyErrorCode = 'not_found' | 'forbidden' | 'conflict' | 'invalid' | 'rate_limited' | 'unauthenticated' | 'unavailable';
+
 export type PartyUserError = {
+  code: PartyErrorCode;
   fieldName: string | null;
   message: string;
 };

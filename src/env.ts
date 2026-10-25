@@ -12,6 +12,8 @@ export interface Env {
   /** Join attempts, per user. */
   JOIN_RATE_LIMIT_USER: RateLimit;
   PUBLIC_URL: string;
-  /** RSA private key (PEM). The frontend verifies tokens with the matching public key. */
+  /** The frontend that emailed links open: https://gnomik.me in production, a local one for previews. */
+  FRONTEND_URL: string;
+  /** P-256 private key (PKCS#8 PEM) for ES256 tokens. The frontend verifies tokens with the matching public key. */
   JWT_PRIVATE_KEY: string;
 }

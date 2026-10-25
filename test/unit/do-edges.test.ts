@@ -46,7 +46,7 @@ describe('PartyDO edge cases', () => {
   it('refuses join, leave and close on a party that does not exist', async () => {
     const stub = env.PARTY.getByName(code());
     const someone = member('someone');
-    const missing = { ok: false, error: { fieldName: 'party', message: 'Party does not exist.' } };
+    const missing = { ok: false, error: { code: 'not_found', fieldName: 'party', message: 'Party does not exist.' } };
     expect(await stub.join(someone, 'Someone', null)).toEqual(missing);
     expect(await stub.leave(someone.id)).toEqual(missing);
     expect(await stub.close(someone.id)).toEqual(missing);
@@ -69,7 +69,7 @@ describe('PartyDO edge cases', () => {
     const named = member('Named');
     expect(await stub.join(named, '', null)).toMatchObject({ ok: true, view: { participants: expect.any(Array) } });
     const nameless = { ...member('x'), name: '' };
-    expect(await stub.join(nameless, '', null)).toEqual({ ok: false, error: { fieldName: 'name', message: 'We were unable to get your name.' } });
+    expect(await stub.join(nameless, '', null)).toEqual({ ok: false, error: { code: 'invalid', fieldName: 'name', message: 'We were unable to get your name.' } });
   });
 
   it('handles members without an email (legacy users): no user updates, no mail', async () => {
@@ -302,7 +302,7 @@ describe('UserDO', () => {
     const seen: string[] = [];
     let after: { createdAt: number; slug: string } | undefined;
     for (let i = 0; i < 5; i++) {
-      const page = await stub.listParties(2, after);
+      const page = (await stub.listParties(2, after))!;
       if (!page.length) break;
       seen.push(...page.map(p => p.slug));
       const last = page.at(-1)!;
@@ -345,7 +345,7 @@ describe('PartyDO join session check', () => {
     const guest = await signedUp('deleted');
     await env.USER.getByName(guest.email).tombstone();
     expect(await stub.join(guest, 'Ghost', null, {})).toEqual({
-      ok: false, error: { fieldName: null, message: 'You must be logged in before joining the party.' },
+      ok: false, error: { code: 'unauthenticated', fieldName: null, message: 'You must be logged in before joining the party.' },
     });
     expect(await stub.view(host.id)).toMatchObject({ participantCount: 1 });
     expect(await stub.pendingOutbox()).toBe(0);
@@ -370,15 +370,18 @@ describe('PartyDO join session check', () => {
     expect(await env.USER.getByName(guest.email).listParties(10)).toHaveLength(1);
   });
 
-  it('lets the join stand when the user update has to wait for a retry', async () => {
+  it('checks the session on its own when the user update has to wait for a retry, refusing a deleted account', async () => {
     const { stub } = await party();
     const guest = await signedUp('waiting');
-    await env.USER.getByName(guest.email).tombstone();
     await insertOutbox(stub, { kind: 'user.sync', email: guest.email }, 1, Date.now() + 60_000);
+    const ghost = await signedUp('ghost');
+    await env.USER.getByName(ghost.email).tombstone();
+    await insertOutbox(stub, { kind: 'user.sync', email: ghost.email }, 1, Date.now() + 60_000);
     expect(await stub.join(guest, 'Waiting', null, {})).toMatchObject({ ok: true, view: { isJoined: true } });
+    expect(await stub.join(ghost, 'Ghost', null, {})).toMatchObject({ ok: false, error: { code: 'unauthenticated' } });
   });
 
-  it('joins through the outbox, unchecked, when the user can\'t be reached', async () => {
+  it('refuses the join, storing nothing, when the user can\'t be reached', async () => {
     const { stub, slug } = await party();
     const guest = await signedUp('unreachable');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -386,9 +389,10 @@ describe('PartyDO join session check', () => {
       const self = instance as unknown as { env: typeof env };
       self.env = { ...self.env, USER: { getByName: () => ({ apply: async () => { throw new Error('unreachable'); } }) } } as unknown as typeof env;
     });
-    expect(await stub.join(guest, 'Guest', null, {})).toMatchObject({ ok: true, view: { isJoined: true } });
-    expect(await stub.pendingOutbox()).toBe(2);
-    expect(warn).toHaveBeenCalledWith('Unable to update the joining user, joining through the outbox', expect.anything());
+    expect(await stub.join(guest, 'Guest', null, {})).toMatchObject({ ok: false, error: { code: 'unavailable' } });
+    expect(await stub.pendingOutbox()).toBe(0);
+    expect(await stub.view(guest.id)).toMatchObject({ isJoined: false });
+    expect(warn).toHaveBeenCalledWith('Unable to update the joining user', expect.anything());
     warn.mockRestore();
     expect(slug).toHaveLength(5);
   });
@@ -419,7 +423,7 @@ describe('PartyDO join session check', () => {
     const guest = await signedUp('late');
     await duringUserCall(stub, instance => instance.close(host.id));
     expect(await stub.join(guest, 'Late', null, {})).toEqual({
-      ok: false, error: { fieldName: 'party', message: 'Party is already packed. Sorry, we cannot accept a new participant...' },
+      ok: false, error: { code: 'conflict', fieldName: 'party', message: 'Party is already packed. Sorry, we cannot accept a new participant...' },
     });
     expect(await stub.view(host.id)).toMatchObject({ isClosed: true, participantCount: 2 });
     expect(await env.USER.getByName(guest.email).listParties(10)).toEqual([]);
@@ -429,7 +433,7 @@ describe('PartyDO join session check', () => {
     const { stub, host } = await party();
     const guest = await signedUp('deleted');
     await duringUserCall(stub, instance => instance.delete(host.id));
-    expect(await stub.join(guest, 'Guest', null, {})).toEqual({ ok: false, error: { fieldName: 'party', message: 'Party does not exist.' } });
+    expect(await stub.join(guest, 'Guest', null, {})).toEqual({ ok: false, error: { code: 'not_found', fieldName: 'party', message: 'Party does not exist.' } });
     expect(await env.USER.getByName(guest.email).listParties(10)).toEqual([]);
     expect(await stub.view()).toBeNull();
   });
@@ -439,7 +443,7 @@ describe('PartyDO join session check', () => {
     const { stub } = await party(host);
     const guest = await signedUp('racer');
     await duringUserCall(stub, instance => instance.forgetMember(host.id, host.email));
-    expect(await stub.join(guest, 'Racer', null, {})).toEqual({ ok: false, error: { fieldName: 'party', message: 'Party does not exist.' } });
+    expect(await stub.join(guest, 'Racer', null, {})).toEqual({ ok: false, error: { code: 'not_found', fieldName: 'party', message: 'Party does not exist.' } });
     expect(await env.USER.getByName(guest.email).listParties(10)).toEqual([]);
   });
 

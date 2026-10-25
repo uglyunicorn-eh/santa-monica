@@ -17,7 +17,8 @@
   "workers_dev": false,
   "preview_urls": false,
   "vars": {
-    "PUBLIC_URL": "https://api.gnomik.me"
+    "PUBLIC_URL": "https://api.gnomik.me",
+    "FRONTEND_URL": "https://gnomik.me"
   },
   "durable_objects": {
     "bindings": [
@@ -53,7 +54,8 @@
       "workers_dev": true,
       "preview_urls": false,
       "vars": {
-        "PUBLIC_URL": "https://gnomik-api-preview.uglyunicorn.workers.dev"
+        "PUBLIC_URL": "https://gnomik-api-preview.uglyunicorn.workers.dev",
+        "FRONTEND_URL": "http://localhost:4321"
       },
       "durable_objects": {
         "bindings": [

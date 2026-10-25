@@ -15,15 +15,9 @@ const assert = (condition: unknown, message: string) => {
   }
 };
 
-// The frontend calls /graph/ (with the slash), so the smoke test does too.
-const gql = async (query: string, variables: Record<string, unknown> = {}) => {
-  const res = await fetch(new URL('/graph/', base), {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ query, variables }),
-  });
-  assert(res.ok, `/graph answered HTTP ${res.status}`);
-  return await res.json() as { data?: any; errors?: unknown[] };
+const api = async (path: string, init: RequestInit = {}) => {
+  const res = await fetch(new URL(path, base), init);
+  return { status: res.status, body: await res.json() as any, headers: res.headers };
 };
 
 const checks: Check[] = [
@@ -37,34 +31,42 @@ const checks: Check[] = [
     },
   },
   {
-    name: 'GraphQL app query',
+    name: 'unknown party is 404',
     run: async () => {
-      const { data, errors } = await gql('{ app { name version } }');
-      assert(!errors && data?.app?.name === 'santa-monica', `unexpected response ${JSON.stringify({ data, errors })}`);
+      const { status, body } = await api('/v1/parties/QQQQQ');
+      assert(status === 404 && body?.error?.code === 'not_found', `unexpected response ${status} ${JSON.stringify(body)}`);
     },
   },
   {
-    name: 'unknown party is null',
+    name: 'no session is 401',
     run: async () => {
-      const { data, errors } = await gql('query ($code: String!) { party(code: $code) { id } }', { code: 'QQQQQ' });
-      assert(!errors && data?.party === null, `unexpected response ${JSON.stringify({ data, errors })}`);
+      const { status, body } = await api('/v1/me');
+      assert(status === 401 && body?.error?.code === 'unauthenticated', `unexpected response ${status} ${JSON.stringify(body)}`);
     },
   },
   {
-    name: 'anonymous user is null',
+    name: 'invalid input is 400',
     run: async () => {
-      const { data, errors } = await gql('{ user { id } }');
-      assert(!errors && data?.user === null, `unexpected response ${JSON.stringify({ data, errors })}`);
+      const { status, body } = await api('/v1/auth/magic-link', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"email":"nope"}' });
+      assert(status === 400 && body?.error?.field === 'email', `unexpected response ${status} ${JSON.stringify(body)}`);
+    },
+  },
+  {
+    name: 'the old GraphQL route is gone',
+    run: async () => {
+      const { status } = await api('/graph/', { method: 'POST' });
+      assert(status === 404, `/graph/ answered HTTP ${status}`);
     },
   },
   {
     name: 'CORS preflight',
     run: async () => {
-      const res = await fetch(new URL('/graph', base), {
+      const res = await fetch(new URL('/v1/parties', base), {
         method: 'OPTIONS',
-        headers: { origin: 'https://gnomik.me', 'access-control-request-method': 'POST' },
+        headers: { origin: 'https://gnomik.me', 'access-control-request-method': 'POST', 'access-control-request-headers': 'authorization,content-type,idempotency-key' },
       });
-      assert(res.status === 204 && res.headers.get('access-control-allow-origin') === '*', `preflight answered HTTP ${res.status}`);
+      const allowed = res.headers.get('access-control-allow-headers') ?? '';
+      assert(res.status === 204 && res.headers.get('access-control-allow-origin') === '*' && allowed.includes('idempotency-key'), `preflight answered HTTP ${res.status} (${allowed})`);
     },
   },
   {

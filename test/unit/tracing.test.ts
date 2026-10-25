@@ -1,14 +1,9 @@
-import { env } from 'cloudflare:test';
 import { tracing } from 'cloudflare:workers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { ApolloContext } from 'src/apollo/context';
-import mutations from 'src/apollo/mutations';
-import resolvers from 'src/apollo/resolvers';
-import { createJwtHelpers } from 'src/utils/jwt';
-import { annotate, recordResult, withSpan } from 'src/utils/tracing';
+import { annotate, recordOutcome, withSpan } from 'src/utils/tracing';
 
-import { domain } from 'src/config.json';
+import { jwt, request, signIn } from './helpers';
 
 type FakeSpan = {
   name: string;
@@ -83,76 +78,63 @@ describe('withSpan', () => {
   });
 });
 
-describe('recordResult', () => {
-  it('records ok when there are no user errors', () => {
+describe('recordOutcome', () => {
+  it('records ok for a success', () => {
     const span = fakeSpan('s');
-    recordResult(span as unknown as Span, {});
+    recordOutcome(span as unknown as Span);
     expect(span.attributes).toEqual({ 'api.status': 'ok' });
   });
 
-  it('records the status and the fields of user errors, with - for errors without a field', () => {
+  it('records the error code and field of a failure, with - for one about no field', () => {
     const span = fakeSpan('s');
-    recordResult(span as unknown as Span, { status: 'error', userErrors: [{ fieldName: 'party' }, { fieldName: null }] });
-    expect(span.attributes).toEqual({ 'api.status': 'error', 'api.user_error_fields': 'party,-' });
+    recordOutcome(span as unknown as Span, { code: 'invalid', field: 'party' });
+    expect(span.attributes).toEqual({ 'api.status': 'error', 'api.error_code': 'invalid', 'api.user_error_fields': 'party' });
+    const other = fakeSpan('o');
+    recordOutcome(other as unknown as Span, { code: 'conflict' });
+    expect(other.attributes).toEqual({ 'api.status': 'error', 'api.error_code': 'conflict', 'api.user_error_fields': '-' });
   });
 });
 
 describe('API action spans', () => {
-  const jwt = createJwtHelpers({ privateKey: env.JWT_PRIVATE_KEY, issuer: domain });
-  let counter = 0;
-
-  const signedIn = async (): Promise<ApolloContext> => {
-    const email = `spans-${Date.now().toString(36)}-${++counter}@example.com`;
-    const user = await env.USER.getByName(email).ensure(email);
-    return {
-      env, clientIp: `198.51.100.${counter}`, userId: user.id, userEmail: email,
-      retrieveUser: async () => await env.USER.getByName(email).get(),
-      sendMail: async () => undefined,
-      ...jwt,
-    };
-  };
-
-  it('records one span per mutation with the action, user, outcome and party code, and no personal data', async () => {
-    const ctx = await signedIn();
+  it('records one span per request with the action, user, outcome and party code, and no personal data', async () => {
+    const who = await signIn();
     const spans = captureSpans();
 
-    const created = await mutations.Mutation.parties(null, {}, ctx).createParty({ input: { name: 'Spans party', password: 'pw' } }, ctx) as any;
-    const invalid = await mutations.Mutation.parties(null, {}, ctx).createParty({ input: { name: '' } }, ctx) as any;
+    const created = await request('POST', '/v1/parties', { token: who.token, body: { name: 'Spans party', password: 'pw' } });
+    const invalid = await request('POST', '/v1/parties', { token: who.token, body: { name: '' } });
 
-    expect(created.status).toBe('ok');
-    expect(invalid.status).toBe('error');
+    expect([created.status, invalid.status]).toEqual([201, 400]);
     expect(spans.map(s => s.name)).toEqual(['api.createParty', 'api.createParty']);
     expect(spans[0].attributes).toMatchObject({
-      'api.action': 'createParty', 'user.id': ctx.userId, 'api.status': 'ok',
-      'party.protected': true, 'party.code': created.node.code, 'party.code_attempts': 1,
+      'api.action': 'createParty', 'user.id': who.id, 'api.status': 'ok',
+      'party.protected': true, 'party.code': created.body.code, 'party.code_attempts': 1,
     });
-    expect(spans[1].attributes).toMatchObject({ 'api.status': 'error', 'api.user_error_fields': 'name' });
-    expect(JSON.stringify(spans)).not.toContain(ctx.userEmail);
+    expect(spans[1].attributes).toMatchObject({ 'api.status': 'error', 'api.error_code': 'invalid', 'api.user_error_fields': 'name' });
+    expect(JSON.stringify(spans)).not.toContain(who.email);
   });
 
-  it('records spans for queries', async () => {
-    const ctx = await signedIn();
-    const created = await mutations.Mutation.parties(null, {}, ctx).createParty({ input: { name: 'Query spans' } }, ctx) as any;
+  it('records spans for reads', async () => {
+    const who = await signIn();
+    const { body: party } = await request('POST', '/v1/parties', { token: who.token, body: { name: 'Query spans' } });
     const spans = captureSpans();
 
-    await resolvers.Query.party(null, { code: created.node.code }, ctx);
-    await resolvers.Query.parties(null, { first: 10 }, ctx);
-    await resolvers.Query.user(null, {}, ctx);
+    await request('GET', `/v1/parties/${party.code}`, { token: who.token });
+    await request('GET', '/v1/me/parties', { token: who.token });
+    await request('GET', '/v1/me', { token: who.token });
 
-    expect(spans.map(s => s.name)).toEqual(['api.party', 'api.parties', 'api.user']);
-    expect(spans[0].attributes).toMatchObject({ 'party.code': created.node.code, 'party.found': true, 'party.joined': true });
+    expect(spans.map(s => s.name)).toEqual(['api.party', 'api.partyHistory', 'api.user']);
+    expect(spans[0].attributes).toMatchObject({ 'party.code': party.code, 'party.found': true, 'party.joined': true });
     expect(spans[1].attributes).toMatchObject({ 'parties.first': 10, 'parties.count': 1 });
-    expect(spans[2].attributes).toMatchObject({ 'user.id': ctx.userId, 'user.found': true });
+    expect(spans[2].attributes).toMatchObject({ 'user.id': who.id, 'user.found': true });
   });
 
   it('records how a magic link was used', async () => {
     const spans = captureSpans();
-    const token = await jwt.issueToken('EnterRequest', { email: `link-${++counter}@example.com`, jti: crypto.randomUUID() }, { ttl: 60 });
-    const context = { env, clientIp: '198.51.100.250', retrieveUser: async () => null, sendMail: async () => undefined, ...jwt } as ApolloContext;
+    const token = await jwt().issueToken('EnterRequest', { email: `link-${Date.now()}@example.com`, jti: crypto.randomUUID() }, { ttl: 60 });
 
-    await mutations.Mutation.auth().enter({ input: { enterRequestToken: token } }, context);
-    await mutations.Mutation.auth().enter({ input: { enterRequestToken: token } }, context);
-    await mutations.Mutation.auth().enter({ input: { enterRequestToken: 'garbage' } }, context);
+    await request('POST', '/v1/auth/session', { body: { token } });
+    await request('POST', '/v1/auth/session', { body: { token } });
+    await request('POST', '/v1/auth/session', { body: { token: 'garbage' } });
 
     expect(spans.map(s => s.attributes['auth.magic_link'])).toEqual(['redeemed', 'already_used', 'invalid']);
   });

@@ -4,17 +4,15 @@ import { describe, expect, it } from 'vitest';
 import { nodeIdToStr } from 'src/utils/strings/nodeId';
 
 import {
-  ENTER, ENTER_REQUEST, createParty, gql, magicLinkToken, mailbox, mintEnterRequestToken, mintUserToken,
-  signInWithMagicLink, uniqueEmail,
+  apiError, createParty, magicLinkToken, mailbox, me, mintEnterRequestToken, mintUserToken, newKey, redeem,
+  requestMagicLink, signIn, uniqueEmail,
 } from './support';
-
-const USER = '{ user { id name } }';
 
 describe('magic-link sign-in', () => {
   it('emails a magic link that signs the person in', async () => {
     const email = uniqueEmail('magic');
-    const requested = await gql(ENTER_REQUEST, { email });
-    expect(requested.data.auth.enterRequest).toEqual({ status: 'ok', userErrors: null });
+    const requested = await requestMagicLink(email);
+    expect(requested).toEqual({ status: 202, body: { ok: true } });
 
     const [mail] = await mailbox(email);
     expect(mail.to).toEqual([email]);
@@ -24,72 +22,128 @@ describe('magic-link sign-in', () => {
     expect(mail.html).toContain('https://api.test/email/gnomik.png');
     expect(mail.text).toContain('https://gnomik.me/terms/');
 
-    const entered = await gql(ENTER, { token: magicLinkToken(mail) });
-    expect(entered.data.auth.enter).toMatchObject({ status: 'ok', userErrors: null, user: { name: '' } });
+    const entered = await redeem(magicLinkToken(mail));
+    expect(entered).toMatchObject({ status: 200, body: { user: { name: '', email } } });
 
-    const me = await gql(USER, {}, { token: entered.data.auth.enter.userToken });
-    expect(me.data.user).toEqual(entered.data.auth.enter.user);
+    expect(await me({ token: entered.body.userToken })).toEqual({ status: 200, body: entered.body.user });
   });
 
   it('creates the account once: the same email (any case) is the same person', async () => {
     const email = uniqueEmail('same');
-    const first = await signInWithMagicLink(email);
-    const second = await signInWithMagicLink(email.toUpperCase());
+    const first = await signIn(email);
+    const second = await signIn(email.toUpperCase());
     expect(second.id).toBe(first.id);
     expect(await mailbox(email)).toHaveLength(2);
   });
 
   it('lets each magic link be used only once', async () => {
     const email = uniqueEmail('reuse');
-    await gql(ENTER_REQUEST, { email });
-    await gql(ENTER_REQUEST, { email });
+    await requestMagicLink(email);
+    await requestMagicLink(email);
     const [first, second] = (await mailbox(email)).map(magicLinkToken);
 
-    expect((await gql(ENTER, { token: first })).data.auth.enter.status).toBe('ok');
-    expect((await gql(ENTER, { token: first })).data.auth.enter).toEqual({
-      status: 'error',
-      userErrors: [{ fieldName: 'enterRequestToken', messages: ['This magic link has already been used. Please request a new one.'] }],
-      userToken: null,
-      user: null,
+    expect((await redeem(first)).status).toBe(200);
+    expect(await redeem(first)).toEqual({
+      status: 409, body: apiError('link_used', 'This magic link has already been used. Please request a new one.', 'token'),
     });
 
     // An unused link from the same person still works.
-    expect((await gql(ENTER, { token: second })).data.auth.enter.status).toBe('ok');
+    expect((await redeem(second)).status).toBe(200);
   });
 
   it('lets only one of two simultaneous clicks through', async () => {
     const email = uniqueEmail('race');
-    await gql(ENTER_REQUEST, { email });
+    await requestMagicLink(email);
     const token = magicLinkToken((await mailbox(email))[0]);
-    const results = await Promise.all([gql(ENTER, { token }), gql(ENTER, { token }), gql(ENTER, { token })]);
-    expect(results.map(r => r.data.auth.enter.status).sort()).toEqual(['error', 'error', 'ok']);
+    const results = await Promise.all([redeem(token), redeem(token), redeem(token)]);
+    expect(results.map(r => r.status).sort()).toEqual([200, 409, 409]);
   });
 
-  it('accepts a party code for an existing party', async () => {
-    const host = await signInWithMagicLink(uniqueEmail('host'));
+  it('accepts a party code for an existing party, in any case', async () => {
+    const host = await signIn(uniqueEmail('host'));
     const party = await createParty(host);
-    const res = await gql(ENTER_REQUEST, { email: uniqueEmail('invited'), party: party.code });
-    expect(res.data.auth.enterRequest.status).toBe('ok');
+    expect((await requestMagicLink(uniqueEmail('invited'), { party: party.code })).status).toBe(202);
+    expect((await requestMagicLink(uniqueEmail('invited'), { party: party.code.toLowerCase() })).status).toBe(202);
   });
 
   it('rejects a party code that does not exist', async () => {
-    const res = await gql(ENTER_REQUEST, { email: uniqueEmail(), party: 'QQQQQ' });
-    expect(res.data.auth.enterRequest).toEqual({
-      status: 'error', userErrors: [{ fieldName: 'party', messages: ['Invalid party code.'] }],
+    expect(await requestMagicLink(uniqueEmail(), { party: 'QQQQQ' })).toEqual({
+      status: 404, body: apiError('not_found', 'Invalid party code.', 'party'),
     });
   });
 
   it('validates the email and the party code format', async () => {
-    const badEmail = await gql(ENTER_REQUEST, { email: 'not-an-email' });
-    expect(badEmail.data.auth.enterRequest).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'email' }] });
-
-    const badCode = await gql(ENTER_REQUEST, { email: uniqueEmail(), party: 'abc' });
-    expect(badCode.data.auth.enterRequest).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
+    expect(await requestMagicLink('not-an-email')).toMatchObject({ status: 400, body: apiError('invalid', undefined, 'email') });
+    expect(await requestMagicLink(uniqueEmail(), { party: 'abc' })).toMatchObject({ status: 400, body: apiError('invalid', undefined, 'party') });
   });
 
   it('reports a failed delivery instead of pretending the link was sent', async () => {
-    const res = await gql(ENTER_REQUEST, { email: `fail+${uniqueEmail()}` });
-    expect(res.data.auth.enterRequest).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'email' }] });
+    expect(await requestMagicLink(`fail+${uniqueEmail()}`)).toMatchObject({ status: 503, body: apiError('unavailable', undefined, 'email') });
+  });
+});
+
+describe('repeating a sign-in request (Idempotency-Key)', () => {
+  it('sends one email and charges the rate limit once, however often the same request is repeated', async () => {
+    const email = uniqueEmail('again');
+    const key = newKey();
+    for (let i = 0; i < 5; i++) {
+      expect(await requestMagicLink(email, { key })).toEqual({ status: 202, body: { ok: true } });
+    }
+    expect(await mailbox(email)).toHaveLength(1);
+    // The per-address limit (3 a minute) still has two left: the repeats cost nothing.
+    expect((await requestMagicLink(email)).status).toBe(202);
+    expect((await requestMagicLink(email)).status).toBe(202);
+    expect((await requestMagicLink(email)).status).toBe(429);
+  });
+
+  it('treats the same key for another party code as a new request', async () => {
+    const host = await signIn(uniqueEmail('host'));
+    const party = await createParty(host);
+    const email = uniqueEmail('codes');
+    const key = newKey();
+    await requestMagicLink(email, { key });
+    await requestMagicLink(email, { key, party: party.code });
+    expect(await mailbox(email)).toHaveLength(2);
+  });
+
+  it('frees the key when the email could not be sent, so a retry tries again', async () => {
+    const email = `fail+${uniqueEmail()}`;
+    const key = newKey();
+    expect((await requestMagicLink(email, { key })).status).toBe(503);
+    expect((await requestMagicLink(email, { key })).status).toBe(503);
+  });
+
+  it('refuses a malformed key instead of ignoring it', async () => {
+    expect(await requestMagicLink(uniqueEmail(), { key: 'short' })).toMatchObject({ status: 400, body: apiError('invalid', undefined, 'Idempotency-Key') });
+    expect(await requestMagicLink(uniqueEmail(), { key: 'x'.repeat(101) })).toMatchObject({ status: 400 });
+    expect(await requestMagicLink(uniqueEmail(), { key: 'has spaces in it, sixteen+' })).toMatchObject({ status: 400 });
+  });
+
+  it('signs in again when the same request repeats the link, but refuses anyone else', async () => {
+    const email = uniqueEmail('retry');
+    await requestMagicLink(email);
+    const token = magicLinkToken((await mailbox(email))[0]);
+    const key = newKey();
+
+    const first = await redeem(token, { key });
+    const again = await redeem(token, { key });
+    expect(again.status).toBe(200);
+    expect(again.body.user).toEqual(first.body.user);
+    expect(await me({ token: again.body.userToken })).toMatchObject({ status: 200 });
+
+    expect((await redeem(token, { key: newKey() })).status).toBe(409);
+    expect((await redeem(token)).status).toBe(409);
+  });
+
+  it('does not let a key used on one link redeem another', async () => {
+    const email = uniqueEmail('other');
+    await requestMagicLink(email);
+    await requestMagicLink(email);
+    const [first, second] = (await mailbox(email)).map(magicLinkToken);
+    const key = newKey();
+    expect((await redeem(first, { key })).status).toBe(200);
+    expect((await redeem(second, { key })).status).toBe(200);
+    expect((await redeem(second, { key: newKey() })).status).toBe(409);
   });
 });
 
@@ -98,75 +152,73 @@ describe('rate limiting', () => {
     const email = uniqueEmail('limited');
     const statuses = [];
     for (let i = 0; i < 5; i++) {
-      statuses.push((await gql(ENTER_REQUEST, { email })).data.auth.enterRequest.status);
+      statuses.push((await requestMagicLink(email)).status);
     }
-    expect(statuses).toEqual(['ok', 'ok', 'ok', 'error', 'error']);
+    expect(statuses).toEqual([202, 202, 202, 429, 429]);
     expect(await mailbox(email)).toHaveLength(3);
   });
 
   it('counts the email case-insensitively', async () => {
     const email = uniqueEmail('cased');
-    const variants = [email, email.toUpperCase(), email, email.toUpperCase()];
     const statuses = [];
-    for (const variant of variants) {
-      statuses.push((await gql(ENTER_REQUEST, { email: variant })).data.auth.enterRequest.status);
+    for (const variant of [email, email.toUpperCase(), email, email.toUpperCase()]) {
+      statuses.push((await requestMagicLink(variant)).status);
     }
-    expect(statuses).toEqual(['ok', 'ok', 'ok', 'error']);
+    expect(statuses).toEqual([202, 202, 202, 429]);
   });
 
   it('allows 10 magic links per IP per minute, across emails', async () => {
     const ip = '203.0.113.77';
     const statuses = [];
     for (let i = 0; i < 12; i++) {
-      statuses.push((await gql(ENTER_REQUEST, { email: uniqueEmail('ip') }, { ip })).data.auth.enterRequest.status);
+      statuses.push((await requestMagicLink(uniqueEmail('ip'), { ip })).status);
     }
-    expect(statuses.slice(0, 10).every(s => s === 'ok')).toBe(true);
-    expect(statuses.slice(10)).toEqual(['error', 'error']);
+    expect(statuses.slice(0, 10).every(s => s === 202)).toBe(true);
+    expect(statuses.slice(10)).toEqual([429, 429]);
   });
 });
 
 describe('tokens', () => {
-  const invalid = { status: 'error', userErrors: [{ fieldName: 'enterRequestToken', messages: ['Invalid request token.'] }] };
+  const invalid = { status: 400, body: apiError('invalid_link', 'Invalid request token.', 'token') };
 
   it('rejects a garbage magic-link token', async () => {
-    expect((await gql(ENTER, { token: 'nope' })).data.auth.enter).toMatchObject(invalid);
+    expect(await redeem('nope')).toEqual(invalid);
   });
 
   it('rejects an expired magic-link token', async () => {
-    const token = await mintEnterRequestToken({ email: uniqueEmail() }, -60);
-    expect((await gql(ENTER, { token })).data.auth.enter).toMatchObject(invalid);
+    expect(await redeem(await mintEnterRequestToken({ email: uniqueEmail() }, -60))).toEqual(invalid);
   });
 
-  it('rejects a magic-link token signed with another key', async () => {
-    const token = await mintEnterRequestToken({ email: uniqueEmail() }, 300, env.TEST_OTHER_PRIVATE_KEY);
-    expect((await gql(ENTER, { token })).data.auth.enter).toMatchObject(invalid);
+  it('rejects a magic-link token signed with another key, or without an id', async () => {
+    expect(await redeem(await mintEnterRequestToken({ email: uniqueEmail(), jti: 'x' }, 300, env.TEST_OTHER_PRIVATE_KEY))).toEqual(invalid);
+    expect(await redeem(await mintEnterRequestToken({ email: uniqueEmail() }))).toEqual(invalid);
   });
 
   it('rejects a session token used as a magic-link token', async () => {
-    const person = await signInWithMagicLink(uniqueEmail());
-    expect((await gql(ENTER, { token: person.token })).data.auth.enter).toMatchObject(invalid);
+    const person = await signIn(uniqueEmail());
+    expect(await redeem(person.token)).toEqual(invalid);
   });
 
-  it('ignores a magic-link token used as a session token', async () => {
+  it('refuses a magic-link token used as a session token', async () => {
     const email = uniqueEmail();
-    await gql(ENTER_REQUEST, { email });
+    await requestMagicLink(email);
     const token = magicLinkToken((await mailbox(email))[0]);
-    expect((await gql(USER, {}, { token })).data.user).toBeNull();
+    expect(await me({ token })).toMatchObject({ status: 401, body: apiError('unauthenticated') });
   });
 
-  it('ignores expired, forged and malformed session tokens', async () => {
-    const person = await signInWithMagicLink(uniqueEmail());
+  it('refuses expired, forged and malformed session tokens', async () => {
+    const person = await signIn(uniqueEmail());
     const sub = person.id;
     const expired = await mintUserToken({ sub, email: person.email }, -60);
     const forged = await mintUserToken({ sub, email: person.email }, 3600, env.TEST_OTHER_PRIVATE_KEY);
     const notAUser = await mintUserToken({ sub: nodeIdToStr({ kind: 'Party', id: 'QWERT' }), email: person.email });
 
-    for (const token of [expired, forged, notAUser, 'garbage']) {
-      expect((await gql(USER, {}, { token })).data.user).toBeNull();
+    for (const token of [expired, forged, notAUser, 'garbage', 'a.b.c']) {
+      expect((await me({ token })).status).toBe(401);
     }
   });
 
-  it('returns no user without a session', async () => {
-    expect((await gql(USER)).data.user).toBeNull();
+  it('answers 401 without a session', async () => {
+    expect(await me({})).toEqual({ status: 401, body: apiError('unauthenticated', 'Your session has expired. Please sign in again.') });
   });
 });

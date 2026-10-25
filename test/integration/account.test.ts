@@ -1,211 +1,220 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 
-import { UserToken } from 'src/apollo/types';
-import { nodeIdToStr, strToNodeId } from 'src/utils/strings/nodeId';
+import { UserToken } from 'src/api/types';
+import { strToNodeId } from 'src/utils/strings/nodeId';
 
 import {
-  CLOSE_PARTY, JOIN_PARTY, LEAVE_PARTY, PARTY, Person, createParty, gql, joinParty, jwt, mailbox, settleParty,
-  signInWithMagicLink, uniqueEmail,
+  Person, apiError, call, confirmDeletion, confirmEmailChange, createParty, deleteAccount, drawParty, joinParty, jwt,
+  leaveParty, mailbox, me, myParties, newKey, requestDeletion, requestEmailChange, settleParty, signIn,
+  uniqueEmail, viewParty,
 } from './support';
 
-const person = (label: string) => signInWithMagicLink(uniqueEmail(label));
-
-const USER = `{ user { id name email } }`;
-const HISTORY = `{ partyHistory(first: 50) { items { code isClosed } } }`;
-const REQUEST_DELETION = `mutation { profile { requestAccountDeletion { status userErrors { fieldName messages } } } }`;
-const CONFIRM_DELETION = `mutation ($token: String!) { profile { confirmAccountDeletion(input: { token: $token }) { status userErrors { fieldName messages } } } }`;
-const REQUEST_CHANGE = `mutation ($email: String!) { profile { requestEmailChange(input: { email: $email }) { status userErrors { fieldName messages } } } }`;
-const CONFIRM_CHANGE = `mutation ($token: String!) {
-  profile { confirmEmailChange(input: { token: $token }) { status userErrors { fieldName messages } userToken user { id name email } } }
-}`;
-
-/** The token from the last account link mailed to an address (https://gnomik.me/profile/<path>/<token>). */
-async function linkFrom(email: string, path: 'delete' | 'email') {
-  const mail = (await mailbox(email)).at(-1)!;
-  const match = new RegExp(`https://gnomik\\.me/profile/${path}/([\\w-]+\\.[\\w-]+\\.[\\w-]+)`).exec(mail.text ?? '');
-  if (!match) {
-    throw new Error(`No ${path} link in the last email to ${email}`);
-  }
-  return match[1];
-}
-
-const closeParty = (host: Person, party: { id: string }) => gql(CLOSE_PARTY, { party: party.id }, { token: host.token });
+const person = (label: string) => signIn(uniqueEmail(label));
 
 const memberEmail = (code: string, userId: string) =>
   runInDurableObject(env.PARTY.getByName(code), async (_i, state) =>
     state.storage.sql.exec<{ member_email: string | null }>('SELECT member_email FROM memberships WHERE member_id = ?', userId).toArray()[0]?.member_email);
 
-const rawId = (person: Person) => strToNodeId(person.id).id;
+const rawId = (who: Person) => strToNodeId(who.id).id;
 
 describe('deleting an account', () => {
   it('needs a session to ask for the link', async () => {
-    expect((await gql(REQUEST_DELETION)).errors?.[0]?.message).toBe('UNAUTHENTICATED');
+    expect((await call('POST', '/v1/me/deletion')).status).toBe(401);
   });
 
   it('emails a link that deletes the account: hosted open parties go, joined ones are left, drawn ones keep the draw', async () => {
-    const me = await person('me');
+    const who = await person('me');
     const friend = await person('friend');
     const other = await person('other');
-    const mine = await createParty(me, 'Mine');
+    const mine = await createParty(who, 'Mine');
     await joinParty(friend, mine, 'Friend');
     const theirs = await createParty(friend, 'Theirs');
-    await joinParty(me, theirs, 'Me');
+    await joinParty(who, theirs, 'Me');
     const drawn = await createParty(friend, 'Drawn');
-    await joinParty(me, drawn, 'Me in drawn');
+    await joinParty(who, drawn, 'Me in drawn');
     await joinParty(other, drawn, 'Other');
-    await closeParty(friend, drawn);
+    await drawParty(friend, drawn);
 
-    expect((await gql(REQUEST_DELETION, {}, { token: me.token })).data.profile.requestAccountDeletion).toEqual({ status: 'ok', userErrors: null });
-    const token = await linkFrom(me.email, 'delete');
-
+    const token = await requestDeletion(who);
     // The link works on its own, without a session.
-    expect((await gql(CONFIRM_DELETION, { token })).data.profile.confirmAccountDeletion).toEqual({ status: 'ok', userErrors: null });
+    expect(await confirmDeletion(token)).toEqual({ status: 200, body: { ok: true } });
 
-    expect((await gql(USER, {}, { token: me.token })).data.user).toBeNull();
-    expect((await gql(PARTY, { code: mine.code }, { token: friend.token })).data.party).toBeNull();
-    expect((await joinParty(other, mine, 'Late'))).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party', messages: ['Party does not exist.'] }] });
-    expect((await gql(PARTY, { code: theirs.code }, { token: friend.token })).data.party).toMatchObject({ participantCount: 1, participants: ['Friend'] });
+    expect((await me(who)).status).toBe(401);
+    expect((await viewParty(mine.code, friend)).status).toBe(404);
+    expect(await joinParty(other, mine, 'Late')).toMatchObject({ status: 404, body: apiError('not_found', 'Party does not exist.', 'party') });
+    expect((await viewParty(theirs.code, friend)).body).toMatchObject({ participantCount: 1, participants: ['Friend'] });
 
     // In the drawn party the names stay, so whoever drew me still knows who to buy for.
-    const drawnView = (await gql(PARTY, { code: drawn.code }, { token: friend.token })).data.party;
-    expect(drawnView.participants).toEqual(['Friend', 'Me in drawn', 'Other']);
-    expect(await memberEmail(drawn.code, rawId(me))).toBeUndefined();
+    expect((await viewParty(drawn.code, friend)).body.participants).toEqual(['Friend', 'Me in drawn', 'Other']);
+    expect(await memberEmail(drawn.code, rawId(who))).toBeUndefined();
 
     await settleParty(mine.code);
-    expect((await gql(HISTORY, {}, { token: friend.token })).data.partyHistory.items.map((p: any) => p.code).sort()).toEqual([theirs.code, drawn.code].sort());
+    expect((await myParties(friend)).body.items.map(p => p.code).sort()).toEqual([theirs.code, drawn.code].sort());
   });
 
-  it('leaves the deleted account\'s old token unable to see its target or join anything', async () => {
-    const host = await person('host');
-    const me = await person('me');
-    const drawn = await createParty(host, 'Drawn');
-    await joinParty(me, drawn, 'Me');
-    await closeParty(host, drawn);
-    expect((await gql(PARTY, { code: drawn.code }, { token: me.token })).data.party.target).toMatchObject({ name: '' });
+  it('sends one link for a repeated request, and answers a repeated confirmation the same', async () => {
+    const who = await person('me');
+    const key = newKey();
+    await requestDeletion(who, key);
+    const token = await requestDeletion(who, key);
+    expect((await mailbox(who.email)).filter(m => m.text?.includes('/profile/delete/'))).toHaveLength(1);
 
-    await gql(REQUEST_DELETION, {}, { token: me.token });
-    await gql(CONFIRM_DELETION, { token: await linkFrom(me.email, 'delete') });
-
-    expect((await gql(PARTY, { code: drawn.code }, { token: me.token })).data.party).toMatchObject({ isJoined: false, target: null, participants: null });
-    const open = await createParty(host, 'Open');
-    expect((await gql(JOIN_PARTY, { party: open.id, name: 'Ghost' }, { token: me.token })).data.parties.joinParty).toMatchObject({ status: 'error', userErrors: [{ fieldName: null }] });
-    expect((await gql(`mutation { parties { createParty(input: { name: "Nope" }) { status } } }`, {}, { token: me.token })).data.parties.createParty.status).toBe('error');
+    const confirmKey = newKey();
+    expect(await confirmDeletion(token, { key: confirmKey })).toEqual({ status: 200, body: { ok: true } });
+    expect(await confirmDeletion(token, { key: confirmKey })).toEqual({ status: 200, body: { ok: true } });
+    expect(await confirmDeletion(token, { key: newKey() })).toMatchObject({ status: 409, body: apiError('link_used') });
   });
 
   it('refuses a replayed or expired link', async () => {
-    const me = await person('me');
-    await gql(REQUEST_DELETION, {}, { token: me.token });
-    const token = await linkFrom(me.email, 'delete');
-    await gql(CONFIRM_DELETION, { token });
+    const who = await person('me');
+    const token = await requestDeletion(who);
+    await confirmDeletion(token);
     // Says the link was used, though the account it deleted is gone by now.
-    expect((await gql(CONFIRM_DELETION, { token })).data.profile.confirmAccountDeletion).toEqual({
-      status: 'error', userErrors: [{ fieldName: 'token', messages: ['This link has already been used. Please request a new one.'] }],
+    expect(await confirmDeletion(token)).toEqual({
+      status: 409, body: apiError('link_used', 'This link has already been used. Please request a new one.', 'token'),
     });
 
     const other = await person('other');
     const expired = await jwt().issueToken('AccountDeletion', { sub: other.id, email: other.email, jti: crypto.randomUUID() }, { ttl: -60 });
-    expect((await gql(CONFIRM_DELETION, { token: expired })).data.profile.confirmAccountDeletion).toMatchObject({
-      status: 'error', userErrors: [{ fieldName: 'token', messages: ['This link is invalid or has expired. Please request a new one.'] }],
+    expect(await confirmDeletion(expired)).toEqual({
+      status: 400, body: apiError('invalid_link', 'This link is invalid or has expired. Please request a new one.', 'token'),
     });
-    expect((await gql(USER, {}, { token: other.token })).data.user).toMatchObject({ email: other.email });
+    expect(await me(other)).toMatchObject({ status: 200, body: { email: other.email } });
+  });
+
+  it('rejects links that are of another kind or missing what identifies the user', async () => {
+    const who = await person('me');
+    const email = who.email;
+    const sub = who.id;
+    const tokens = [
+      await jwt().issueToken('AccountDeletion', { sub, email }, { ttl: 60 }),
+      await jwt().issueToken('AccountDeletion', { sub, jti: 'a' }, { ttl: 60 }),
+      await jwt().issueToken('AccountDeletion', { sub: 'not-a-node-id', email, jti: 'a' }, { ttl: 60 }),
+      await jwt().issueToken('AccountDeletion', { sub: btoa('Party:QWERT'), email, jti: 'a' }, { ttl: 60 }),
+      await jwt().issueToken('AccountDeletion', { sub, email, jti: 'a' }),
+      await jwt().issueToken<UserToken>('UserToken', { sub, email }, { ttl: 60 }),
+    ];
+    for (const token of tokens) {
+      expect(await confirmDeletion(token)).toMatchObject({ status: 400, body: apiError('invalid_link') });
+    }
   });
 
   it('holds the account while a change runs: no joining, no new parties, no second change', async () => {
     const host = await person('host');
-    const me = await person('me');
+    const who = await person('me');
     const open = await createParty(host, 'Open');
-    await env.USER.getByName(me.email).startAccountChange(rawId(me), crypto.randomUUID(), Date.now() + 60_000);
+    await env.USER.getByName(who.email).startAccountChange(rawId(who), crypto.randomUUID(), Date.now() + 60_000);
 
-    expect((await gql(JOIN_PARTY, { party: open.id, name: 'Me' }, { token: me.token })).data.parties.joinParty).toMatchObject({ status: 'error', userErrors: [{ fieldName: null }] });
-    expect((await gql(`mutation { parties { createParty(input: { name: "Nope" }) { status } } }`, {}, { token: me.token })).data.parties.createParty.status).toBe('error');
-    expect((await gql(REQUEST_DELETION, {}, { token: me.token })).data.profile.requestAccountDeletion).toMatchObject({ status: 'error', userErrors: [{ fieldName: null }] });
-    const token = await jwt().issueToken('AccountDeletion', { sub: me.id, email: me.email, jti: crypto.randomUUID() }, { ttl: 60 });
-    expect((await gql(CONFIRM_DELETION, { token })).data.profile.confirmAccountDeletion).toMatchObject({
-      status: 'error', userErrors: [{ fieldName: 'token', messages: ['Another change to this account is in progress. Please try again in a minute.'] }],
+    expect((await joinParty(who, open, 'Me')).status).toBe(401);
+    expect((await call('POST', '/v1/parties', { token: who.token, body: { name: 'Nope' } })).status).toBe(401);
+    expect((await call('POST', '/v1/me/deletion', { token: who.token })).status).toBe(401);
+    const token = await jwt().issueToken('AccountDeletion', { sub: who.id, email: who.email, jti: crypto.randomUUID() }, { ttl: 60 });
+    expect(await confirmDeletion(token)).toEqual({
+      status: 409, body: apiError('account_busy', 'Another change to this account is in progress. Please try again in a minute.', 'token'),
     });
-    expect((await gql(PARTY, { code: open.code }, { token: host.token })).data.party.participantCount).toBe(1);
+    expect((await viewParty(open.code, host)).body.participantCount).toBe(1);
   });
 
   it('says the account no longer exists for an unused link to a deleted account', async () => {
-    const me = await person('me');
-    await gql(REQUEST_DELETION, {}, { token: me.token });
-    const first = await linkFrom(me.email, 'delete');
-    await gql(REQUEST_DELETION, {}, { token: me.token });
-    const second = await linkFrom(me.email, 'delete');
+    const who = await person('me');
+    const first = await requestDeletion(who);
+    const second = await requestDeletion(who);
     expect(second).not.toBe(first);
-    const never = uniqueEmail('never');
-    await gql(REQUEST_CHANGE, { email: never }, { token: me.token });
-    const change = await linkFrom(never, 'email');
+    const change = await requestEmailChange(who, uniqueEmail('never'));
 
-    expect((await gql(CONFIRM_DELETION, { token: first })).data.profile.confirmAccountDeletion.status).toBe('ok');
-    const gone = { status: 'error', userErrors: [{ fieldName: 'token', messages: ['This account no longer exists.'] }] };
-    expect((await gql(CONFIRM_DELETION, { token: second })).data.profile.confirmAccountDeletion).toEqual(gone);
-    expect((await gql(CONFIRM_CHANGE, { token: change })).data.profile.confirmEmailChange).toMatchObject(gone);
+    expect((await confirmDeletion(first)).status).toBe(200);
+    const gone = { status: 400, body: apiError('invalid_link', 'This account no longer exists.', 'token') };
+    expect(await confirmDeletion(second)).toEqual(gone);
+    expect(await confirmEmailChange(change)).toEqual(gone);
   });
 
   it('lets the email sign up again as a new account', async () => {
-    const me = await person('me');
-    await gql(REQUEST_DELETION, {}, { token: me.token });
-    await gql(CONFIRM_DELETION, { token: await linkFrom(me.email, 'delete') });
-    const again = await signInWithMagicLink(me.email);
-    expect(again.id).not.toBe(me.id);
-    expect((await gql(USER, {}, { token: again.token })).data.user).toEqual({ id: again.id, name: '', email: me.email });
+    const who = await person('me');
+    await deleteAccount(who);
+    const again = await signIn(who.email);
+    expect(again.id).not.toBe(who.id);
+    expect(await me(again)).toEqual({ status: 200, body: { id: again.id, name: '', email: who.email } });
   });
 });
 
 describe('changing the email', () => {
   it('needs a session to ask for the link', async () => {
-    expect((await gql(REQUEST_CHANGE, { email: uniqueEmail() })).errors?.[0]?.message).toBe('UNAUTHENTICATED');
+    expect((await call('POST', '/v1/me/email-change', { body: { email: uniqueEmail() } })).status).toBe(401);
   });
 
   it('mails a link to the new address and a notice to the old one; confirming moves the account', async () => {
-    const me = await person('me');
-    await gql(`mutation { profile { updateName(input: { name: "Moroz" }) { status } } }`, {}, { token: me.token });
+    const who = await person('me');
+    await call('PATCH', '/v1/me', { token: who.token, body: { name: 'Moroz' } });
     const newEmail = uniqueEmail('new');
-    expect((await gql(REQUEST_CHANGE, { email: newEmail }, { token: me.token })).data.profile.requestEmailChange).toEqual({ status: 'ok', userErrors: null });
-    const notice = (await mailbox(me.email)).at(-1)!;
+    const token = await requestEmailChange(who, newEmail);
+    const notice = (await mailbox(who.email)).at(-1)!;
     expect(notice.text).toContain(newEmail);
     expect(notice.text).not.toMatch(/profile\/email/);
 
-    const res = (await gql(CONFIRM_CHANGE, { token: await linkFrom(newEmail, 'email') })).data.profile.confirmEmailChange;
-    expect(res).toMatchObject({ status: 'ok', userErrors: null, user: { id: me.id, name: 'Moroz', email: newEmail } });
-    expect(await jwt().jwtVerify<UserToken>(res.userToken, 'UserToken')).toMatchObject({ sub: me.id, email: newEmail, ver: 1 });
+    const res = await confirmEmailChange(token);
+    expect(res).toMatchObject({ status: 200, body: { user: { id: who.id, name: 'Moroz', email: newEmail } } });
+    expect(await jwt().jwtVerify<UserToken>(res.body.userToken, 'UserToken')).toMatchObject({ sub: who.id, email: newEmail, ver: 1 });
 
-    expect((await gql(USER, {}, { token: res.userToken })).data.user).toEqual({ id: me.id, name: 'Moroz', email: newEmail });
-    expect((await gql(USER, {}, { token: me.token })).data.user).toBeNull();
+    expect(await me({ token: res.body.userToken })).toEqual({ status: 200, body: { id: who.id, name: 'Moroz', email: newEmail } });
+    expect((await me(who)).status).toBe(401);
     // Signing in with the new address finds the same account.
-    expect((await signInWithMagicLink(newEmail)).id).toBe(me.id);
+    expect((await signIn(newEmail)).id).toBe(who.id);
+  });
+
+  it('sends one link for a repeated request, and signs in again on a repeated confirmation', async () => {
+    const who = await person('me');
+    const newEmail = uniqueEmail('new');
+    const key = newKey();
+    await requestEmailChange(who, newEmail, key);
+    const token = await requestEmailChange(who, newEmail, key);
+    expect(await mailbox(newEmail)).toHaveLength(1);
+
+    const confirmKey = newKey();
+    const first = await confirmEmailChange(token, { key: confirmKey });
+    const again = await confirmEmailChange(token, { key: confirmKey });
+    expect(again.status).toBe(200);
+    expect(again.body.user).toEqual(first.body.user);
+    expect(await me({ token: again.body.userToken })).toMatchObject({ status: 200, body: { email: newEmail } });
+    expect(await confirmEmailChange(token, { key: newKey() })).toMatchObject({ status: 409, body: apiError('link_used') });
+  });
+
+  it('treats the same key for another address as a new request', async () => {
+    const who = await person('me');
+    const key = newKey();
+    const [one, two] = [uniqueEmail('one'), uniqueEmail('two')];
+    await requestEmailChange(who, one, key);
+    await requestEmailChange(who, two, key);
+    expect([(await mailbox(one)).length, (await mailbox(two)).length]).toEqual([1, 1]);
   });
 
   it('moves open parties to the new email and leaves finished ones on the old one, all still listed', async () => {
     const host = await person('host');
-    const me = await person('me');
+    const who = await person('me');
     const other = await person('other');
     const open = await createParty(host, 'Open');
-    await joinParty(me, open, 'Me');
+    await joinParty(who, open, 'Me');
     await joinParty(other, open, 'Other');
     const finished = await createParty(host, 'Finished');
-    await joinParty(me, finished, 'Me');
-    await closeParty(host, finished);
+    await joinParty(who, finished, 'Me');
+    await drawParty(host, finished);
     await settleParty(finished.code);
 
     // An update for me queued in the open party before the change (say, waiting for a retry).
     await runInDurableObject(env.PARTY.getByName(open.code), async (_i, state) => {
-      state.storage.sql.exec('INSERT INTO outbox (payload, next_attempt_at) VALUES (?, ?)', JSON.stringify({ kind: 'user.sync', email: me.email }), Date.now() + 60_000);
+      state.storage.sql.exec('INSERT INTO outbox (payload, next_attempt_at) VALUES (?, ?)', JSON.stringify({ kind: 'user.sync', email: who.email }), Date.now() + 60_000);
     });
 
     const newEmail = uniqueEmail('moved');
-    await gql(REQUEST_CHANGE, { email: newEmail }, { token: me.token });
-    const { userToken } = (await gql(CONFIRM_CHANGE, { token: await linkFrom(newEmail, 'email') })).data.profile.confirmEmailChange;
-    const moved = { ...me, email: newEmail, token: userToken };
+    const { body: { userToken } } = await confirmEmailChange(await requestEmailChange(who, newEmail));
+    const moved = { ...who, email: newEmail, token: userToken };
 
-    expect(await memberEmail(open.code, rawId(me))).toBe(newEmail);
-    expect(await memberEmail(finished.code, rawId(me))).toBe(me.email);
-    expect((await gql(HISTORY, {}, { token: userToken })).data.partyHistory.items).toEqual(expect.arrayContaining([
+    expect(await memberEmail(open.code, rawId(who))).toBe(newEmail);
+    expect(await memberEmail(finished.code, rawId(who))).toBe(who.email);
+    expect((await myParties(moved)).body.items.map(p => ({ code: p.code, isClosed: p.isClosed }))).toEqual(expect.arrayContaining([
       { code: open.code, isClosed: false }, { code: finished.code, isClosed: true },
     ]));
-    expect((await gql(PARTY, { code: finished.code }, { token: userToken })).data.party).toMatchObject({ isJoined: true, target: expect.anything() });
+    expect((await viewParty(finished.code, moved)).body).toMatchObject({ isJoined: true, target: expect.anything() });
 
     // The queued update now goes to the new address.
     await runInDurableObject(env.PARTY.getByName(open.code), async (_i, state) => {
@@ -216,67 +225,69 @@ describe('changing the email', () => {
     expect(await settleParty(open.code)).toBe(0);
 
     // And so do updates from now on: drawing the open party marks it closed in the new account's list and mails the new address.
-    await closeParty(host, open);
+    await drawParty(host, open);
     await settleParty(open.code);
-    expect((await gql(HISTORY, {}, { token: moved.token })).data.partyHistory.items).toEqual(expect.arrayContaining([{ code: open.code, isClosed: true }]));
+    expect((await myParties(moved)).body.items.map(p => ({ code: p.code, isClosed: p.isClosed }))).toEqual(expect.arrayContaining([{ code: open.code, isClosed: true }]));
     expect((await mailbox(newEmail)).some(mail => mail.text?.includes(`/p/${open.code}/`))).toBe(true);
-    expect((await mailbox(me.email)).some(mail => mail.text?.includes(`/p/${open.code}/`))).toBe(false);
+    expect((await mailbox(who.email)).some(mail => mail.text?.includes(`/p/${open.code}/`))).toBe(false);
   });
 
   it('lets the moved account leave an open party it joined under the old email', async () => {
     const host = await person('host');
-    const me = await person('me');
+    const who = await person('me');
     const open = await createParty(host, 'Open');
-    await joinParty(me, open, 'Me');
-    const newEmail = uniqueEmail('moved');
-    await gql(REQUEST_CHANGE, { email: newEmail }, { token: me.token });
-    const { userToken } = (await gql(CONFIRM_CHANGE, { token: await linkFrom(newEmail, 'email') })).data.profile.confirmEmailChange;
-    expect((await gql(LEAVE_PARTY, { party: open.id }, { token: userToken })).data.parties.leaveParty).toMatchObject({ status: 'ok' });
-    expect((await gql(HISTORY, {}, { token: userToken })).data.partyHistory.items).toEqual([]);
+    await joinParty(who, open, 'Me');
+    const { body: { userToken } } = await confirmEmailChange(await requestEmailChange(who, uniqueEmail('moved')));
+    expect((await leaveParty({ token: userToken }, open)).status).toBe(200);
+    expect((await myParties({ token: userToken })).body.items).toEqual([]);
   });
 
   it('rejects a new address that is already taken, when asked and when confirming', async () => {
-    const me = await person('me');
+    const who = await person('me');
     const taken = await person('taken');
-    expect((await gql(REQUEST_CHANGE, { email: taken.email }, { token: me.token })).data.profile.requestEmailChange).toEqual({
-      status: 'error', userErrors: [{ fieldName: 'email', messages: ['This email is already used by another account.'] }],
+    expect(await call('POST', '/v1/me/email-change', { token: who.token, body: { email: taken.email } })).toEqual({
+      status: 409, body: apiError('conflict', 'This email is already used by another account.', 'email'),
     });
 
     const later = uniqueEmail('later');
-    await gql(REQUEST_CHANGE, { email: later }, { token: me.token });
-    const token = await linkFrom(later, 'email');
-    await signInWithMagicLink(later);
-    expect((await gql(CONFIRM_CHANGE, { token })).data.profile.confirmEmailChange).toMatchObject({
-      status: 'error', userErrors: [{ fieldName: 'token', messages: ['This email is already used by another account.'] }], userToken: null,
+    const token = await requestEmailChange(who, later);
+    await signIn(later);
+    expect(await confirmEmailChange(token)).toEqual({
+      status: 409, body: apiError('conflict', 'This email is already used by another account.', 'token'),
     });
-    expect((await gql(USER, {}, { token: me.token })).data.user).toMatchObject({ email: me.email });
+    expect(await me(who)).toMatchObject({ status: 200, body: { email: who.email } });
   });
 
   it('refuses a replayed or expired link', async () => {
-    const me = await person('me');
-    const newEmail = uniqueEmail('new');
-    await gql(REQUEST_CHANGE, { email: newEmail }, { token: me.token });
-    const token = await linkFrom(newEmail, 'email');
-    expect((await gql(CONFIRM_CHANGE, { token })).data.profile.confirmEmailChange.status).toBe('ok');
+    const who = await person('me');
+    const token = await requestEmailChange(who, uniqueEmail('new'));
+    expect((await confirmEmailChange(token)).status).toBe(200);
     // Says the link was used, though the old account is a tombstone by now.
-    expect((await gql(CONFIRM_CHANGE, { token })).data.profile.confirmEmailChange).toEqual({
-      status: 'error', userErrors: [{ fieldName: 'token', messages: ['This link has already been used. Please request a new one.'] }], userToken: null, user: null,
+    expect(await confirmEmailChange(token)).toEqual({
+      status: 409, body: apiError('link_used', 'This link has already been used. Please request a new one.', 'token'),
     });
 
     const other = await person('other');
     const expired = await jwt().issueToken('EmailChange', { sub: other.id, email: other.email, newEmail: uniqueEmail(), jti: crypto.randomUUID() }, { ttl: -60 });
-    expect((await gql(CONFIRM_CHANGE, { token: expired })).data.profile.confirmEmailChange).toMatchObject({
-      status: 'error', userErrors: [{ fieldName: 'token', messages: ['This link is invalid or has expired. Please request a new one.'] }],
+    expect(await confirmEmailChange(expired)).toEqual({
+      status: 400, body: apiError('invalid_link', 'This link is invalid or has expired. Please request a new one.', 'token'),
     });
+    const noNewEmail = await jwt().issueToken('EmailChange', { sub: other.id, email: other.email, jti: crypto.randomUUID() }, { ttl: 60 });
+    expect((await confirmEmailChange(noNewEmail)).status).toBe(400);
   });
 
-  it('validates the new address and reports a failed delivery', async () => {
-    const me = await person('me');
-    expect((await gql(REQUEST_CHANGE, { email: 'nope' }, { token: me.token })).data.profile.requestEmailChange).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'email' }] });
-    expect((await gql(REQUEST_CHANGE, { email: me.email.toUpperCase() }, { token: me.token })).data.profile.requestEmailChange).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'email' }] });
-    expect((await gql(REQUEST_CHANGE, { email: uniqueEmail('fail+new') }, { token: me.token })).data.profile.requestEmailChange).toMatchObject({
-      status: 'error', userErrors: [{ fieldName: 'email', messages: ["We couldn't send the email right now. Please try again in a few minutes."] }],
-    });
-    expect(nodeIdToStr({ kind: 'User', id: rawId(me) })).toBe(me.id);
+  it('validates the new address and reports a failed delivery, freeing the request', async () => {
+    const who = await person('me');
+    const ask = (email: string, key?: string) => call('POST', '/v1/me/email-change', { token: who.token, key, body: { email } });
+    expect(await ask('nope')).toMatchObject({ status: 400, body: apiError('invalid', undefined, 'email') });
+    expect(await ask(who.email.toUpperCase())).toEqual({ status: 400, body: apiError('invalid', "That's already your email.", 'email') });
+    const key = newKey();
+    const failing = uniqueEmail('fail+new');
+    for (let i = 0; i < 2; i++) {
+      expect(await ask(failing, key)).toEqual({
+        status: 503, body: apiError('unavailable', "We couldn't send the email right now. Please try again in a few minutes.", 'email'),
+      });
+    }
   });
+
 });

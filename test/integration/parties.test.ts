@@ -1,75 +1,86 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 
-import { nodeIdToStr } from 'src/utils/strings/nodeId';
-
 import {
-  CLOSE_PARTY, CREATE_PARTY, JOIN_PARTY, LEAVE_PARTY, PARTIES, PARTY, createParty, gql, joinParty,
-  settleParty, signInWithMagicLink, uniqueEmail,
+  apiError, call, createParty, deleteParty, drawParty, joinParty, leaveParty, myParties, newKey, restoreParty,
+  settleParty, signIn, uniqueEmail, viewParty,
 } from './support';
 
-const person = (label: string) => signInWithMagicLink(uniqueEmail(label));
+const person = (label: string) => signIn(uniqueEmail(label));
+const codes = async (who: { token: string }) => (await myParties(who)).body.items.map(p => p.code);
 
 describe('creating a party', () => {
   it('needs a session', async () => {
-    const res = await gql(CREATE_PARTY, { name: 'Nope' });
-    expect(res.errors?.[0]?.message).toBe('UNAUTHENTICATED');
+    expect(await call('POST', '/v1/parties', { body: { name: 'Nope' } })).toMatchObject({ status: 401, body: apiError('unauthenticated') });
   });
 
   it('validates the name', async () => {
     const host = await person('host');
-    const empty = await gql(CREATE_PARTY, { name: '   ' }, { token: host.token });
-    expect(empty.data.parties.createParty).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'name' }] });
-
-    const long = await gql(CREATE_PARTY, { name: 'x'.repeat(101) }, { token: host.token });
-    expect(long.data.parties.createParty).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'name' }] });
+    for (const name of ['   ', 'x'.repeat(101)]) {
+      expect(await call('POST', '/v1/parties', { token: host.token, body: { name } })).toMatchObject({ status: 400, body: apiError('invalid', undefined, 'name') });
+    }
   });
 
   it('makes the creator the host and first participant', async () => {
     const host = await person('host');
-    const res = await gql(CREATE_PARTY, { name: '  Office   party ', password: 'Jingle Bells' }, { token: host.token });
-    const party = res.data.parties.createParty.node;
-    expect(party).toMatchObject({
+    const res = await call('POST', '/v1/parties', { token: host.token, body: { name: '  Office   party ', password: 'Jingle Bells' } });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({
       name: 'Office party', isHost: true, isJoined: true, isClosed: false, isProtected: true,
       password: 'Jingle Bells', participantCount: 1, participants: [''], target: null,
     });
-    expect(party.code).toMatch(/^[QWERTYUIPASDFGHJKLZXCVBNMO]{8}$/);
-    expect(party.id).toBe(nodeIdToStr({ kind: 'Party', id: party.code }));
+    expect(res.body.code).toMatch(/^[QWERTYUIPASDFGHJKLZXCVBNMO]{8}$/);
   });
 
   it('gives every party its own code', async () => {
     // A host per party: one person can only have three open at a time.
-    const codes = new Set<string>();
+    const created = new Set<string>();
     for (let i = 0; i < 10; i++) {
-      codes.add((await createParty(await person(`host${i}`), `Party ${i}`)).code);
+      created.add((await createParty(await person(`host${i}`), `Party ${i}`)).code);
     }
-    expect(codes.size).toBe(10);
+    expect(created.size).toBe(10);
+  });
+
+  it('creates one party for a repeated request, holding one slot', async () => {
+    const host = await person('host');
+    const key = newKey();
+    const first = await createParty(host, 'Once', null, key);
+    const again = await createParty(host, 'Once', null, key);
+    expect(again.code).toBe(first.code);
+    expect(await codes(host)).toEqual([first.code]);
+    // Two more slots are left, not one.
+    await createParty(host, 'Two');
+    await createParty(host, 'Three');
+    expect((await call('POST', '/v1/parties', { token: host.token, body: { name: 'Four' } })).status).toBe(409);
+  });
+
+  it('treats the same key with another name as a new party', async () => {
+    const host = await person('host');
+    const key = newKey();
+    const first = await createParty(host, 'One', null, key);
+    const second = await createParty(host, 'Other', null, key);
+    expect(second.code).not.toBe(first.code);
   });
 });
 
 describe('open-party limit, deleting and restoring', () => {
-  const DELETE = `mutation ($party: ID!) { parties { deleteParty(input: { party: $party }) { status userErrors { fieldName messages } node { deletedAt restorableUntil } } } }`;
-  const RESTORE = `mutation ($party: ID!) { parties { restoreParty(input: { party: $party }) { status userErrors { fieldName messages } node { deletedAt } } } }`;
-  const codes = async (who: { token: string }) =>
-    (await gql(PARTIES, {}, { token: who.token })).data.parties.map((p: { code: string }) => p.code);
-
   it('caps a host at three open parties, and deleting one frees a slot', async () => {
     const host = await person('host');
     const parties = [];
     for (let i = 0; i < 3; i++) {
       parties.push(await createParty(host, `Party ${i}`));
     }
-    const fourth = await gql(CREATE_PARTY, { name: 'Fourth' }, { token: host.token });
-    expect(fourth.data.parties.createParty.userErrors[0].messages[0]).toMatch(/up to 3 open parties/);
+    const fourth = await call('POST', '/v1/parties', { token: host.token, body: { name: 'Fourth' } });
+    expect(fourth).toMatchObject({ status: 409, body: { error: { code: 'conflict', message: expect.stringMatching(/up to 3 open parties/) } } });
 
-    const deleted = (await gql(DELETE, { party: parties[0].id }, { token: host.token })).data.parties.deleteParty;
-    expect(deleted.status).toBe('ok');
-    expect(Date.parse(deleted.node.restorableUntil) - Date.parse(deleted.node.deletedAt)).toBe(24 * 60 * 60 * 1000);
-    expect((await gql(CREATE_PARTY, { name: 'Fourth' }, { token: host.token })).data.parties.createParty.status).toBe('ok');
+    const deleted = await deleteParty(host, parties[0]);
+    expect(deleted.status).toBe(200);
+    expect(Date.parse(deleted.body.restorableUntil!) - Date.parse(deleted.body.deletedAt!)).toBe(24 * 60 * 60 * 1000);
+    expect((await call('POST', '/v1/parties', { token: host.token, body: { name: 'Fourth' } })).status).toBe(201);
 
     // Back at three open parties, the deleted one can't come back until another goes.
-    const refused = (await gql(RESTORE, { party: parties[0].id }, { token: host.token })).data.parties.restoreParty;
-    expect(refused.userErrors[0].messages[0]).toMatch(/to restore this one/);
+    const refused = await restoreParty(host, parties[0]);
+    expect(refused).toMatchObject({ status: 409, body: { error: { message: expect.stringMatching(/to restore this one/) } } });
   });
 
   it('hides a deleted party from its guests, and restoring brings it back for them', async () => {
@@ -78,15 +89,29 @@ describe('open-party limit, deleting and restoring', () => {
     const party = await createParty(host);
     await joinParty(guest, party, 'Guest');
 
-    expect((await gql(DELETE, { party: party.id }, { token: host.token })).data.parties.deleteParty.status).toBe('ok');
-    expect((await gql(PARTY, { code: party.code }, { token: guest.token })).data.party).toBeNull();
+    expect((await deleteParty(host, party)).status).toBe(200);
+    expect((await viewParty(party.code, guest)).status).toBe(404);
     await expect.poll(() => codes(guest)).toEqual([]);
     expect(await codes(host)).toEqual([party.code]);
 
-    const restored = (await gql(RESTORE, { party: party.id }, { token: host.token })).data.parties.restoreParty;
-    expect(restored).toMatchObject({ status: 'ok', node: { deletedAt: null } });
-    expect((await gql(PARTY, { code: party.code }, { token: guest.token })).data.party).toMatchObject({ isJoined: true });
+    expect(await restoreParty(host, party)).toMatchObject({ status: 200, body: { deletedAt: null } });
+    expect((await viewParty(party.code, guest)).body).toMatchObject({ isJoined: true });
     await expect.poll(() => codes(guest)).toEqual([party.code]);
+  });
+
+  it('deletes and restores once: repeating either answers with the party as it is, holding no extra slot', async () => {
+    const host = await person('host');
+    const party = await createParty(host);
+    const deleted = await deleteParty(host, party);
+    expect(await deleteParty(host, party)).toEqual(deleted);
+
+    const restored = await restoreParty(host, party);
+    expect(restored).toMatchObject({ status: 200, body: { deletedAt: null } });
+    expect(await restoreParty(host, party)).toEqual(restored);
+    // One open party and two free slots.
+    await createParty(host, 'Two');
+    await createParty(host, 'Three');
+    expect((await call('POST', '/v1/parties', { token: host.token, body: { name: 'Four' } })).status).toBe(409);
   });
 
   it('refuses to delete a party whose dice are rolled', async () => {
@@ -94,20 +119,20 @@ describe('open-party limit, deleting and restoring', () => {
     const guest = await person('guest');
     const party = await createParty(host);
     await joinParty(guest, party, 'Guest');
-    expect((await gql(CLOSE_PARTY, { party: party.id }, { token: host.token })).data.parties.closeParty.status).toBe('ok');
-
-    const res = await gql(DELETE, { party: party.id }, { token: host.token });
-    expect(res.data.parties.deleteParty).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
-    expect((await gql(PARTY, { code: party.code }, { token: guest.token })).data.party).toMatchObject({ isClosed: true });
+    expect((await drawParty(host, party)).status).toBe(200);
+    expect(await deleteParty(host, party)).toMatchObject({ status: 409, body: apiError('conflict', undefined, 'party') });
+    expect((await viewParty(party.code, guest)).body).toMatchObject({ isClosed: true });
   });
 
-  it('lets only the host delete', async () => {
+  it('lets only the host delete or restore, and a deleted party is invisible to others', async () => {
     const host = await person('host');
     const guest = await person('guest');
     const party = await createParty(host);
     await joinParty(guest, party, 'Guest');
-    const res = await gql(DELETE, { party: party.id }, { token: guest.token });
-    expect(res.data.parties.deleteParty).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
+    expect(await deleteParty(guest, party)).toMatchObject({ status: 403, body: apiError('forbidden', undefined, 'party') });
+    await deleteParty(host, party);
+    expect(await deleteParty(guest, party)).toMatchObject({ status: 404 });
+    expect(await restoreParty(guest, party)).toMatchObject({ status: 404 });
   });
 });
 
@@ -115,16 +140,20 @@ describe('looking up a party', () => {
   it('shows a limited view to anyone with the code, in any case', async () => {
     const host = await person('host');
     const party = await createParty(host, 'Secret party', 'xyz');
-    const anonymous = await gql(PARTY, { code: party.code.toLowerCase() });
-    expect(anonymous.data.party).toEqual({
-      id: party.id, name: 'Secret party', code: party.code, password: null, isJoined: false, isHost: false,
-      isProtected: true, isClosed: false, participantCount: null, participants: null, target: null,
+    const anonymous = await viewParty(party.code.toLowerCase());
+    expect(anonymous).toEqual({
+      status: 200,
+      body: {
+        code: party.code, name: 'Secret party', password: null, isJoined: false, isHost: false, isProtected: true, isClosed: false,
+        createdAt: party.createdAt, rolledAt: null, deletedAt: null, restorableUntil: null,
+        participantCount: null, participants: null, target: null,
+      },
     });
   });
 
-  it('returns null for unknown or malformed codes', async () => {
-    for (const code of ['QQQQQ', 'abc', '12345', '']) {
-      expect((await gql(PARTY, { code })).data.party).toBeNull();
+  it('answers 404 for unknown or malformed codes', async () => {
+    for (const code of ['QQQQQ', 'abc', '12345', 'QWERTYU']) {
+      expect(await viewParty(code)).toEqual({ status: 404, body: apiError('not_found', 'Party does not exist.', 'party') });
     }
   });
 
@@ -132,8 +161,7 @@ describe('looking up a party', () => {
     const host = await person('host');
     const stranger = await person('stranger');
     const party = await createParty(host);
-    const view = (await gql(PARTY, { code: party.code }, { token: stranger.token })).data.party;
-    expect(view).toMatchObject({ isJoined: false, isHost: false, participantCount: null, participants: null, password: null });
+    expect((await viewParty(party.code, stranger)).body).toEqual((await viewParty(party.code)).body);
   });
 });
 
@@ -141,8 +169,7 @@ describe('joining a party', () => {
   it('needs a session', async () => {
     const host = await person('host');
     const party = await createParty(host);
-    const res = await gql(JOIN_PARTY, { party: party.id, name: 'Anon' });
-    expect(res.errors?.[0]?.message).toBe('UNAUTHENTICATED');
+    expect((await call('POST', `/v1/parties/${party.code}/join`, { body: { name: 'Anon' } })).status).toBe(401);
   });
 
   it('checks the secret phrase, ignoring case', async () => {
@@ -150,13 +177,11 @@ describe('joining a party', () => {
     const guest = await person('guest');
     const party = await createParty(host, 'Protected', 'Mistletoe');
 
-    const missing = await joinParty(guest, party, 'Guest');
-    expect(missing).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'password' }] });
-    const wrong = await joinParty(guest, party, 'Guest', 'holly');
-    expect(wrong).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'password' }] });
-
-    const right = await joinParty(guest, party, 'Guest', 'mistletoe');
-    expect(right).toMatchObject({ status: 'ok', node: { isJoined: true, isHost: false, participantCount: 2, password: null } });
+    expect(await joinParty(guest, party, 'Guest')).toMatchObject({ status: 403, body: apiError('forbidden', undefined, 'password') });
+    expect(await joinParty(guest, party, 'Guest', 'holly')).toMatchObject({ status: 403, body: apiError('forbidden', undefined, 'password') });
+    expect(await joinParty(guest, party, 'Guest', 'mistletoe')).toMatchObject({
+      status: 200, body: { isJoined: true, isHost: false, participantCount: 2, password: null },
+    });
   });
 
   it('fills in an empty profile name from the name they joined with, and never overwrites it', async () => {
@@ -165,11 +190,11 @@ describe('joining a party', () => {
     const party = await createParty(host);
     const other = await createParty(host, 'Other party');
     await joinParty(guest, party, 'Santa\'s Helper');
-    expect((await gql('{ user { name } }', {}, { token: guest.token })).data.user.name).toBe('Santa\'s Helper');
+    expect((await call('GET', '/v1/me', { token: guest.token })).body.name).toBe('Santa\'s Helper');
 
     await joinParty(guest, other, 'Elf');
-    expect((await gql('{ user { name } }', {}, { token: guest.token })).data.user.name).toBe('Santa\'s Helper');
-    expect((await gql(PARTY, { code: other.code }, { token: host.token })).data.party.participants).toEqual(['', 'Elf']);
+    expect((await call('GET', '/v1/me', { token: guest.token })).body.name).toBe('Santa\'s Helper');
+    expect((await viewParty(other.code, host)).body.participants).toEqual(['', 'Elf']);
   });
 
   it('is idempotent: joining twice keeps one membership', async () => {
@@ -177,28 +202,20 @@ describe('joining a party', () => {
     const guest = await person('guest');
     const party = await createParty(host);
     await joinParty(guest, party, 'Guest');
-    const again = await joinParty(guest, party, 'Guest again');
-    expect(again).toMatchObject({ status: 'ok', node: { participantCount: 2 } });
+    expect(await joinParty(guest, party, 'Guest again')).toMatchObject({ status: 200, body: { participantCount: 2 } });
   });
 
-  it('rejects ids that are not parties and parties that do not exist', async () => {
+  it('answers 404 for codes that are not parties', async () => {
     const guest = await person('guest');
-    const notAParty = await joinParty(guest, { id: guest.id }, 'Guest');
-    expect(notAParty).toEqual({ status: 'error', userErrors: [{ fieldName: 'party', messages: ['Unknown input type. Must be Party.'] }], node: null });
-
-    const garbage = await joinParty(guest, { id: 'not-a-node-id' }, 'Guest');
-    expect(garbage).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
-
-    const missing = await joinParty(guest, { id: nodeIdToStr({ kind: 'Party', id: 'QQQQQ' }) }, 'Guest');
-    expect(missing).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party', messages: ['Party does not exist.'] }] });
+    expect(await joinParty(guest, { code: 'not-a-code' }, 'Guest')).toMatchObject({ status: 404, body: apiError('not_found', undefined, 'party') });
+    expect(await joinParty(guest, { code: 'QQQQQ' }, 'Guest')).toMatchObject({ status: 404, body: apiError('not_found', 'Party does not exist.', 'party') });
   });
 
   it('validates the name', async () => {
     const host = await person('host');
     const guest = await person('guest');
     const party = await createParty(host);
-    const res = await gql(JOIN_PARTY, { party: party.id, name: '' }, { token: guest.token });
-    expect(res.data.parties.joinParty).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'name' }] });
+    expect(await joinParty(guest, party, '')).toMatchObject({ status: 400, body: apiError('invalid', undefined, 'name') });
   });
 });
 
@@ -214,11 +231,11 @@ describe('participants', () => {
       guests.push(guest);
     }
 
-    const hostView = (await gql(PARTY, { code: party.code }, { token: host.token })).data.party;
+    const hostView = (await viewParty(party.code, host)).body;
     expect(hostView.participantCount).toBe(5);
     expect(hostView.participants).toEqual(['', 'Blitzen', 'Comet', 'Dasher', 'Vixen']);
 
-    const guestView = (await gql(PARTY, { code: party.code }, { token: guests[0].token })).data.party;
+    const guestView = (await viewParty(party.code, guests[0])).body;
     expect(guestView.participantCount).toBe(5);
     expect(guestView.participants).toHaveLength(3);
     expect(guestView.participants).not.toContain('Dasher');
@@ -234,15 +251,13 @@ describe('my parties', () => {
     await joinParty(me, theirs, 'Me');
     const last = await createParty(me, 'Last');
 
-    const listed = (await gql(PARTIES, {}, { token: me.token })).data.parties;
-    expect(listed).toEqual([
-      { code: last.code, name: 'Last', isHost: true, isJoined: true },
-      { code: theirs.code, name: 'Theirs', isHost: false, isJoined: true },
-      { code: first.code, name: 'First', isHost: true, isJoined: true },
+    const listed = (await myParties(me)).body.items;
+    expect(listed.map(p => [p.code, p.name, p.isHost, p.isJoined])).toEqual([
+      [last.code, 'Last', true, true],
+      [theirs.code, 'Theirs', false, true],
+      [first.code, 'First', true, true],
     ]);
-
-    expect((await gql(PARTIES, { first: 2 }, { token: me.token })).data.parties.map((p: any) => p.code)).toEqual([last.code, theirs.code]);
-    expect((await gql(PARTIES, { first: -1 }, { token: me.token })).data.parties).toEqual([]);
+    expect((await myParties(me, '?first=2')).body.items.map(p => p.code)).toEqual([last.code, theirs.code]);
   });
 
   it('drops a party after leaving it', async () => {
@@ -250,12 +265,12 @@ describe('my parties', () => {
     const guest = await person('guest');
     const party = await createParty(host);
     await joinParty(guest, party, 'Guest');
-    await gql(LEAVE_PARTY, { party: party.id }, { token: guest.token });
-    expect((await gql(PARTIES, {}, { token: guest.token })).data.parties).toEqual([]);
+    await leaveParty(guest, party);
+    expect(await codes(guest)).toEqual([]);
   });
 
-  it('is empty without a session', async () => {
-    expect((await gql(PARTIES)).data.parties).toBeNull();
+  it('needs a session', async () => {
+    expect((await myParties({})).status).toBe(401);
   });
 });
 
@@ -266,23 +281,22 @@ describe('leaving a party', () => {
     const party = await createParty(host);
     await joinParty(guest, party, 'Guest');
 
-    const left = (await gql(LEAVE_PARTY, { party: party.id }, { token: guest.token })).data.parties.leaveParty;
-    expect(left).toMatchObject({ status: 'ok', node: { isJoined: false, participantCount: null } });
-    expect((await gql(PARTY, { code: party.code }, { token: host.token })).data.party.participantCount).toBe(1);
+    expect(await leaveParty(guest, party)).toMatchObject({ status: 200, body: { isJoined: false, participantCount: null } });
+    expect((await viewParty(party.code, host)).body.participantCount).toBe(1);
   });
 
-  it('is a no-op for someone who is not a member', async () => {
+  it('is a no-op for someone who is not a member, and when repeated', async () => {
     const host = await person('host');
     const stranger = await person('stranger');
     const party = await createParty(host);
-    const res = (await gql(LEAVE_PARTY, { party: party.id }, { token: stranger.token })).data.parties.leaveParty;
-    expect(res).toMatchObject({ status: 'ok', node: { isJoined: false } });
+    expect(await leaveParty(stranger, party)).toMatchObject({ status: 200, body: { isJoined: false } });
+    expect(await leaveParty(stranger, party)).toMatchObject({ status: 200, body: { isJoined: false } });
   });
 
   it('needs a session', async () => {
     const host = await person('host');
     const party = await createParty(host);
-    expect((await gql(LEAVE_PARTY, { party: party.id })).errors?.[0]?.message).toBe('UNAUTHENTICATED');
+    expect((await call('POST', `/v1/parties/${party.code}/leave`)).status).toBe(401);
   });
 
   it('does not let the host leave their own party', async () => {
@@ -290,17 +304,16 @@ describe('leaving a party', () => {
     const guest = await person('guest');
     const party = await createParty(host);
     await joinParty(guest, party, 'Guest');
-    const left = (await gql(LEAVE_PARTY, { party: party.id }, { token: host.token })).data.parties.leaveParty;
-    expect(left).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
-    expect((await gql(PARTY, { code: party.code }, { token: host.token })).data.party).toMatchObject({ isHost: true, isJoined: true });
+    expect(await leaveParty(host, party)).toMatchObject({ status: 409, body: apiError('conflict', undefined, 'party') });
+    expect((await viewParty(party.code, host)).body).toMatchObject({ isHost: true, isJoined: true });
   });
 });
 
-describe('closing a party', () => {
+describe('rolling the dice', () => {
   it('needs a session', async () => {
     const host = await person('host');
     const party = await createParty(host);
-    expect((await gql(CLOSE_PARTY, { party: party.id })).errors?.[0]?.message).toBe('UNAUTHENTICATED');
+    expect((await call('POST', `/v1/parties/${party.code}/draw`)).status).toBe(401);
   });
 
   it('can only be done by the host', async () => {
@@ -308,22 +321,19 @@ describe('closing a party', () => {
     const guest = await person('guest');
     const party = await createParty(host);
     await joinParty(guest, party, 'Guest');
-    const res = (await gql(CLOSE_PARTY, { party: party.id }, { token: guest.token })).data.parties.closeParty;
-    expect(res).toEqual({ status: 'error', userErrors: [{ fieldName: 'party', messages: ['You must be the host to close the party.'] }], node: null });
+    expect(await drawParty(guest, party)).toEqual({ status: 403, body: apiError('forbidden', 'You must be the host to close the party.', 'party') });
   });
 
   it('needs at least two participants', async () => {
     const host = await person('host');
     const party = await createParty(host);
-    const res = (await gql(CLOSE_PARTY, { party: party.id }, { token: host.token })).data.parties.closeParty;
-    expect(res).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
+    expect(await drawParty(host, party)).toMatchObject({ status: 409, body: apiError('conflict', undefined, 'party') });
   });
 });
 
 describe('party times', () => {
-  const TIMES = `query ($code: String!) { party(code: $code) { createdAt rolledAt } }`;
-  const HISTORY_TIMES = `{ partyHistory(first: 10) { items { code createdAt rolledAt } } }`;
   const ISO = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
+  const times = (p: { code: string; createdAt: string; rolledAt: string | null }) => ({ code: p.code, createdAt: p.createdAt, rolledAt: p.rolledAt });
 
   it('shows when a party started, and when its dice were rolled once the host closes it', async () => {
     const before = Date.now();
@@ -332,25 +342,20 @@ describe('party times', () => {
     const party = await createParty(host, 'Timed');
     await joinParty(guest, party, 'Guest');
 
-    const open = (await gql(TIMES, { code: party.code })).data.party;
+    const open = (await viewParty(party.code)).body;
     expect(open.createdAt).toMatch(ISO);
     expect(Date.parse(open.createdAt)).toBeGreaterThanOrEqual(before - 1000);
     expect(open.rolledAt).toBeNull();
-    expect((await gql(HISTORY_TIMES, {}, { token: guest.token })).data.partyHistory.items).toEqual([
-      { code: party.code, createdAt: open.createdAt, rolledAt: null },
-    ]);
+    expect((await myParties(guest)).body.items.map(times)).toEqual([{ code: party.code, createdAt: open.createdAt, rolledAt: null }]);
 
-    const closed = (await gql(CLOSE_PARTY, { party: party.id }, { token: host.token })).data.parties.closeParty.node;
-    expect(closed.isClosed).toBe(true);
-    const rolledAt = (await gql(TIMES, { code: party.code }, { token: guest.token })).data.party.rolledAt;
+    expect((await drawParty(host, party)).body.isClosed).toBe(true);
+    const rolledAt = (await viewParty(party.code, guest)).body.rolledAt!;
     expect(rolledAt).toMatch(ISO);
     expect(Date.parse(rolledAt)).toBeGreaterThanOrEqual(Date.parse(open.createdAt));
 
     await settleParty(party.code);
     for (const p of [host, guest]) {
-      expect((await gql(HISTORY_TIMES, {}, { token: p.token })).data.partyHistory.items).toEqual([
-        { code: party.code, createdAt: open.createdAt, rolledAt },
-      ]);
+      expect((await myParties(p)).body.items.map(times)).toEqual([{ code: party.code, createdAt: open.createdAt, rolledAt }]);
     }
   });
 
@@ -359,12 +364,12 @@ describe('party times', () => {
     const guest = await person('guest');
     const party = await createParty(host, 'Old');
     await joinParty(guest, party, 'Guest');
-    await gql(CLOSE_PARTY, { party: party.id }, { token: host.token });
+    await drawParty(host, party);
     await settleParty(party.code);
     await runInDurableObject(env.USER.getByName(guest.email), async (_i, state) => {
       state.storage.sql.exec('UPDATE parties SET closed_at = NULL');
     });
-    const [item] = (await gql(HISTORY_TIMES, {}, { token: guest.token })).data.partyHistory.items;
+    const [item] = (await myParties(guest)).body.items;
     expect(item).toMatchObject({ code: party.code, createdAt: expect.stringMatching(ISO), rolledAt: null });
   });
 });
