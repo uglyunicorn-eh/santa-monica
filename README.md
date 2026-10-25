@@ -13,7 +13,7 @@ The API is a Cloudflare Worker (Hono + Apollo Server) with its data in Durable O
 
 One person can host at most 3 open parties at a time (`MAX_OPEN_HOSTED_PARTIES` in `src/apollo/mutations/parties.ts`). Parties joined as a guest don't count. Closing or deleting a party frees its slot right away. Hosts can't leave their own party.
 
-The host can delete a party at any time (`deleteParty`): it leaves every member's list but the host's and its link stops working. For 24 hours (`RESTORE_WINDOW_MS` in `src/do/PartyDO.ts`) the host can bring it back exactly as it was with `restoreParty`; restoring an open party needs a free slot. After that the party's alarm erases it, and its code is never reused. The check and a slot for the new party are taken in one `UserDO.startHosting` call, so parallel creates can't get past the limit.
+The host can delete a party until its dice are rolled (`deleteParty`): it leaves every member's list but the host's and its link stops working. For 24 hours (`RESTORE_WINDOW_MS` in `src/do/PartyDO.ts`) the host can bring it back exactly as it was with `restoreParty`; restoring an open party needs a free slot. After that the party's alarm erases it, and its code is never reused. The check and a slot for the new party are taken in one `UserDO.startHosting` call, so parallel creates can't get past the limit.
 
 Keeping Durable Object calls low:
 

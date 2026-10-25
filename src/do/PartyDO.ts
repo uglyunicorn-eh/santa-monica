@@ -466,8 +466,9 @@ export class PartyDO extends DurableObject<Env> {
   }
 
   /**
-   * Deletes the party, whether or not anyone has joined: it leaves every member's list but the host's, and its link
-   * stops working. The host can restore it within RESTORE_WINDOW_MS; after that the alarm erases it for good.
+   * Deletes an open party, whether or not anyone has joined; once the dice are rolled it can't be deleted. It leaves
+   * every member's list but the host's, and its link stops working. The host can restore it within
+   * RESTORE_WINDOW_MS; after that the alarm erases it for good.
    */
   async delete(userId: string): Promise<PartyResult> {
     const party = this.liveParty();
@@ -478,7 +479,7 @@ export class PartyDO extends DurableObject<Env> {
       return fail('party', 'You must be the host to delete the party.');
     }
     if (party.is_closed) {
-      return fail('party', 'The dice are already rolled, so this party can no longer be deleted.');
+      return fail('party', 'The dice have already been rolled, so this party can no longer be deleted.');
     }
     const deletedAt = Date.now();
     this.setDeleted(deletedAt);

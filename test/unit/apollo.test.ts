@@ -215,6 +215,11 @@ describe('party mutations', () => {
       expect(await runInDurableObject(stub, async (_i, state) =>
         state.storage.sql.exec(`SELECT COUNT(*) AS n FROM outbox WHERE payload LIKE '%"user.%'`).one().n)).toBe(0);
     });
+    /** Deletes a rolled party the way deleteParty did before it refused them, so restoring one is still covered. */
+    const deleteRolled = (code: string) => runInDurableObject(env.PARTY.getByName(code), async (instance: PartyDO) => {
+      (instance as any).setDeleted(Date.now());
+      await (instance as any).deliverSoon();
+    });
     /** Moves the deletion back in time, as if it happened `ms` ago. */
     const deletedAgo = (code: string, ms: number) => runInDurableObject(env.PARTY.getByName(code), async (_i, state) => {
       state.storage.sql.exec('UPDATE party SET deleted_at = ?', Date.now() - ms);
@@ -255,8 +260,9 @@ describe('party mutations', () => {
       await join(guest, node.id);
       await parties(null, {}, host).closeParty({ input: { party: node.id } }, host);
       const target = (await party(null, { code: node.code }, guest) as any).target;
+      expect(await del(host, node.id)).toMatchObject({ status: 'error', userErrors: [{ messages: ['The dice have already been rolled, so this party can no longer be deleted.'] }] });
 
-      await del(host, node.id);
+      await deleteRolled(node.code);
       await settle(node.code);
       expect(await restore(host, node.id)).toMatchObject({ status: 'ok', node: { code: node.code, deletedAt: null, restorableUntil: null, isClosed: true } });
       await settle(node.code);
@@ -294,7 +300,7 @@ describe('party mutations', () => {
       await join(guest, open[1].id);
       await parties(null, {}, host).closeParty({ input: { party: open[1].id } }, host);
       await createParty(host, 'Fills the freed slot');
-      await del(host, open[1].id);
+      await deleteRolled(open[1].code);
       expect((await restore(host, open[1].id)).status).toBe('ok');
     });
 
