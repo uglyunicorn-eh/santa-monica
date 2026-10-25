@@ -1,10 +1,11 @@
+import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 
 import { nodeIdToStr } from 'src/utils/strings/nodeId';
 
 import {
   CLOSE_PARTY, CREATE_PARTY, JOIN_PARTY, LEAVE_PARTY, PARTIES, PARTY, createParty, gql, joinParty,
-  signInWithMagicLink, uniqueEmail,
+  settleParty, signInWithMagicLink, uniqueEmail,
 } from './support';
 
 const person = (label: string) => signInWithMagicLink(uniqueEmail(label));
@@ -281,5 +282,54 @@ describe('closing a party', () => {
     const party = await createParty(host);
     const res = (await gql(CLOSE_PARTY, { party: party.id }, { token: host.token })).data.parties.closeParty;
     expect(res).toMatchObject({ status: 'error', userErrors: [{ fieldName: 'party' }] });
+  });
+});
+
+describe('party times', () => {
+  const TIMES = `query ($code: String!) { party(code: $code) { createdAt rolledAt } }`;
+  const HISTORY_TIMES = `{ partyHistory(first: 10) { items { code createdAt rolledAt } } }`;
+  const ISO = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/;
+
+  it('shows when a party started, and when its dice were rolled once the host closes it', async () => {
+    const before = Date.now();
+    const host = await person('host');
+    const guest = await person('guest');
+    const party = await createParty(host, 'Timed');
+    await joinParty(guest, party, 'Guest');
+
+    const open = (await gql(TIMES, { code: party.code })).data.party;
+    expect(open.createdAt).toMatch(ISO);
+    expect(Date.parse(open.createdAt)).toBeGreaterThanOrEqual(before - 1000);
+    expect(open.rolledAt).toBeNull();
+    expect((await gql(HISTORY_TIMES, {}, { token: guest.token })).data.partyHistory.items).toEqual([
+      { code: party.code, createdAt: open.createdAt, rolledAt: null },
+    ]);
+
+    const closed = (await gql(CLOSE_PARTY, { party: party.id }, { token: host.token })).data.parties.closeParty.node;
+    expect(closed.isClosed).toBe(true);
+    const rolledAt = (await gql(TIMES, { code: party.code }, { token: guest.token })).data.party.rolledAt;
+    expect(rolledAt).toMatch(ISO);
+    expect(Date.parse(rolledAt)).toBeGreaterThanOrEqual(Date.parse(open.createdAt));
+
+    await settleParty(party.code);
+    for (const p of [host, guest]) {
+      expect((await gql(HISTORY_TIMES, {}, { token: p.token })).data.partyHistory.items).toEqual([
+        { code: party.code, createdAt: open.createdAt, rolledAt },
+      ]);
+    }
+  });
+
+  it('shows no roll time for a summary saved before roll times were kept', async () => {
+    const host = await person('host');
+    const guest = await person('guest');
+    const party = await createParty(host, 'Old');
+    await joinParty(guest, party, 'Guest');
+    await gql(CLOSE_PARTY, { party: party.id }, { token: host.token });
+    await settleParty(party.code);
+    await runInDurableObject(env.USER.getByName(guest.email), async (_i, state) => {
+      state.storage.sql.exec('UPDATE parties SET closed_at = NULL');
+    });
+    const [item] = (await gql(HISTORY_TIMES, {}, { token: guest.token })).data.partyHistory.items;
+    expect(item).toMatchObject({ code: party.code, createdAt: expect.stringMatching(ISO), rolledAt: null });
   });
 });

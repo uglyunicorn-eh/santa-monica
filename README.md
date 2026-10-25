@@ -18,7 +18,7 @@ Keeping Durable Object calls low:
 - Each `UserDO` keeps a summary of the user's parties (name, host, protected, closed), so "my parties" is one call. Fields the summary doesn't have (participants, target, password) are loaded from the party only when a query asks for them, at most once per party per request.
 - A party updates its members' summaries through its outbox. All of a user's queued changes go out in one `UserDO.apply` call, built from the party's current state when it's sent.
 - The session token is checked once per request. Joining uses the session's email and doesn't read the profile.
-- Party history (`partyHistory`) is paged from the same summaries: one call per page.
+- Party history (`partyHistory`) is paged from the same summaries: one call per page. The summaries also carry when each party started and was drawn (`createdAt`, `rolledAt`).
 - Deleting an account or changing its email makes one call to each of the user's parties, plus two (deletion) or four (email change) to the user's `UserDO`s.
 - Revoked sessions (deleted accounts, see below) are not checked against the `UserDO` on every request, only where a call to it happens anyway: reading the profile (`user`), `createParty` (in `UserDO.startHosting`), `updateName`, and joining, where the party sends the session along with its update to the user, before storing the membership.
 - `test/unit/efficiency.test.ts` counts the calls each operation makes.
