@@ -6,10 +6,11 @@ import { action } from 'src/api/action';
 import { ApiContext, ApiEnv, RequestSession, clientIp, jwtFor } from 'src/api/context';
 import { fail, notSignedIn } from 'src/api/errors';
 import { idempotencyKey, keyHash, readBody, readQuery, send } from 'src/api/input';
+import { liveRequest, passUpgrade } from 'src/api/live';
 import { listParties } from 'src/api/party';
 import { ADDRESS_QUOTA, NOTICE_QUOTA, emailRateLimit, tooManyForAddress } from 'src/api/rateLimit';
 import { requireSession } from 'src/api/session';
-import { accepted, bodies, linkAccount, partyPage, queries, session as sessionJson, tokens, user as userJson } from 'src/api/schemas';
+import { accepted, bodies, linkAccount, unrevealedParties, partyPage, queries, session as sessionJson, tokens, user as userJson } from 'src/api/schemas';
 import { AccountDeletionToken, EmailChangeCancelToken, EmailChangeToken } from 'src/api/types';
 import { issueSession, sendCourtesyMail, sendRequestedMail } from 'src/api/users';
 import type { MailQuota } from 'src/do/UserDO';
@@ -61,6 +62,43 @@ me.get('/parties', requireSession, action('partyHistory', async (c, span) => {
   }
   span.setAttributes({ 'parties.first': first, 'parties.count': page.count, 'parties.refreshed': page.refreshed, 'parties.has_more': page.hasMore });
   return send(c, partyPage, { items: page.items, hasMore: page.hasMore, endCursor: page.endCursor });
+}));
+
+/**
+ * Rolled parties the user hasn't revealed their name in yet (from the last month, newest first, at most 10): the home
+ * screen reminds them. One call to the user.
+ */
+me.get('/parties/unrevealed', requireSession, action('unrevealedParties', async c => {
+  const s = session(c);
+  const items = await c.env.USER.getByName(s.email).unrevealed(s);
+  if (!items) {
+    throw notSignedIn();
+  }
+  return send(c, unrevealedParties, { items });
+}));
+
+/** Records that the user revealed their name in a rolled party (the gnome told them). One call to the user. */
+me.post('/parties/revealed', requireSession, action('partyRevealed', async c => {
+  const { code } = await readBody(c, bodies.partyAction);
+  const s = session(c);
+  const done = await c.env.USER.getByName(s.email).markRevealed(code, s);
+  if (done === null) {
+    throw notSignedIn();
+  }
+  if (!done) {
+    throw fail('not_found', 'You have no rolled party with this code.', 'code');
+  }
+  return send(c, accepted, { ok: true });
+}));
+
+/**
+ * The user's own live updates (a WebSocket, see src/api/live.ts): `party.rolled` when a party of theirs rolls, and
+ * `party.revealed` when they reveal their name in one (in any tab). One call to the user.
+ */
+me.get('/live', action('watchMe', async c => {
+  const { email, request } = await liveRequest(c);
+  const answer = await c.env.USER.getByName(email).fetch(request);
+  return passUpgrade(answer, () => fail('unauthenticated', 'This live-updates ticket is no longer valid.', 'ticket'));
 }));
 
 /**

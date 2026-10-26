@@ -305,6 +305,14 @@ export const partyPage = v.object({
   endCursor: v.nullable(v.string()),
 });
 
+/** Rolled parties waiting for the user to reveal their name, as the home screen shows them. */
+export const unrevealedParties = v.object({
+  items: v.array(v.pipe(
+    v.object({ slug: v.string(), name: v.string(), closedAt: v.number() }),
+    v.transform(p => ({ code: p.slug, name: p.name, closedAt: iso(p.closedAt) })),
+  )),
+});
+
 /** A ticket for opening a live-updates WebSocket. */
 export const liveTicket = v.object({ ticket: v.string() });
 
