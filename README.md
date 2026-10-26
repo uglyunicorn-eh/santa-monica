@@ -135,3 +135,7 @@ rm jwt.pem
 ## Operations
 
 Logs (`console.*` and Cloudflare's request logs) and traces go to Workers Logs, and can be exported over OpenTelemetry through the destinations named in `wrangler.jsonc`. Every route runs in a span named `api.<action>` (`api.createParty`, `api.joinParty`, `api.party`, …) with the action, the internal user id, the outcome (`api.status`, `api.error_code`) and details such as `party.ref`; Durable Object calls show up as child spans. An unexpected error returns a 500 with an `errorId`, logged with the error (`message: "Unhandled error"`).
+
+## Credits
+
+The open-source libraries this API uses are listed in [CREDITS.md](CREDITS.md).
