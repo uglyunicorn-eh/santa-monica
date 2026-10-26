@@ -268,8 +268,11 @@ describe('POST /v1/me/deletion/confirm', () => {
     const k = key();
     expect((await request('POST', '/v1/me/deletion/confirm', { key: k, body: { token } })).status).toBe(200);
     expect((await request('POST', '/v1/me/deletion/confirm', { key: k, body: { token } })).status).toBe(200);
-    // The alarm is set for now; run it in case it hasn't fired yet.
-    await runDurableObjectAlarm(env.USER.getByName(who.email));
+    // The alarm is set for now and may already be running: give it a moment, running it ourselves if it hasn't fired.
+    for (let i = 0; i < 50 && sent.length === 0; i++) {
+      await runDurableObjectAlarm(env.USER.getByName(who.email));
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
     expect(sent).toEqual([{ to: who.email, subject: 'Your Anonymous Ded Morozes account is deleted' }]);
     expect(await env.USER.getByName(who.email).pendingOutbox()).toBe(0);
   });
