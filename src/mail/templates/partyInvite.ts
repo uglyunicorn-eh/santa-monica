@@ -9,7 +9,7 @@ export const html = layout({
   preheader: '{{host.name}} invites you to {{party.name}}. Join in, and a gnome will tell you whom you give a gift to.',
   header: 'greeting',
   title: "You're invited!",
-  body: p('<strong>{{host.name}}</strong> invites you to <strong>{{party.name}}</strong>, a Secret Santa party on Gnomik.')
+  body: p('<strong>{{host.name}}</strong> invites you to <strong>{{party.name}}</strong>, a Secret Santa party with Gnomik.')
     + p('Join in, and once everyone is there, our elves will draw names: each of you gets one person to surprise with a gift.')
     + p('{{phraseNote}}'),
   action: { label: '🎉 Join the party', url: '{{party.url}}', color: actionTones.go.actionColor, textColor: actionTones.go.actionTextColor },
@@ -20,7 +20,7 @@ export const text = `{{host.name}} invites you to {{party.name}}. Join in, and a
 
 You're invited!
 
-{{host.name}} invites you to {{party.name}}, a Secret Santa party on Gnomik.
+{{host.name}} invites you to {{party.name}}, a Secret Santa party with Gnomik.
 
 Join in, and once everyone is there, our elves will draw names: each of you gets one person to surprise with a gift.
 
