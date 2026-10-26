@@ -14,7 +14,7 @@ const gmailUser = () => uniqueEmail('g').split('@')[0].replaceAll('-', '');
 /** The same Gmail user name with a dot after its first letter. */
 const dotted = (id: string) => `${id.slice(0, 1)}.${id.slice(1)}`;
 
-const tokenFrom = (text: string, path: string) => new RegExp(`/${path}/([\\w-]+\\.[\\w-]+\\.[\\w-]+)`).exec(text)![1];
+const tokenFrom = (text: string, path: string) => new RegExp(`/${path}#([\\w-]+\\.[\\w-]+\\.[\\w-]+)`).exec(text)![1];
 const signInLink = (payload: { email: string; typed?: string }) =>
   jwt().issueToken<EnterRequestToken>('EnterRequest', { ...payload, jti: crypto.randomUUID() } as EnterRequestToken, { ttl: 300 });
 const enter = (token: string) => request('POST', '/v1/auth/session', { body: { token } });
@@ -53,7 +53,7 @@ describe('signing in with a Gmail address', () => {
       expect((await request('POST', '/v1/auth/magic-link', { body: { email: spelling }, env: testEnv({ EMAIL }) })).status).toBe(202);
     }
     expect(sent.map(m => m.to)).toEqual([email, email]);
-    const [spelled, plain] = sent.map(m => tokenFrom(m.text, 'enter'));
+    const [spelled, plain] = sent.map(m => tokenFrom(m.text, 'enter/link'));
     expect(await jwt().jwtVerify<EnterRequestToken>(spelled, 'EnterRequest')).toMatchObject({ email, typed: `${dotted(id)}+santa@googlemail.com` });
     expect(await jwt().jwtVerify<EnterRequestToken>(plain, 'EnterRequest')).not.toHaveProperty('typed');
 
