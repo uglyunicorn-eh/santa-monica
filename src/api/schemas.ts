@@ -194,6 +194,7 @@ export const tokens = {
     sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), newEmail: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number(), ver: v.number(),
   }),
   emailChangeCancel: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number() }),
+  liveTicket: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), ver: v.optional(v.number()), exp: v.number() }),
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -303,6 +304,12 @@ export const partyPage = v.object({
   hasMore: v.boolean(),
   endCursor: v.nullable(v.string()),
 });
+
+/** A ticket for opening a live-updates WebSocket. */
+export const liveTicket = v.object({ ticket: v.string() });
+
+/** `?ticket=` on a live-updates WebSocket request, length-limited before anything verifies it. */
+export const liveQuery = v.object({ ticket: token });
 
 /** "Accepted": the email is on its way, or the request was already done. */
 export const accepted = v.object({ ok: v.literal(true) });

@@ -5,6 +5,7 @@ import { action } from 'src/api/action';
 import { ApiContext, ApiEnv, RequestSession, clientIp } from 'src/api/context';
 import { fail, notSignedIn } from 'src/api/errors';
 import { idempotencyKey, readBody, readPartyCode, send } from 'src/api/input';
+import { liveRequest, passUpgrade } from 'src/api/live';
 import { admitLegacyCode } from 'src/api/rateLimit';
 import { PARTY_CODE_ALPHABET, PARTY_CODE_LENGTH, bodies, party as partyJson } from 'src/api/schemas';
 import { optionalSession, requireSession } from 'src/api/session';
@@ -220,4 +221,16 @@ parties.post('/restore', requireSession, action('restoreParty', async c => {
     await verified(c);
   }
   return sendParty(c, await stub.restore(s.userId, reservation));
+}));
+
+/**
+ * Live updates for a party (a WebSocket, see src/api/live.ts): `{"type":"party.changed"}` after every change, then
+ * the client fetches its view again. Only members (and the host of a deleted party, who can still restore it) may
+ * watch; anyone else, and a party that doesn't exist, is refused alike.
+ */
+parties.get('/live', action('watchParty', async c => {
+  const code = readPartyCode(c);
+  const { request } = await liveRequest(c);
+  const answer = await c.env.PARTY.getByName(code).fetch(request);
+  return passUpgrade(answer, () => fail('forbidden', 'Only the party\'s members can watch it.', 'party'));
 }));
