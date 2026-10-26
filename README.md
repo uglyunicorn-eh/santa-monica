@@ -74,6 +74,7 @@ JSON in, JSON out. A signed-in request sends `Authorization: Bearer <session tok
 | Open parties per host | 3 | `src/api/routes/parties.ts` |
 | People per party | 100, host included; a join after that is refused with "This party is full" | `MAX_PARTY_MEMBERS` in `src/do/PartyDO.ts` |
 | New parties per person | 10 a day, deleted ones included (restoring one doesn't count) | `MAX_NEW_PARTIES_PER_DAY`, counted by `UserDO` |
+| Names | 32 characters for a person (profile and join name), 48 for a party; names saved before keep their length | `src/api/limits.ts` |
 | Request body | 16 KB | `src/api/limits.ts` |
 
 Cloudflare's rate limits are counted per location and approximately; the phrase, new-party and per-address email limits are counted exactly by the Durable Objects. The hourly email cap is a trade-off: someone who knows an address can use up its emails, but only for an hour.
