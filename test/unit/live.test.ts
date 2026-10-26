@@ -1,5 +1,5 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { app } from 'src/index';
 import { RESTORE_WINDOW_MS } from 'src/do/PartyDO';
@@ -29,8 +29,6 @@ async function watcher(code: string, token: string) {
   return { ws, got, closed };
 }
 
-/** Lets queued socket events arrive. */
-const settle = () => new Promise(resolve => setTimeout(resolve, 50));
 const CHANGED = JSON.stringify({ type: 'party.changed' });
 
 describe('POST /v1/live/ticket', () => {
@@ -69,16 +67,18 @@ describe('GET /v1/parties/live', () => {
     const { code } = await createParty(host.token);
     const hosts = await watcher(code, host.token);
     expect((await join(guest.token, code)).status).toBe(200);
-    await settle();
-    expect(hosts.got).toEqual([CHANGED]);
+    await vi.waitFor(() => {
+      expect(hosts.got).toEqual([CHANGED]);
+    });
 
     const guests = await watcher(code, guest.token);
     guests.ws.send('hello');
     guests.ws.send('ping');
     expect((await request('POST', '/v1/parties/draw', { token: host.token, body: { code } })).status).toBe(200);
-    await settle();
-    expect(hosts.got).toEqual([CHANGED, CHANGED]);
-    expect(guests.got).toEqual(['pong', CHANGED]);
+    await vi.waitFor(() => {
+      expect(hosts.got).toEqual([CHANGED, CHANGED]);
+      expect(guests.got).toEqual(['pong', CHANGED]);
+    });
   });
 
   it('ends the updates of a member who leaves, and of guests when the host deletes; the host keeps watching', async () => {
@@ -93,23 +93,26 @@ describe('GET /v1/parties/live', () => {
     const others = await watcher(code, other.token);
 
     expect((await request('POST', '/v1/parties/leave', { token: guest.token, body: { code } })).status).toBe(200);
-    await settle();
-    expect(guests.closed.code).toBe(4403);
-    expect(hosts.got).toEqual([CHANGED]);
+    await vi.waitFor(() => {
+      expect(guests.closed.code).toBe(4403);
+      expect(hosts.got).toEqual([CHANGED]);
+    });
 
     expect((await request('POST', '/v1/parties/delete', { token: host.token, body: { code } })).status).toBe(200);
-    await settle();
-    expect(others.closed.code).toBe(4410);
-    expect(hosts.closed.code).toBeUndefined();
-    expect(hosts.got).toEqual([CHANGED, CHANGED]);
+    await vi.waitFor(() => {
+      expect(others.closed.code).toBe(4410);
+      expect(hosts.closed.code).toBeUndefined();
+      expect(hosts.got).toEqual([CHANGED, CHANGED]);
+    });
 
     // A refused change tells no one; the host can still watch the deleted party, and sees it restored.
     expect((await request('POST', '/v1/parties/delete', { token: other.token, body: { code } })).status).toBe(404);
     const again = await watcher(code, host.token);
     expect((await request('POST', '/v1/parties/restore', { token: host.token, body: { code } })).status).toBe(200);
-    await settle();
-    expect(again.got).toEqual([CHANGED]);
-    expect(hosts.got).toEqual([CHANGED, CHANGED, CHANGED]);
+    await vi.waitFor(() => {
+      expect(again.got).toEqual([CHANGED]);
+      expect(hosts.got).toEqual([CHANGED, CHANGED, CHANGED]);
+    });
   });
 
   it('ends everyone\'s updates when the party is erased after its restore window', async () => {
@@ -121,8 +124,9 @@ describe('GET /v1/parties/live', () => {
       state.storage.sql.exec('UPDATE party SET deleted_at = ?', Date.now() - RESTORE_WINDOW_MS - 1000);
     });
     await runDurableObjectAlarm(env.PARTY.getByName(code));
-    await settle();
-    expect(hosts.closed.code).toBe(4410);
+    await vi.waitFor(() => {
+      expect(hosts.closed.code).toBe(4410);
+    });
   });
 
   it('ends a deleted account\'s updates: the others are told, or all end with a party deleted with it', async () => {
@@ -135,15 +139,17 @@ describe('GET /v1/parties/live', () => {
     const stub = env.PARTY.getByName(code);
 
     expect(await stub.forgetMember(guest.id, guest.email)).toBe('left');
-    await settle();
-    expect(guests.closed.code).toBe(4403);
-    expect(hosts.got).toEqual([CHANGED]);
+    await vi.waitFor(() => {
+      expect(guests.closed.code).toBe(4403);
+      expect(hosts.got).toEqual([CHANGED]);
+    });
 
     expect(await stub.forgetMember('nobody', 'nobody@example.com')).toBe('none');
     expect(await stub.forgetMember(host.id, host.email)).toBe('deleted');
-    await settle();
-    expect(hosts.closed.code).toBe(4410);
-    expect(hosts.got).toEqual([CHANGED]);
+    await vi.waitFor(() => {
+      expect(hosts.closed.code).toBe(4410);
+      expect(hosts.got).toEqual([CHANGED]);
+    });
   });
 
   it('copes with a socket that closed already when telling or ending', async () => {
@@ -152,7 +158,7 @@ describe('GET /v1/parties/live', () => {
     const { code } = await createParty(host.token);
     const hosts = await watcher(code, host.token);
     hosts.ws.close(1000, 'bye');
-    await settle();
+    await new Promise(resolve => setTimeout(resolve, 50)); // the party may still list it while it closes
     expect((await join(guest.token, code)).status).toBe(200);
     expect((await request('POST', '/v1/parties/delete', { token: host.token, body: { code } })).status).toBe(200);
   });

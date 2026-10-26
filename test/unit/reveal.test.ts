@@ -1,5 +1,5 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { app } from 'src/index';
 import { REVEAL_REMINDER_MS, UserDO } from 'src/do/UserDO';
@@ -73,8 +73,8 @@ describe('GET /v1/me/parties/unrevealed and POST /v1/me/parties/revealed', () =>
       state.storage.sql.exec('UPDATE parties SET deleted_at = NULL');
       state.storage.sql.exec('ALTER TABLE parties DROP COLUMN revealed_at');
       new (instance.constructor as new (ctx: DurableObjectState, e: typeof env) => UserDO)(state, env);
-      await new Promise(resolve => setTimeout(resolve, 20)); // the constructor migrates in blockConcurrencyWhile
-      expect(state.storage.sql.exec('SELECT revealed_at FROM parties WHERE slug = ?', code).one().revealed_at).toBe(0);
+      // The constructor migrates in blockConcurrencyWhile.
+      await vi.waitFor(() => expect(state.storage.sql.exec('SELECT revealed_at FROM parties WHERE slug = ?', code).one().revealed_at).toBe(0));
     });
     expect(await unrevealed(guest.token)).toEqual([]);
   });
@@ -121,22 +121,25 @@ describe('GET /v1/me/live', () => {
     await draw(host.token, code);
     await settle(code);
     await reveal(guest.token, code);
-    await new Promise(resolve => setTimeout(resolve, 50));
-    expect(guests.got).toEqual(['pong', { type: 'party.rolled', code, name: 'Live one' }, { type: 'party.revealed', code }]);
+    await vi.waitFor(() => {
+      expect(guests.got).toEqual(['pong', { type: 'party.rolled', code, name: 'Live one' }, { type: 'party.revealed', code }]);
+    });
   });
 
   it('ends the updates when the user signs out everywhere, cancels an email change, or deletes the account', async () => {
     const a = await signIn();
     const as = await watcher(a.token);
     expect((await request('POST', '/v1/me/sign-out', { token: a.token })).status).toBe(200);
-    await new Promise(resolve => setTimeout(resolve, 50));
-    expect(as.closed.code).toBe(4401);
+    await vi.waitFor(() => {
+      expect(as.closed.code).toBe(4401);
+    });
 
     const b = await signIn();
     const bs = await watcher(b.token);
     expect(await env.USER.getByName(b.email).cancelAccountChange(b.id, crypto.randomUUID(), Date.now() + 60_000)).toBe('cancelled');
-    await new Promise(resolve => setTimeout(resolve, 50));
-    expect(bs.closed.code).toBe(4401);
+    await vi.waitFor(() => {
+      expect(bs.closed.code).toBe(4401);
+    });
 
     const c = await signIn();
     const cs = await watcher(c.token);
