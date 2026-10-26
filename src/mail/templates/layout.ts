@@ -1,4 +1,4 @@
-// The one layout every email uses, styled like the site (santa-barbara's docs/design-spec.md): a white card on a light
+// The one layout every email uses, styled like the site (santa-barbara's docs/ui-kit.md): a white card on a light
 // grey page, the Cuprum font (Trebuchet where a mail app can't load it), teal links, and the content screens' buttons.
 // What goes in may hold {{placeholders}}; render() fills them later, HTML-escaping the values.
 
