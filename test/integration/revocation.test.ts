@@ -16,6 +16,7 @@ type Fixture = { host: Person; party: { code: string }; drawn: { code: string };
 const ROUTES: Record<string, { revoked: 'unauthenticated' | 'anonymous' | 'no session'; call?: (f: Fixture, token: string) => Promise<{ status: number; body: any }> }> = {
   'POST /auth/magic-link': { revoked: 'no session' },
   'POST /auth/session': { revoked: 'no session' },
+  'POST /me/deletion/check': { revoked: 'no session' },
   'POST /me/deletion/confirm': { revoked: 'no session' },
   'POST /me/email-change/confirm': { revoked: 'no session' },
   'POST /me/email-change/cancel': { revoked: 'no session' },

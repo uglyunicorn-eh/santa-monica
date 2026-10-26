@@ -1,5 +1,6 @@
 import { Env } from 'src/env';
 
+import * as accountDeleted from './templates/accountDeleted';
 import * as accountDeletion from './templates/accountDeletion';
 import * as emailChange from './templates/emailChange';
 import * as emailChangeNotice from './templates/emailChangeNotice';
@@ -43,6 +44,9 @@ export const renderSignIn = ({ magicLink, assetsUrl }: { magicLink: string; asse
 
 export const renderPartyNotification = ({ party, assetsUrl }: { party: { name: string; url: string }; assetsUrl: string }) =>
   render(partyNotification, { 'party.name': party.name, 'party.url': party.url, assetsUrl, assetsVersion });
+
+export const renderAccountDeleted = ({ assetsUrl }: { assetsUrl: string }) =>
+  render(accountDeleted, { ...accountDeleted.vars, assetsUrl, assetsVersion });
 
 export const renderAccountDeletion = ({ url, assetsUrl }: { url: string; assetsUrl: string }) =>
   render(accountDeletion, { ...accountDeletion.vars, url, assetsUrl, assetsVersion });

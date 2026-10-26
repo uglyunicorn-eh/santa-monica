@@ -51,6 +51,14 @@ describe('deleting an account', () => {
 
     await settleParty(mine.code);
     expect((await myParties(friend)).body.items.map(p => p.code).sort()).toEqual([theirs.code, drawn.code].sort());
+
+    // And a last email says it's done (sent by the account's alarm).
+    let farewell: string[] = [];
+    for (let i = 0; i < 50 && farewell.length === 0; i++) {
+      farewell = (await mailbox(who.email)).map(m => m.subject).filter(s => s === 'Your Anonymous Ded Morozes account is deleted');
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    expect(farewell).toHaveLength(1);
   });
 
   it('sends one link for a repeated request, and answers a repeated confirmation the same', async () => {
@@ -58,7 +66,7 @@ describe('deleting an account', () => {
     const key = newKey();
     await requestDeletion(who, key);
     const token = await requestDeletion(who, key);
-    expect((await mailbox(who.email)).filter(m => m.text?.includes('/profile/delete/'))).toHaveLength(1);
+    expect((await mailbox(who.email)).filter(m => m.text?.includes('/profile/delete#'))).toHaveLength(1);
 
     const confirmKey = newKey();
     expect(await confirmDeletion(token, { key: confirmKey })).toEqual({ status: 200, body: { ok: true } });

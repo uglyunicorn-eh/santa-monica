@@ -1,9 +1,11 @@
 import { DurableObject } from 'cloudflare:workers';
 
 import { Env } from 'src/env';
+import { renderAccountDeleted, sendMail } from 'src/mail';
 import { newObjectId } from 'src/utils/ids';
 import { Session, sessionMatches } from 'src/utils/session';
 
+import { Outbox } from './outbox';
 import { HostingStart, PartyListCursor, UserPartyListItem, UserPartyRecord, UserRecord, UserUpdate } from './types';
 
 type UserRow = {
@@ -16,6 +18,9 @@ type UserRow = {
   /** Set while the account is being deleted or moved to another email (see `startAccountChange`). */
   changing_until?: number | null;
 };
+
+/** Mail the account sends about itself, queued with the change it reports and retried until it goes out. */
+type OutboxMessage = { kind: 'mail.accountDeleted'; email: string };
 
 /** How long an account change holds the account at most, in case the request running it never finishes. */
 const ACCOUNT_CHANGE_MS = 60 * 1000;
@@ -97,10 +102,12 @@ export type MailQuota = { limit: number; always?: boolean };
  */
 export class UserDO extends DurableObject<Env> {
   private sql: SqlStorage;
+  private outbox: Outbox<OutboxMessage>;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
+    this.outbox = new Outbox(this.sql, () => true, messages => this.deliver(messages));
     ctx.blockConcurrencyWhile(async () => {
       this.sql.exec(`
         CREATE TABLE IF NOT EXISTS user (
@@ -150,6 +157,12 @@ export class UserDO extends DurableObject<Env> {
           expires_at INTEGER NOT NULL,
           request_key TEXT,
           outcome TEXT
+        );
+        CREATE TABLE IF NOT EXISTS outbox (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          payload TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          next_attempt_at INTEGER NOT NULL
         );
       `);
       // Party rows stored before summaries existed stay null until refreshed; users get version 0, not deleted.
@@ -206,6 +219,22 @@ export class UserDO extends DurableObject<Env> {
     return this.sql
       .exec<{ request_key: string | null; outcome: string | null }>('SELECT request_key, outcome FROM used_magic_links WHERE jti = ?', jti)
       .toArray()[0] ?? null;
+  }
+
+  /**
+   * Whether an emailed account link (`jti`, for `userId`) can still be used, without using it: the same answers as
+   * `startAccountChange` gives before it changes anything. A change already running is `'ok'` here (it will finish or
+   * be released in a minute).
+   */
+  checkAccountChange(userId: string, jti: string, ver?: number): 'ok' | 'gone' | 'used' | 'stale' {
+    if (this.usedLink(jti)) {
+      return 'used';
+    }
+    const row = this.row();
+    if (!row || row.deleted_at !== null || row.id !== userId) {
+      return 'gone';
+    }
+    return ver !== undefined && ver !== row.token_version ? 'stale' : 'ok';
   }
 
   /**
@@ -359,16 +388,45 @@ export class UserDO extends DurableObject<Env> {
    * Deletes the account, leaving a tombstone: the profile and party list are wiped, and every session token issued
    * so far is revoked. An object without a user yet gets a tombstone too, so nothing can be written to it.
    */
-  tombstone(): void {
+  /**
+   * Deletes the account (see the class comment). With `notify`, the "it's officially over" email to the account's
+   * address is queued in the same transaction and sent by the alarm, with retries.
+   */
+  async tombstone(notify = false): Promise<void> {
     this.ctx.storage.transactionSync(() => {
       const now = Date.now();
-      if (this.row()) {
+      const row = this.row();
+      if (row) {
+        if (notify && row.deleted_at === null) {
+          this.outbox.add({ kind: 'mail.accountDeleted', email: row.email });
+        }
         this.sql.exec("UPDATE user SET name = '', deleted_at = ?, token_version = token_version + 1", now);
       } else {
         this.sql.exec("INSERT INTO user (id, email, name, joined, token_version, deleted_at) VALUES (?, '', '', ?, 1, ?)", newObjectId(), now, now);
       }
       this.sql.exec('DELETE FROM parties');
     });
+    if (this.outbox.pending()) {
+      await this.ctx.storage.setAlarm(Date.now());
+    }
+  }
+
+  private async deliver([message]: OutboxMessage[]) {
+    return await sendMail(this.env, message.email, renderAccountDeleted({ assetsUrl: this.env.PUBLIC_URL }));
+  }
+
+  /** Sends queued mail; a failed send is retried on the next alarm (see Outbox). */
+  async alarm() {
+    await this.outbox.process(() => true, false);
+    const next = this.outbox.nextAttemptAt();
+    if (next !== null) {
+      await this.ctx.storage.setAlarm(Math.max(next, Date.now()));
+    }
+  }
+
+  /** Number of undelivered outbox messages. Used by tests. */
+  pendingOutbox(): number {
+    return this.outbox.pending();
   }
 
   /**

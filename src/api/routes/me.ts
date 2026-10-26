@@ -9,7 +9,7 @@ import { idempotencyKey, keyHash, readBody, readQuery, send } from 'src/api/inpu
 import { listParties } from 'src/api/party';
 import { ADDRESS_QUOTA, NOTICE_QUOTA, emailRateLimit, tooManyForAddress } from 'src/api/rateLimit';
 import { requireSession } from 'src/api/session';
-import { accepted, bodies, partyPage, queries, session as sessionJson, tokens, user as userJson } from 'src/api/schemas';
+import { accepted, bodies, linkAccount, partyPage, queries, session as sessionJson, tokens, user as userJson } from 'src/api/schemas';
 import { AccountDeletionToken, EmailChangeCancelToken, EmailChangeToken } from 'src/api/types';
 import { issueSession, sendCourtesyMail, sendRequestedMail } from 'src/api/users';
 import type { MailQuota } from 'src/do/UserDO';
@@ -121,7 +121,7 @@ me.post('/deletion', requireSession, action('requestAccountDeletion', async c =>
     const token = await jwtFor(env).issueToken<AccountDeletionToken>('AccountDeletion', {
       sub: nodeIdToStr({ kind: 'User', id: user.id }), email: user.email, jti: crypto.randomUUID(), ver: user.tokenVersion,
     }, { ttl: LINK_TTL });
-    const message = renderAccountDeletion({ url: `${env.FRONTEND_URL}/profile/delete/${token}`, assetsUrl: env.PUBLIC_URL });
+    const message = renderAccountDeletion({ url: `${env.FRONTEND_URL}/profile/delete#${token}`, assetsUrl: env.PUBLIC_URL });
     await sendRequestedMail(env, user.email, message, undefined);
   });
 }));
@@ -200,7 +200,8 @@ async function verifyLink<S extends typeof tokens.accountDeletion | typeof token
 }
 
 /**
- * Deletes the account from the emailed link. Open parties the user hosts are deleted, open parties they joined are
+ * Deletes the account from the emailed link (after the page's typed confirmation), then sends the "it's officially
+ * over" email. Open parties the user hosts are deleted, open parties they joined are
  * left, and in drawn parties their membership is anonymized (see `PartyDO.forgetMember`). Then the UserDO is
  * tombstoned, which also revokes every session token. One call to each of the user's parties. If a party can't be
  * reached, the account stays and the link can be opened again: what was done already is not repeated. Repeating
@@ -234,8 +235,22 @@ me.post('/deletion/confirm', action('confirmAccountDeletion', async c => {
     throw notFinished();
   }
   annotate({ 'account.link': 'redeemed' });
-  await user.tombstone();
+  await user.tombstone(true);
   return send(c, accepted, { ok: true });
+}));
+
+/**
+ * Checks a deletion link without using it, so the page can refuse a dead link before anyone confirms, and show which
+ * account it deletes. Same errors as `/deletion/confirm`.
+ */
+me.post('/deletion/check', action('checkAccountDeletion', async c => {
+  const link = await verifyLink(c, 'AccountDeletion', tokens.accountDeletion);
+  const state = await c.env.USER.getByName(link.email).checkAccountChange(link.userId, link.jti, link.ver);
+  annotate({ 'account.link': state });
+  if (state !== 'ok') {
+    throw linkFailed[state]();
+  }
+  return send(c, linkAccount, { email: link.email });
 }));
 
 /**
