@@ -46,12 +46,13 @@ JSON in, JSON out. A signed-in request sends `Authorization: Bearer <session tok
 | `POST /v1/parties/join` `{code, name, password?}` | yes | Joins |
 | `POST /v1/parties/leave` `{code}` | yes | Leaves |
 | `POST /v1/parties/draw` `{code}` | yes | Draws (host only) |
+| `POST /v1/parties/invite` `{code, emails}` | yes | Emails invites to up to 10 addresses (host only, open parties): `{invited, alreadyInvited, alreadyJoined, invitesLeft}` |
 | `POST /v1/parties/delete` `{code}` | yes | Deletes an open party (host only); restorable for 24 hours |
 | `POST /v1/parties/restore` `{code}` | yes | Restores it (host only) |
 
 - **Errors** always answer `{ "error": { "code", "message", "field" } }`: 400 `invalid` / `invalid_link`, 401 `unauthenticated`, 403 `forbidden`, 404 `not_found`, 409 `conflict` / `link_used` / `account_busy`, 429 `rate_limited`, 503 `unavailable` / `not_finished`, and 500 `internal` with an `errorId` that is also logged with the error. **401 only ever means the session is missing, invalid or revoked**: the frontend signs out on it.
 - **Input and output are [valibot](https://valibot.dev) schemas** (`src/api/schemas.ts`). Bodies are strict objects of bounded, trimmed text fields (`src/api/limits.ts`; the web app's forms should use the same numbers); unknown fields and anything over a limit are refused by name. Responses are shaped from stored records by output schemas, so nothing else leaves the Worker.
-- **Every write is safe to repeat.** Joining, leaving, drawing, deleting, restoring and renaming answer with the current state when already done. Routes that send email or create something take an `Idempotency-Key` header (16–100 letters, digits, `-`, `_`): a repeat within ten minutes gets the same answer without sending or creating again. Emailed links are single-use, but the request that used one can repeat with the same key and get the same outcome.
+- **Every write is safe to repeat.** Joining, leaving, drawing, deleting, restoring and renaming answer with the current state when already done; an invite skips the addresses already invited that day. Routes that send email or create something take an `Idempotency-Key` header (16–100 letters, digits, `-`, `_`): a repeat within ten minutes gets the same answer without sending or creating again. Emailed links are single-use, but the request that used one can repeat with the same key and get the same outcome.
 - **A party code never appears in a URL path.** Writes send it in the body; `GET /v1/parties` takes it as `?code=`, which Cloudflare's request logs leave out (`redact_query_string`).
 
 ## Security
@@ -70,7 +71,8 @@ JSON in, JSON out. A signed-in request sends `Authorization: Bearer <session tok
 | Party codes tried per IP | 60 a minute; 10 a minute for 5-letter codes. Every route that takes a code counts (lookups and all party writes), since each one tells whether the party exists; so do sign-in links to 5-letter codes | `PARTY_LOOKUP_RATE_LIMIT_IP`, `LEGACY_CODE_LOOKUP_RATE_LIMIT_IP` |
 | Joins per user | 10 a minute | `JOIN_RATE_LIMIT_USER` |
 | Wrong secret phrases | 5 per person and 20 per party in 15 minutes; the right phrase always gets in | `src/do/PartyDO.ts` |
-| Emails | 10 a minute per IP, 3 a minute per address, and exactly 6 an hour per address | `ENTER_RATE_LIMIT_*`, `src/api/rateLimit.ts` |
+| Emails | 10 a minute per IP, 3 a minute per address, and exactly 6 an hour per address (invites included) | `ENTER_RATE_LIMIT_*`, `src/api/rateLimit.ts` |
+| Invites | Up to 10 addresses a request and 3 requests a minute per host; 50 per party in all; one per address per party a day | `INVITE_RATE_LIMIT_USER`, `MAX_PARTY_INVITES` in `src/do/PartyDO.ts` |
 | Open parties per host | 3 | `src/api/routes/parties.ts` |
 | People per party | 100, host included; a join after that is refused with "This party is full" | `MAX_PARTY_MEMBERS` in `src/do/PartyDO.ts` |
 | New parties per person | 10 a day, deleted ones included (restoring one doesn't count) | `MAX_NEW_PARTIES_PER_DAY`, counted by `UserDO` |

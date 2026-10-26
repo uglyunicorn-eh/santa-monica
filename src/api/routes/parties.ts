@@ -7,7 +7,8 @@ import { fail, notSignedIn } from 'src/api/errors';
 import { idempotencyKey, readBody, readPartyCode, send } from 'src/api/input';
 import { liveRequest, passUpgrade } from 'src/api/live';
 import { admitLegacyCode } from 'src/api/rateLimit';
-import { PARTY_CODE_ALPHABET, PARTY_CODE_LENGTH, bodies, party as partyJson } from 'src/api/schemas';
+import { PARTY_CODE_ALPHABET, PARTY_CODE_LENGTH, bodies, invites, party as partyJson } from 'src/api/schemas';
+import { canonicalEmail } from 'src/utils/email';
 import { optionalSession, requireSession } from 'src/api/session';
 import { PartyResult, PartyView } from 'src/do/types';
 import { newObjectId } from 'src/utils/ids';
@@ -60,7 +61,7 @@ async function admitCode(c: ApiContext, code: string) {
 }
 
 /** A party write's body, after the code passed `admitCode`. */
-async function readPartyWrite<S extends typeof bodies.partyAction | typeof bodies.joinParty>(c: ApiContext, schema: S) {
+async function readPartyWrite<S extends typeof bodies.partyAction | typeof bodies.joinParty | typeof bodies.invite>(c: ApiContext, schema: S) {
   const body = await readBody(c, schema);
   await admitCode(c, body.code);
   return body as v.InferOutput<S>;
@@ -188,6 +189,41 @@ parties.post('/draw', requireSession, action('closeParty', async c => {
   const { code } = await readPartyWrite(c, bodies.partyAction);
   const user = await verified(c);
   return sendParty(c, await c.env.PARTY.getByName(code).close(user.id));
+}));
+
+/**
+ * Emails invites to up to 10 addresses (host only, while the party is open). The party skips its members and anyone it
+ * invited in the last day, so a repeat sends nothing again, and it sends at most MAX_PARTY_INVITES in all. Each email
+ * also counts against its address's hourly cap when it goes out. Answers per address, as typed.
+ */
+parties.post('/invite', requireSession, action('inviteToParty', async c => {
+  const { code, emails } = await readPartyWrite(c, bodies.invite);
+  const s = session(c);
+  const { success } = await c.env.INVITE_RATE_LIMIT_USER.limit({ key: s.userId });
+  annotate({ 'party.invite_rate_limited': !success, 'party.invite_count': emails.length });
+  if (!success) {
+    throw fail('rate_limited', "That's a lot of invites at once. Please wait a minute and try again.", 'emails');
+  }
+  const user = await verified(c);
+  const typed = new Map<string, string>();
+  for (const email of emails) {
+    if (!typed.has(canonicalEmail(email))) {
+      typed.set(canonicalEmail(email), email);
+    }
+  }
+  const result = await c.env.PARTY.getByName(code).invite(user.id, [...typed.keys()]);
+  if (!result.ok) {
+    // Every refusal names its field ('party' or 'emails').
+    throw fail(result.error.code, result.error.message, result.error.fieldName!);
+  }
+  const asTyped = (list: string[]) => list.map(email => typed.get(email)!);
+  annotate({ 'party.invited': result.invited.length });
+  return send(c, invites, {
+    invited: asTyped(result.invited),
+    alreadyInvited: asTyped(result.alreadyInvited),
+    alreadyJoined: asTyped(result.alreadyJoined),
+    invitesLeft: result.invitesLeft,
+  });
 }));
 
 /** Deletes an open party (host only); it can be restored for a day. A repeat answers with the deleted party. */
