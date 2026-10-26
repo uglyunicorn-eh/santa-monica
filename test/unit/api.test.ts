@@ -16,8 +16,8 @@ import { denied, jwt, mailer, request, sessionToken, signIn, testEnv, uniqueEmai
 const key = () => crypto.randomUUID();
 const DAY = 24 * 60 * 60 * 1000;
 
-/** The token from the last link of `path` sent. */
-const tokenFrom = (text: string, path: string) => new RegExp(`/${path}/([\\w-]+\\.[\\w-]+\\.[\\w-]+)`).exec(text)![1];
+/** The token from the last link of `path` sent (after a `/`, or after `#` for links that keep it out of the URL path). */
+const tokenFrom = (text: string, path: string) => new RegExp(`/${path}[/#]([\\w-]+\\.[\\w-]+\\.[\\w-]+)`).exec(text)![1];
 
 const createParty = (token: string, name = 'Party', options: { password?: string; key?: string; env?: typeof env } = {}) =>
   request('POST', '/v1/parties', { token, key: options.key, env: options.env, body: { name, ...(options.password ? { password: options.password } : {}) } });
@@ -228,6 +228,84 @@ describe('POST /v1/me/deletion and /v1/me/email-change', () => {
 describe('POST /v1/me/deletion/confirm', () => {
   const deletionLink = (sub: string, email: string, jti = crypto.randomUUID(), ttl = 60) =>
     jwt().issueToken('AccountDeletion', { sub, email, jti, ver: 0 }, { ttl });
+
+  /** Records what the user's Durable Object emails. */
+  const userMail = async (email: string) => {
+    const sent: { to: string; subject: string }[] = [];
+    await runInDurableObject(env.USER.getByName(email), async (instance: unknown) => {
+      const self = instance as { env: object };
+      self.env = { ...self.env, EMAIL: { send: async (m: { to: string; subject: string }) => { sent.push({ to: m.to, subject: m.subject }); return { messageId: 'm' }; } } };
+    });
+    return sent;
+  };
+
+  it('checks a link without using it: the address while it works, the same errors as confirming after', async () => {
+    const who = await signIn();
+    const token = await deletionLink(who.nodeId, who.email);
+    expect(await request('POST', '/v1/me/deletion/check', { body: { token } })).toEqual(expect.objectContaining({ status: 200, body: { email: who.email } }));
+    expect(await request('POST', '/v1/me/deletion/check', { body: { token } })).toMatchObject({ status: 200 });
+    expect((await request('POST', '/v1/me/deletion/confirm', { key: key(), body: { token } })).status).toBe(200);
+    expect(await request('POST', '/v1/me/deletion/check', { body: { token } })).toMatchObject({ status: 409, body: { error: { code: 'link_used' } } });
+    expect(await request('POST', '/v1/me/deletion/check', { body: { token: await deletionLink(who.nodeId, who.email) } }))
+      .toMatchObject({ status: 400, body: { error: { message: 'This account no longer exists.' } } });
+    expect(await request('POST', '/v1/me/deletion/check', { body: { token: 'garbage' } })).toMatchObject({ status: 400, body: { error: { code: 'invalid_link' } } });
+  });
+
+  it('refuses checking a link voided by signing out everywhere', async () => {
+    const who = await signIn();
+    const token = await deletionLink(who.nodeId, who.email);
+    await runInDurableObject(env.USER.getByName(who.email), async (_instance, state) => {
+      state.storage.sql.exec('UPDATE user SET token_version = token_version + 1');
+    });
+    expect(await request('POST', '/v1/me/deletion/check', { body: { token } }))
+      .toMatchObject({ status: 400, body: { error: { message: expect.stringContaining('signed out everywhere') } } });
+  });
+
+  it('emails that it is officially over, once, after the account is gone', async () => {
+    const who = await signIn();
+    const sent = await userMail(who.email);
+    const token = await deletionLink(who.nodeId, who.email);
+    const k = key();
+    expect((await request('POST', '/v1/me/deletion/confirm', { key: k, body: { token } })).status).toBe(200);
+    expect((await request('POST', '/v1/me/deletion/confirm', { key: k, body: { token } })).status).toBe(200);
+    // The alarm is set for now; run it in case it hasn't fired yet.
+    await runDurableObjectAlarm(env.USER.getByName(who.email));
+    expect(sent).toEqual([{ to: who.email, subject: 'Your Anonymous Ded Morozes account is deleted' }]);
+    expect(await env.USER.getByName(who.email).pendingOutbox()).toBe(0);
+  });
+
+  it('retries the farewell email when sending fails, and drops it on a permanent error', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const who = await signIn();
+    const stub = env.USER.getByName(who.email);
+    let failure: Error = Object.assign(new Error('try later'), { code: 'E_RATE_LIMIT_EXCEEDED' });
+    await runInDurableObject(stub, async (instance: unknown) => {
+      const self = instance as { env: object };
+      self.env = { ...self.env, EMAIL: { send: async () => { throw failure; } } };
+    });
+    await stub.tombstone(true);
+    await runDurableObjectAlarm(stub);
+    expect(await stub.pendingOutbox()).toBe(1);
+    await runInDurableObject(stub, async (_instance, state) => {
+      expect(await state.storage.getAlarm()).toBeGreaterThan(Date.now());
+      state.storage.sql.exec('UPDATE outbox SET next_attempt_at = 0');
+    });
+    failure = Object.assign(new Error('suppressed'), { code: 'E_RECIPIENT_SUPPRESSED' });
+    await runInDurableObject(stub, async (instance: unknown) => (instance as { alarm: () => Promise<void> }).alarm());
+    expect(await stub.pendingOutbox()).toBe(0);
+    warn.mockRestore();
+    error.mockRestore();
+  });
+
+  it('emails nothing when the account was already gone, or when it only moved', async () => {
+    const who = await signIn();
+    const stub = env.USER.getByName(who.email);
+    await stub.tombstone();
+    await stub.tombstone(true);
+    expect(await stub.pendingOutbox()).toBe(0);
+    await env.USER.getByName(uniqueEmail()).tombstone(true);
+  });
 
   it('deletes the account, answers a repeat of the same request ok, and refuses anyone else', async () => {
     const who = await signIn();

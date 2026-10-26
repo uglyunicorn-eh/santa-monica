@@ -58,6 +58,7 @@ const BUDGETS: Record<string, { USER: number | string; PARTY: number | string }>
   'POST /me/deletion': { USER: 1, PARTY: 0 },
   'POST /me/sign-out': { USER: 1, PARTY: 0 },
   'POST /me/email-change': { USER: 2, PARTY: 0 },
+  'POST /me/deletion/check': { USER: 1, PARTY: 0 },
   'POST /me/deletion/confirm': { USER: 2, PARTY: '1 per party' },
   'POST /me/email-change/confirm': { USER: 4, PARTY: '1 per party' },
   'POST /me/email-change/cancel': { USER: 1, PARTY: 0 },
@@ -154,6 +155,15 @@ describe('Durable Object call budgets', () => {
     counting.reset();
     await request('POST', '/v1/me/email-change/cancel', { body: { token: 'garbage' }, env: counting.env });
     expect(counting.count()).toBe(0);
+  });
+
+  it('checking a deletion link: one call to the user, none to parties', async () => {
+    const who = await person();
+    await create(who.token, 'P');
+    const token = await jwt().issueToken('AccountDeletion', { sub: who.nodeId, email: who.email, jti: crypto.randomUUID(), ver: 0 }, { ttl: 60 });
+    const counting = countingEnv();
+    expect((await request('POST', '/v1/me/deletion/check', { body: { token }, env: counting.env })).status).toBe(200);
+    expect([counting.count('USER'), counting.count('PARTY')]).toEqual([1, 0]);
   });
 
   it('confirming a deletion: two calls to the user and one per party, however many parties', async () => {

@@ -307,3 +307,6 @@ export const partyPage = v.object({
 /** "Accepted": the email is on its way, or the request was already done. */
 export const accepted = v.object({ ok: v.literal(true) });
 
+/** The account an emailed link is for. */
+export const linkAccount = v.object({ email: v.string() });
+

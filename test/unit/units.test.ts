@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { renderAccountDeletion, renderEmailChange, renderEmailChangeNotice, renderEmailTakenNotice, renderPartyNotification, renderSignIn } from 'src/mail';
+import { renderAccountDeleted, renderAccountDeletion, renderEmailChange, renderEmailChangeNotice, renderEmailTakenNotice, renderPartyNotification, renderSignIn } from 'src/mail';
 import { newObjectId } from 'src/utils/ids';
 import santaShuffle from 'src/utils/santaShuffle';
 import { nodeIdToStr, strToNodeId } from 'src/utils/strings/nodeId';
@@ -91,7 +91,11 @@ describe('mail templates', () => {
     expect(taken.text).toContain('another Anonymous Ded Morozes account to a&b@example.com');
     expect(taken.html).toContain('a&amp;b@example.com');
     expect([...taken.html.matchAll(/href="([^"]*)"/g)].map(m => m[1])).toEqual(['https://uglyunicorn.ca/']);
-    for (const mail of [deletion, change, notice, taken]) {
+    const deleted = renderAccountDeleted({ assetsUrl: 'https://api.test' });
+    expect(deleted.subject).toBe('Your Anonymous Ded Morozes account is deleted');
+    expect(deleted.text).toContain("It's officially over");
+    expect([...deleted.html.matchAll(/href="([^"]*)"/g)].map(m => m[1])).toEqual(['https://uglyunicorn.ca/']);
+    for (const mail of [deletion, change, notice, taken, deleted]) {
       expect(`${mail.subject}${mail.html}${mail.text}`).not.toMatch(/\{\{|ACTION_ROW/);
     }
   });

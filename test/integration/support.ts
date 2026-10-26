@@ -67,9 +67,12 @@ export async function mailbox(email: string): Promise<Mail[]> {
   return mails.sort((a, b) => a.sentAt - b.sentAt);
 }
 
-/** The token at the end of an emailed link to `path` (e.g. "enter", "profile/delete", "profile/email"). */
+/**
+ * The token at the end of an emailed link to `path` (e.g. "enter", "profile/delete", "profile/email"), after a `/` or,
+ * for links that keep it out of the URL path, a `#`.
+ */
 export function linkToken(mail: Mail, path: string): string {
-  const match = new RegExp(`${FRONTEND.replace(/[.]/g, '\\.')}/${path}/([\\w-]+\\.[\\w-]+\\.[\\w-]+)`).exec(mail.text ?? '');
+  const match = new RegExp(`${FRONTEND.replace(/[.]/g, '\\.')}/${path}[/#]([\\w-]+\\.[\\w-]+\\.[\\w-]+)`).exec(mail.text ?? '');
   if (!match) {
     throw new Error(`No ${path} link in the email`);
   }
@@ -86,12 +89,14 @@ export const redeem = (token: string, options: CallOptions = {}) =>
 
 /** Signs in the way a person does: request a magic link, read the email, follow the link. */
 export async function signIn(email: string, party?: string) {
-  const before = (await mailbox(email)).length;
+  // Only sign-in emails count: others (e.g. "your account is deleted") can arrive in between.
+  const signInMails = async () => (await mailbox(email)).filter(m => m.text?.includes(`${FRONTEND}/enter/`));
+  const before = (await signInMails()).length;
   const requested = await requestMagicLink(email, { party });
   if (requested.status !== 202) {
     throw new Error(`magic link failed: ${JSON.stringify(requested.body)}`);
   }
-  const mails = await mailbox(email);
+  const mails = await signInMails();
   if (mails.length !== before + 1) {
     throw new Error(`Expected one new sign-in email for ${email}, got ${mails.length - before}`);
   }
