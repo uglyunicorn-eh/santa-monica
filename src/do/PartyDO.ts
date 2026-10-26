@@ -6,6 +6,7 @@ import santaShuffle from 'src/utils/santaShuffle';
 import { Session, sessionMatches } from 'src/utils/session';
 
 import { newObjectId } from 'src/utils/ids';
+import { LIVE_USER_HEADER } from 'src/api/live';
 import { Outbox } from './outbox';
 
 import { CreatePartyInput, ForgetMemberResult, Member, PartyErrorCode, PartyResult, PartyView, UserPartyRecord, UserRecord, UserUpdate } from './types';
@@ -69,6 +70,13 @@ export const PHRASE_GUESS_WINDOW_MS = 15 * 60 * 1000;
 export const MAX_PARTY_PHRASE_GUESSES = 20;
 /** People a party can hold, host included. Keeps its participant list, its emails and the draw a bounded size. */
 export const MAX_PARTY_MEMBERS = 100;
+
+/** What watchers get after a change: just that, so they fetch their own view (which differs per member). */
+const CHANGED = JSON.stringify({ type: 'party.changed' });
+
+/** Close codes for live updates: the watcher left (or their account is gone), or the party is gone for them. */
+export const LEFT = [4403, 'left the party'] as const;
+export const GONE = [4410, 'party is gone'] as const;
 /** The `phrase_guesses` row that counts the whole party's wrong guesses (member ids are never empty). */
 const WHOLE_PARTY = '';
 
@@ -98,6 +106,8 @@ export class PartyDO extends DurableObject<Env> {
     super(ctx, env);
     this.sql = ctx.storage.sql;
     this.outbox = new Outbox(this.sql, () => this.hasSchema(), messages => this.deliver(messages));
+    // Watchers' keep-alives are answered without waking the party.
+    ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
   }
 
   // The schema is created on the first write only, so looking up an unknown code does not store anything.
@@ -295,6 +305,107 @@ export class PartyDO extends DurableObject<Env> {
   }
 
   /** The party as this user sees it. A deleted party is visible only to its host, until it can't be restored. */
+  // -------------------------------------------------------------------------------------------------------------------
+  // Changes. Each one tells the party's watchers (see "Live updates" below) once it's done.
+
+  async join(member: Member, name: string, password: string | null, check?: JoinCheck): Promise<PartyResult> {
+    return this.told(await this.joinNow(member, name, password, check));
+  }
+
+  /** Leaving also ends the leaver's live updates. */
+  async leave(userId: string): Promise<PartyResult> {
+    const result = await this.leaveNow(userId);
+    if (result.ok) {
+      this.disconnect(LEFT, userId);
+    }
+    return this.told(result);
+  }
+
+  async close(userId: string): Promise<PartyResult> {
+    return this.told(await this.closeNow(userId));
+  }
+
+  /** Only the host can still see a deleted party (to restore it): everyone else stops watching. */
+  async delete(userId: string): Promise<PartyResult> {
+    const result = await this.deleteNow(userId);
+    if (result.ok) {
+      this.disconnect(GONE, ...this.watchers().filter(watcher => watcher !== userId));
+    }
+    return this.told(result);
+  }
+
+  async restore(userId: string, reservation?: string): Promise<PartyResult> {
+    return this.told(await this.restoreNow(userId, reservation));
+  }
+
+  /** A deleted account stops watching; a party deleted with it ends everyone's updates. */
+  async forgetMember(userId: string, email: string): Promise<ForgetMemberResult> {
+    const result = await this.forgetMemberNow(userId, email);
+    if (result === 'deleted') {
+      this.disconnect(GONE);
+    } else if (result !== 'none') {
+      this.disconnect(LEFT, userId);
+      this.broadcast();
+    }
+    return result;
+  }
+
+  // -------------------------------------------------------------------------------------------------------------------
+  // Live updates (src/api/live.ts). Watchers connect with the hibernation API (tagged with their user id) and get
+  // `{"type":"party.changed"}` after every change, then fetch their own view. "ping" is answered by the runtime without
+  // waking the party. Members may watch, and the host of a deleted party, who can still see it.
+
+  /** A WebSocket upgrade passed on by the Worker, for the user in LIVE_USER_HEADER. */
+  async fetch(request: Request): Promise<Response> {
+    const userId = request.headers.get(LIVE_USER_HEADER);
+    const party = this.party();
+    const mayWatch = userId && party && this.view(userId) && (party.host_id === userId || this.membership(userId));
+    if (!mayWatch || request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
+      return new Response(null, { status: 403 });
+    }
+    const { 0: client, 1: server } = new WebSocketPair();
+    this.ctx.acceptWebSocket(server, [userId]);
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  /** Watchers only listen (their keep-alive "ping" never reaches here): anything else they send is ignored. */
+  async webSocketMessage() {}
+
+  /** The user ids watching right now. */
+  private watchers(): string[] {
+    return [...new Set(this.ctx.getWebSockets().flatMap(ws => this.ctx.getTags(ws)))];
+  }
+
+  private broadcast() {
+    for (const ws of this.ctx.getWebSockets()) {
+      try {
+        ws.send(CHANGED);
+      } catch {
+        // Closing already; it's gone from the list next time.
+      }
+    }
+  }
+
+  /** Tells the watchers about a change that went through. */
+  private told<R extends { ok: boolean }>(result: R): R {
+    if (result.ok) {
+      this.broadcast();
+    }
+    return result;
+  }
+
+  /** Ends the live updates of these users (everyone, without any), with a close code the client can act on. */
+  private disconnect([code, reason]: readonly [number, string], ...userIds: string[]) {
+    const sockets = userIds.length ? userIds.flatMap(id => this.ctx.getWebSockets(id)) : this.ctx.getWebSockets();
+    for (const ws of sockets) {
+      try {
+        ws.close(code, reason);
+      } catch {
+        // Closing already.
+      }
+    }
+  }
+
   view(userId?: string): PartyView | null {
     const party = this.party();
     if (!party || (party.deleted_at && (party.host_id !== userId || this.restoreExpired(party)))) {
@@ -361,7 +472,7 @@ export class PartyDO extends DurableObject<Env> {
    * session is checked on its own and the join goes through the outbox. If the user can't be reached, the join is
    * refused: it never goes through unchecked. Joins without `check` (only tests and internal callers) skip the check.
    */
-  async join(member: Member, name: string, password: string | null, check?: JoinCheck): Promise<PartyResult> {
+  private async joinNow(member: Member, name: string, password: string | null, check?: JoinCheck): Promise<PartyResult> {
     const party = this.liveParty();
     if (!party) {
       return fail('not_found', 'Party does not exist.', 'party');
@@ -487,7 +598,7 @@ export class PartyDO extends DurableObject<Env> {
     return { ok: true, view: this.buildView(current, member.id) };
   }
 
-  async leave(userId: string): Promise<PartyResult> {
+  private async leaveNow(userId: string): Promise<PartyResult> {
     const party = this.liveParty();
     if (!party) {
       return fail('not_found', 'Party does not exist.', 'party');
@@ -514,7 +625,7 @@ export class PartyDO extends DurableObject<Env> {
     return { ok: true, view: this.buildView(party, userId) };
   }
 
-  async close(userId: string): Promise<PartyResult> {
+  private async closeNow(userId: string): Promise<PartyResult> {
     const party = this.liveParty();
     if (!party) {
       return fail('not_found', 'Party does not exist.', 'party');
@@ -562,7 +673,7 @@ export class PartyDO extends DurableObject<Env> {
    * every member's list but the host's, and its link stops working. The host can restore it within
    * RESTORE_WINDOW_MS; after that the alarm erases it for good.
    */
-  async delete(userId: string): Promise<PartyResult> {
+  private async deleteNow(userId: string): Promise<PartyResult> {
     const party = this.party();
     if (!party) {
       return fail('not_found', 'Party does not exist.', 'party');
@@ -591,7 +702,7 @@ export class PartyDO extends DurableObject<Env> {
    * Brings back a deleted party exactly as it was, for everyone. An open party counts towards the host's limit
    * again, so the caller holds a slot for it first and passes the reservation.
    */
-  async restore(userId: string, reservation?: string): Promise<PartyResult> {
+  private async restoreNow(userId: string, reservation?: string): Promise<PartyResult> {
     const party = this.party();
     if (party && !party.deleted_at && party.host_id === userId) {
       // Not deleted (any more): a repeat, or a restore that raced another. Give back a slot held for it, if any.
@@ -646,6 +757,7 @@ export class PartyDO extends DurableObject<Env> {
         this.enqueue({ kind: 'user.partyPurged', email: hostEmail, slug: party.slug });
       }
     });
+    this.disconnect(GONE);
   }
 
   /**
@@ -665,7 +777,7 @@ export class PartyDO extends DurableObject<Env> {
    * - in a drawn party their membership stays, so the draw holds, but is anonymized: a new random id (also as the
    *   giver's target and as the host), no email. The names stay, so their Secret Santa still knows who to buy for.
    */
-  async forgetMember(userId: string, email: string): Promise<ForgetMemberResult> {
+  private async forgetMemberNow(userId: string, email: string): Promise<ForgetMemberResult> {
     if (!this.hasSchema()) {
       return 'none';
     }

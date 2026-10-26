@@ -4,6 +4,7 @@ import { bodyLimit } from 'hono/body-limit';
 import { ApiEnv } from 'src/api/context';
 import { fail } from 'src/api/errors';
 import { MAX_BODY_BYTES } from 'src/api/limits';
+import { live } from 'src/api/live';
 import { auth } from 'src/api/routes/auth';
 import { me } from 'src/api/routes/me';
 import { parties } from 'src/api/routes/parties';
@@ -20,6 +21,7 @@ api.use(bodyLimit({
 api.route('/auth', auth);
 api.route('/me', me);
 api.route('/parties', parties);
+api.route('/live', live);
 
 /** Every route the API serves, as "METHOD /path". Tests check each has a call budget and a revocation check. */
 export const routeList = () => api.routes

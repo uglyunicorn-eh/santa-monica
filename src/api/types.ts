@@ -49,3 +49,13 @@ export interface UserToken extends TokenPayload {
   /** The user's token version when this token was issued. Tokens issued before versions existed have none. */
   ver?: number;
 }
+
+/**
+ * A short-lived ticket for opening a live-updates WebSocket (`/v1/parties/live`, `/v1/me/live`): browsers can't send an
+ * Authorization header on a WebSocket, so a signed-in request trades its session for one first. Valid for a minute.
+ */
+export interface LiveTicket extends TokenPayload {
+  sub: string;
+  email: string;
+  ver?: number;
+}
