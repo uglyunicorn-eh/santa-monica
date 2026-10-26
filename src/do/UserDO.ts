@@ -5,6 +5,7 @@ import { renderAccountDeleted, sendMail } from 'src/mail';
 import { newObjectId } from 'src/utils/ids';
 import { Session, sessionMatches } from 'src/utils/session';
 
+import { LIVE_USER_HEADER, LIVE_VERSION_HEADER } from 'src/api/live';
 import { Outbox } from './outbox';
 import { HostingStart, PartyListCursor, UserPartyListItem, UserPartyRecord, UserRecord, UserUpdate } from './types';
 
@@ -37,6 +38,23 @@ type PartyRow = {
   deleted_at: number | null;
 };
 
+/**
+ * Run once, when a column is added. Parties rolled before reveals were recorded count as revealed (at 0), so nobody is
+ * reminded about parties that rolled long ago.
+ */
+const BACKFILLS: Record<string, string> = {
+  'parties.revealed_at': 'UPDATE parties SET revealed_at = 0 WHERE is_closed = 1',
+};
+
+/** How long after a roll a party not revealed yet is brought up again (`unrevealed`). */
+export const REVEAL_REMINDER_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** What the user's live-updates watchers are told: a party of theirs rolled, or they revealed their name in it. */
+type UserEvent = { type: 'party.rolled'; code: string; name: string } | { type: 'party.revealed'; code: string };
+
+/** Close code for live updates when the session behind them is no more (signed out everywhere, account gone). */
+export const SIGNED_OUT = [4401, 'signed out'] as const;
+
 const flag = (value: number | null) => (value === null ? null : Boolean(value));
 
 const toRecord = ({ id, email, name, joined, token_version }: UserRow): UserRecord =>
@@ -55,6 +73,8 @@ const ADDED_COLUMNS: Record<string, Record<string, string>> = {
     is_closed: 'INTEGER',
     closed_at: 'INTEGER',
     deleted_at: 'INTEGER',
+    /** When the user revealed whom they give a gift to (see `markRevealed`). */
+    revealed_at: 'INTEGER',
   },
   // What a create request was for (the party name): the same key with another name is a new request.
   create_requests: {
@@ -108,6 +128,7 @@ export class UserDO extends DurableObject<Env> {
     super(ctx, env);
     this.sql = ctx.storage.sql;
     this.outbox = new Outbox(this.sql, () => true, messages => this.deliver(messages));
+    ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
     ctx.blockConcurrencyWhile(async () => {
       this.sql.exec(`
         CREATE TABLE IF NOT EXISTS user (
@@ -171,6 +192,10 @@ export class UserDO extends DurableObject<Env> {
         for (const [column, definition] of Object.entries(added)) {
           if (!columns.has(column)) {
             this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+            const backfill = BACKFILLS[`${table}.${column}`];
+            if (backfill) {
+              this.sql.exec(backfill);
+            }
           }
         }
       }
@@ -307,6 +332,7 @@ export class UserDO extends DurableObject<Env> {
       );
       this.sql.exec('UPDATE user SET token_version = token_version + 1');
     });
+    this.disconnect();
     return 'cancelled';
   }
 
@@ -337,18 +363,28 @@ export class UserDO extends DurableObject<Env> {
         row.id, row.email, row.name, row.joined, row.token_version,
       );
       for (const party of parties) {
-        this.putParty(party, 'INSERT OR IGNORE');
+        this.putParty(party, 'keep');
       }
+      // Reveals aren't carried over: parties already rolled count as revealed, rather than reminding again.
+      this.sql.exec('UPDATE parties SET revealed_at = COALESCE(revealed_at, 0) WHERE is_closed = 1');
     });
     return toRecord(row);
   }
 
+  /**
+   * Stores a party of the user's. `update` overwrites a stored one (but not when the user revealed their name in it);
+   * `keep` leaves a stored one as it is.
+   */
   private putParty(
     { slug, name, createdAt, isHost, isProtected, isClosed, closedAt, deletedAt = null }: UserPartyRecord,
-    insert: 'INSERT OR REPLACE' | 'INSERT OR IGNORE',
+    mode: 'update' | 'keep',
   ) {
+    const onConflict = mode === 'update'
+      ? `ON CONFLICT (slug) DO UPDATE SET name = excluded.name, created_at = excluded.created_at, is_host = excluded.is_host,
+         is_protected = excluded.is_protected, is_closed = excluded.is_closed, closed_at = excluded.closed_at, deleted_at = excluded.deleted_at`
+      : 'ON CONFLICT (slug) DO NOTHING';
     this.sql.exec(
-      `${insert} INTO parties (slug, name, created_at, is_host, is_protected, is_closed, closed_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO parties (slug, name, created_at, is_host, is_protected, is_closed, closed_at, deleted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ${onConflict}`,
       slug, name, createdAt, Number(isHost), Number(isProtected), Number(isClosed), closedAt, deletedAt,
     );
   }
@@ -381,6 +417,7 @@ export class UserDO extends DurableObject<Env> {
       return false;
     }
     this.sql.exec('UPDATE user SET token_version = token_version + 1');
+    this.disconnect();
     return true;
   }
 
@@ -406,6 +443,7 @@ export class UserDO extends DurableObject<Env> {
       }
       this.sql.exec('DELETE FROM parties');
     });
+    this.disconnect();
     if (this.outbox.pending()) {
       await this.ctx.storage.setAlarm(Date.now());
     }
@@ -593,12 +631,19 @@ export class UserDO extends DurableObject<Env> {
       return null;
     }
     let name = user?.name;
+    const rolled: UserEvent[] = [];
     this.ctx.storage.transactionSync(() => {
       for (const update of updates) {
         switch (update.type) {
-          case 'addParty':
-            this.putParty(update.party, 'INSERT OR REPLACE');
+          case 'addParty': {
+            const { slug, name: partyName, isClosed, deletedAt } = update.party;
+            const before = this.sql.exec<{ is_closed: number | null }>('SELECT is_closed FROM parties WHERE slug = ?', slug).toArray()[0];
+            this.putParty(update.party, 'update');
+            if (isClosed && !deletedAt && !before?.is_closed) {
+              rolled.push({ type: 'party.rolled', code: slug, name: partyName });
+            }
             break;
+          }
           case 'removeParty':
             this.sql.exec('DELETE FROM parties WHERE slug = ?', update.slug);
             break;
@@ -615,7 +660,88 @@ export class UserDO extends DurableObject<Env> {
         }
       }
     });
+    rolled.forEach(event => this.tell(event));
     return user && { ...user, name: name! };
+  }
+
+  /**
+   * Parties of the user's that rolled in the last REVEAL_REMINDER_MS and that they haven't revealed their name in yet,
+   * newest roll first (at most 10). Null when the session no longer belongs to this user.
+   */
+  unrevealed(session: Session): { slug: string; name: string; closedAt: number }[] | null {
+    if (!sessionMatches(this.get(), session)) {
+      return null;
+    }
+    return this.sql.exec<{ slug: string; name: string; closed_at: number }>(
+      `SELECT slug, name, closed_at FROM parties
+       WHERE is_closed = 1 AND revealed_at IS NULL AND deleted_at IS NULL AND closed_at >= ?
+       ORDER BY closed_at DESC LIMIT 10`,
+      Date.now() - REVEAL_REMINDER_MS,
+    ).toArray().map(row => ({ slug: row.slug, name: row.name, closedAt: row.closed_at }));
+  }
+
+  /**
+   * Records that the user revealed their name in a rolled party (not again once recorded), and tells their other
+   * tabs, so a reminder still showing there goes away. False for a party that isn't theirs or hasn't rolled; null when
+   * the session no longer belongs to this user.
+   */
+  markRevealed(slug: string, session: Session): boolean | null {
+    if (!sessionMatches(this.get(), session)) {
+      return null;
+    }
+    const party = this.sql.exec<{ revealed_at: number | null }>('SELECT revealed_at FROM parties WHERE slug = ? AND is_closed = 1', slug).toArray()[0];
+    if (!party) {
+      return false;
+    }
+    if (party.revealed_at === null) {
+      this.sql.exec('UPDATE parties SET revealed_at = ? WHERE slug = ?', Date.now(), slug);
+      this.tell({ type: 'party.revealed', code: slug });
+    }
+    return true;
+  }
+
+  // -------------------------------------------------------------------------------------------------------------------
+  // Live updates (src/api/live.ts): the user's own events, on the home screen. Watchers connect with the hibernation
+  // API; "ping" is answered without waking the object. A session that ends (signed out everywhere, account gone)
+  // disconnects them.
+
+  /** A WebSocket upgrade passed on by the Worker, for the user (and token version) in the live headers. */
+  async fetch(request: Request): Promise<Response> {
+    const user = this.get();
+    const userId = request.headers.get(LIVE_USER_HEADER);
+    const version = request.headers.get(LIVE_VERSION_HEADER);
+    const current = user && user.id === userId && (version === null || Number(version) === user.tokenVersion);
+    if (!current || request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
+      return new Response(null, { status: 403 });
+    }
+    const { 0: client, 1: server } = new WebSocketPair();
+    this.ctx.acceptWebSocket(server, [userId]);
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  /** Watchers only listen: anything they send is ignored. */
+  async webSocketMessage() {}
+
+  private tell(event: UserEvent) {
+    const message = JSON.stringify(event);
+    for (const ws of this.ctx.getWebSockets()) {
+      try {
+        ws.send(message);
+      } catch {
+        // Closing already.
+      }
+    }
+  }
+
+  /** Ends every watcher's updates: the session they were opened with is no more. */
+  private disconnect() {
+    for (const ws of this.ctx.getWebSockets()) {
+      try {
+        ws.close(...SIGNED_OUT);
+      } catch {
+        // Closing already.
+      }
+    }
   }
 
   /**

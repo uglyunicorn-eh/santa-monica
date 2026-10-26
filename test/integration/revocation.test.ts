@@ -18,6 +18,7 @@ const ROUTES: Record<string, { revoked: 'unauthenticated' | 'anonymous' | 'no se
   'POST /auth/session': { revoked: 'no session' },
   'POST /me/deletion/check': { revoked: 'no session' },
   'GET /parties/live': { revoked: 'no session' },
+  'GET /me/live': { revoked: 'no session' },
   'POST /me/deletion/confirm': { revoked: 'no session' },
   'POST /me/email-change/confirm': { revoked: 'no session' },
   'POST /me/email-change/cancel': { revoked: 'no session' },
@@ -35,6 +36,8 @@ const ROUTES: Record<string, { revoked: 'unauthenticated' | 'anonymous' | 'no se
   'POST /parties/delete': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/parties/delete', { body: { code: f.party.code }, token }) },
   'POST /parties/restore': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/parties/restore', { body: { code: f.party.code }, token }) },
   'POST /live/ticket': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/live/ticket', { token }) },
+  'GET /me/parties/unrevealed': { revoked: 'unauthenticated', call: (f, token) => call('GET', '/v1/me/parties/unrevealed', { token }) },
+  'POST /me/parties/revealed': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/me/parties/revealed', { token, body: { code: f.drawn.code } }) },
 };
 
 /** Someone who hosts an open party with a guest, is a guest in another open party, and has a drawn party with a target. */

@@ -71,6 +71,9 @@ const BUDGETS: Record<string, { USER: number | string; PARTY: number | string }>
   'POST /parties/restore': { USER: 1, PARTY: 2 },
   'GET /parties/live': { USER: 0, PARTY: 1 },
   'POST /live/ticket': { USER: 1, PARTY: 0 },
+  'GET /me/parties/unrevealed': { USER: 1, PARTY: 0 },
+  'POST /me/parties/revealed': { USER: 1, PARTY: 0 },
+  'GET /me/live': { USER: 1, PARTY: 0 },
 };
 
 describe('Durable Object call budgets', () => {

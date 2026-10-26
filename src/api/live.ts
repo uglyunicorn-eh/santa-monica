@@ -25,6 +25,9 @@ export const LIVE_TICKET_TTL = 60;
 /** The user a WebSocket upgrade is for, set by the Worker on the request it passes to a Durable Object. */
 export const LIVE_USER_HEADER = 'x-live-user';
 
+/** The token version the ticket was issued at, when it has one (the user's own updates refuse a stale one). */
+export const LIVE_VERSION_HEADER = 'x-live-version';
+
 const invalidTicket = () => fail('unauthenticated', 'This live-updates ticket is invalid or has expired.', 'ticket');
 
 export const live = new Hono<ApiEnv>();
@@ -66,6 +69,10 @@ export async function liveRequest(c: ApiContext): Promise<{ userId: string; emai
   }
   const headers = new Headers(c.req.raw.headers);
   headers.set(LIVE_USER_HEADER, claims.output.sub);
+  headers.delete(LIVE_VERSION_HEADER);
+  if (claims.output.ver !== undefined) {
+    headers.set(LIVE_VERSION_HEADER, String(claims.output.ver));
+  }
   return { userId: claims.output.sub, email: claims.output.email, request: new Request(c.req.raw.url, { headers }) };
 }
 
