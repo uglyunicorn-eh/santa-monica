@@ -6,7 +6,8 @@
 import * as v from 'valibot';
 
 import {
-  DEFAULT_PAGE_SIZE, IDEMPOTENCY_KEY_RE, MAX_CURSOR_LENGTH, MAX_EMAIL_LENGTH, MAX_INVITES_PER_REQUEST, MAX_NAME_LENGTH, MAX_PAGE_SIZE, MAX_PHRASE_LENGTH,
+  DEFAULT_PAGE_SIZE, IDEMPOTENCY_KEY_RE, MAX_CURSOR_LENGTH, MAX_EMAIL_LENGTH, MAX_INVITES_PER_REQUEST, MAX_PAGE_SIZE,
+  MAX_PARTY_NAME_LENGTH, MAX_PERSON_NAME_LENGTH, MAX_PHRASE_LENGTH,
   MAX_TOKEN_LENGTH, MIN_PAGE_SIZE,
 } from 'src/api/limits';
 import { RESTORE_WINDOW_MS } from 'src/do/PartyDO';
@@ -87,11 +88,11 @@ export const bodies = {
   magicLink: v.pipe(body({ email: required(typedEmail), party: optional(partyCode) }), v.transform(normalizeEmail)),
   session: body({ token: required(token) }),
   link: body({ token: required(token) }),
-  profile: body({ name: required(words('Name', MAX_NAME_LENGTH)) }),
+  profile: body({ name: required(words('Name', MAX_PERSON_NAME_LENGTH)) }),
   emailChange: v.pipe(body({ email: required(typedEmail) }), v.transform(normalizeEmail)),
-  createParty: body({ name: required(words('Party name', MAX_NAME_LENGTH)), password: optional(phrase) }),
+  createParty: body({ name: required(words('Party name', MAX_PARTY_NAME_LENGTH)), password: optional(phrase) }),
   // Party codes travel in the body of every write, never in the URL: see `partyQuery`.
-  joinParty: body({ code: required(partyCode), name: required(words('Name', MAX_NAME_LENGTH)), password: optional(phrase) }),
+  joinParty: body({ code: required(partyCode), name: required(words('Name', MAX_PERSON_NAME_LENGTH)), password: optional(phrase) }),
   partyAction: body({ code: required(partyCode) }),
   invite: body({
     code: required(partyCode),

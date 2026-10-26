@@ -6,8 +6,10 @@
 /** Largest request body accepted. The biggest request the frontend makes is well under 1 KB. */
 export const MAX_BODY_BYTES = 16 * 1024;
 
-/** Person and party names. */
-export const MAX_NAME_LENGTH = 100;
+/** A person's name: in their profile, and the name they join a party with. */
+export const MAX_PERSON_NAME_LENGTH = 32;
+/** A party's name. */
+export const MAX_PARTY_NAME_LENGTH = 48;
 /** Secret phrases. */
 export const MAX_PHRASE_LENGTH = 100;
 export const MAX_EMAIL_LENGTH = 128;

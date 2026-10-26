@@ -676,7 +676,8 @@ describe('schemas', () => {
     expect(issue(bodies.profile, {})).toEqual({ message: 'Name is required.', field: 'name' });
     expect(issue(bodies.profile, { name: null })).toEqual({ message: 'Name is required.', field: 'name' });
     expect(issue(bodies.profile, { name: true })).toEqual({ message: 'Must be text.', field: 'name' });
-    expect(issue(bodies.profile, { name: 'x'.repeat(101) })).toEqual({ message: 'Name must be at most 100 characters.', field: 'name' });
+    expect(issue(bodies.profile, { name: 'x'.repeat(33) })).toEqual({ message: 'Name must be at most 32 characters.', field: 'name' });
+    expect(issue(bodies.createParty, { name: 'x'.repeat(49) })).toEqual({ message: 'Party name must be at most 48 characters.', field: 'name' });
     expect(issue(bodies.empty, { [`${'k'.repeat(80)}`]: 'v' })).toEqual({ message: `Unknown field: ${'k'.repeat(50)}.`, field: 'k'.repeat(80) });
     expect(issue(bodies.magicLink, { email: 'nope' })).toEqual({ message: 'Must be a valid email', field: 'email' });
     expect(issue(bodies.magicLink, { email: 'a@example.com', party: 'abc' })).toEqual({ message: 'Invalid party code', field: 'party' });
