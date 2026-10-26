@@ -960,8 +960,10 @@ describe('the remaining refusals', () => {
     await stub(other.code).delete(host.id);
     // Let the delete's own alarm run first; it then waits for the end of the restore window.
     await runDurableObjectAlarm(stub(other.code));
+    // Past the window, with no alarm left: one firing before the restore would erase the party (then "not found").
     await runInDurableObject(stub(other.code), async (_i, state) => {
       state.storage.sql.exec('UPDATE party SET deleted_at = ?', Date.now() - DAY - 1000);
+      await state.storage.deleteAlarm();
     });
     expect(await stub(other.code).restore(host.id)).toMatchObject({ ok: false, error: { code: 'conflict', message: 'This party was deleted more than a day ago and can no longer be restored.' } });
   });
