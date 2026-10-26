@@ -46,6 +46,7 @@ JSON in, JSON out. A signed-in request sends `Authorization: Bearer <session tok
 | `POST /v1/parties/join` `{code, name, password?}` | yes | Joins |
 | `POST /v1/parties/leave` `{code}` | yes | Leaves |
 | `POST /v1/parties/draw` `{code}` | yes | Draws (host only) |
+| `POST /v1/parties/invite` `{code, emails}` | yes | Emails invites to up to 10 addresses (host only, open parties): `{invited, alreadyInvited, alreadyJoined, invitesLeft}` |
 | `POST /v1/parties/delete` `{code}` | yes | Deletes an open party (host only); restorable for 24 hours |
 | `POST /v1/parties/restore` `{code}` | yes | Restores it (host only) |
 

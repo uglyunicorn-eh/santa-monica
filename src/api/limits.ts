@@ -11,6 +11,8 @@ export const MAX_NAME_LENGTH = 100;
 /** Secret phrases. */
 export const MAX_PHRASE_LENGTH = 100;
 export const MAX_EMAIL_LENGTH = 128;
+/** Addresses in one party invite request. */
+export const MAX_INVITES_PER_REQUEST = 10;
 /** Signed tokens: sessions, magic links and the account email links. Ours are a few hundred characters. */
 export const MAX_TOKEN_LENGTH = 2048;
 /** Paging cursors from `GET /v1/me/parties`. Ours are about 32 characters. */

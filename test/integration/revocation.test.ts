@@ -33,6 +33,7 @@ const ROUTES: Record<string, { revoked: 'unauthenticated' | 'anonymous' | 'no se
   'POST /parties/join': { revoked: 'unauthenticated', call: (f, token) => joinParty({ token }, f.open, 'Ghost') },
   'POST /parties/leave': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/parties/leave', { body: { code: f.party.code }, token }) },
   'POST /parties/draw': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/parties/draw', { body: { code: f.party.code }, token }) },
+  'POST /parties/invite': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/parties/invite', { body: { code: f.party.code, emails: [uniqueEmail('ghost')] }, token }) },
   'POST /parties/delete': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/parties/delete', { body: { code: f.party.code }, token }) },
   'POST /parties/restore': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/parties/restore', { body: { code: f.party.code }, token }) },
   'POST /live/ticket': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/live/ticket', { token }) },

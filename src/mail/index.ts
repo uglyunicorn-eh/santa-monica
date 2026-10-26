@@ -5,6 +5,7 @@ import * as accountDeletion from './templates/accountDeletion';
 import * as emailChange from './templates/emailChange';
 import * as emailChangeNotice from './templates/emailChangeNotice';
 import * as emailTakenNotice from './templates/emailTakenNotice';
+import * as partyInvite from './templates/partyInvite';
 import * as partyNotification from './templates/partyNotification';
 import * as signIn from './templates/signIn';
 
@@ -44,6 +45,12 @@ export const renderSignIn = ({ magicLink, assetsUrl }: { magicLink: string; asse
 
 export const renderPartyNotification = ({ party, assetsUrl }: { party: { name: string; url: string }; assetsUrl: string }) =>
   render(partyNotification, { 'party.name': party.name, 'party.url': party.url, assetsUrl, assetsVersion });
+
+export const renderPartyInvite = ({ hostName, party, assetsUrl }: { hostName: string; party: { name: string; url: string; isProtected: boolean }; assetsUrl: string }) => {
+  const vars = { 'host.name': hostName, 'party.name': party.name, 'party.url': party.url, assetsUrl, assetsVersion };
+  const phraseNote = fill(party.isProtected ? partyInvite.phraseNotes.protected : partyInvite.phraseNotes.open, vars, s => s);
+  return render(partyInvite, { ...vars, phraseNote });
+};
 
 export const renderAccountDeleted = ({ assetsUrl }: { assetsUrl: string }) =>
   render(accountDeleted, { ...accountDeleted.vars, assetsUrl, assetsVersion });

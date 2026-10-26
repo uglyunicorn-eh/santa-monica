@@ -67,6 +67,7 @@ const BUDGETS: Record<string, { USER: number | string; PARTY: number | string }>
   'POST /parties/join': { USER: 0, PARTY: 1 },
   'POST /parties/leave': { USER: 1, PARTY: 1 },
   'POST /parties/draw': { USER: 1, PARTY: 1 },
+  'POST /parties/invite': { USER: 1, PARTY: 1 },
   'POST /parties/delete': { USER: 1, PARTY: 1 },
   'POST /parties/restore': { USER: 1, PARTY: 2 },
   'GET /parties/live': { USER: 0, PARTY: 1 },
