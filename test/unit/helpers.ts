@@ -25,6 +25,7 @@ export const testEnv = (overrides: Partial<typeof env> = {}) => ({
   PARTY_LOOKUP_RATE_LIMIT_IP: allowed,
   LEGACY_CODE_LOOKUP_RATE_LIMIT_IP: allowed,
   JOIN_RATE_LIMIT_USER: allowed,
+  INVITE_RATE_LIMIT_USER: allowed,
   ...overrides,
 }) as typeof env;
 

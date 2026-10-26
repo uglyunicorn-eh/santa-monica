@@ -6,7 +6,8 @@
 import * as v from 'valibot';
 
 import {
-  DEFAULT_PAGE_SIZE, IDEMPOTENCY_KEY_RE, MAX_CURSOR_LENGTH, MAX_EMAIL_LENGTH, MAX_PAGE_SIZE, MAX_PARTY_NAME_LENGTH, MAX_PERSON_NAME_LENGTH, MAX_PHRASE_LENGTH,
+  DEFAULT_PAGE_SIZE, IDEMPOTENCY_KEY_RE, MAX_CURSOR_LENGTH, MAX_EMAIL_LENGTH, MAX_INVITES_PER_REQUEST, MAX_PAGE_SIZE,
+  MAX_PARTY_NAME_LENGTH, MAX_PERSON_NAME_LENGTH, MAX_PHRASE_LENGTH,
   MAX_TOKEN_LENGTH, MIN_PAGE_SIZE,
 } from 'src/api/limits';
 import { RESTORE_WINDOW_MS } from 'src/do/PartyDO';
@@ -93,6 +94,14 @@ export const bodies = {
   // Party codes travel in the body of every write, never in the URL: see `partyQuery`.
   joinParty: body({ code: required(partyCode), name: required(words('Name', MAX_PERSON_NAME_LENGTH)), password: optional(phrase) }),
   partyAction: body({ code: required(partyCode) }),
+  invite: body({
+    code: required(partyCode),
+    emails: v.pipe(
+      v.array(typedEmail, 'Must be a list of email addresses.'),
+      v.minLength(1, 'Add at least one email address.'),
+      v.maxLength(MAX_INVITES_PER_REQUEST, `You can invite up to ${MAX_INVITES_PER_REQUEST} people at a time.`),
+    ),
+  }),
   empty: body({}),
 };
 
@@ -318,6 +327,14 @@ export const liveTicket = v.object({ ticket: v.string() });
 
 /** `?ticket=` on a live-updates WebSocket request, length-limited before anything verifies it. */
 export const liveQuery = v.object({ ticket: token });
+
+/** A party invite's outcome, by address as typed. */
+export const invites = v.object({
+  invited: v.array(v.string()),
+  alreadyInvited: v.array(v.string()),
+  alreadyJoined: v.array(v.string()),
+  invitesLeft: v.number(),
+});
 
 /** "Accepted": the email is on its way, or the request was already done. */
 export const accepted = v.object({ ok: v.literal(true) });

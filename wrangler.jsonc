@@ -43,7 +43,9 @@
     { "name": "PARTY_LOOKUP_RATE_LIMIT_IP", "namespace_id": "1003", "simple": { "limit": 60, "period": 60 } },
     // Old 5-letter codes (about 1.2·10^7 of them) are far easier to guess than 8-letter ones, so trying them is slower.
     { "name": "LEGACY_CODE_LOOKUP_RATE_LIMIT_IP", "namespace_id": "1005", "simple": { "limit": 10, "period": 60 } },
-    { "name": "JOIN_RATE_LIMIT_USER", "namespace_id": "1004", "simple": { "limit": 10, "period": 60 } }
+    { "name": "JOIN_RATE_LIMIT_USER", "namespace_id": "1004", "simple": { "limit": 10, "period": 60 } },
+    // Each invite request emails up to 10 addresses, so hosts get only a few a minute.
+    { "name": "INVITE_RATE_LIMIT_USER", "namespace_id": "1006", "simple": { "limit": 3, "period": 60 } }
   ],
 
   "env": {
@@ -76,7 +78,8 @@
         { "name": "ENTER_RATE_LIMIT_EMAIL", "namespace_id": "2002", "simple": { "limit": 3, "period": 60 } },
         { "name": "PARTY_LOOKUP_RATE_LIMIT_IP", "namespace_id": "2003", "simple": { "limit": 60, "period": 60 } },
         { "name": "LEGACY_CODE_LOOKUP_RATE_LIMIT_IP", "namespace_id": "2005", "simple": { "limit": 10, "period": 60 } },
-        { "name": "JOIN_RATE_LIMIT_USER", "namespace_id": "2004", "simple": { "limit": 10, "period": 60 } }
+        { "name": "JOIN_RATE_LIMIT_USER", "namespace_id": "2004", "simple": { "limit": 10, "period": 60 } },
+        { "name": "INVITE_RATE_LIMIT_USER", "namespace_id": "2006", "simple": { "limit": 3, "period": 60 } }
       ],
       // Logs stay in Workers Logs only, so test traffic stays out of Better Stack.
       "observability": {
@@ -106,7 +109,8 @@
           { "name": "ENTER_RATE_LIMIT_EMAIL", "namespace_id": "2002", "simple": { "limit": 3, "period": 60 } },
           { "name": "PARTY_LOOKUP_RATE_LIMIT_IP", "namespace_id": "2003", "simple": { "limit": 60, "period": 60 } },
           { "name": "LEGACY_CODE_LOOKUP_RATE_LIMIT_IP", "namespace_id": "2005", "simple": { "limit": 10, "period": 60 } },
-          { "name": "JOIN_RATE_LIMIT_USER", "namespace_id": "2004", "simple": { "limit": 10, "period": 60 } }
+          { "name": "JOIN_RATE_LIMIT_USER", "namespace_id": "2004", "simple": { "limit": 10, "period": 60 } },
+        { "name": "INVITE_RATE_LIMIT_USER", "namespace_id": "2006", "simple": { "limit": 3, "period": 60 } }
         ],
         "observability": {
           "redact_query_string": true,

@@ -13,6 +13,8 @@ export interface Env {
   LEGACY_CODE_LOOKUP_RATE_LIMIT_IP: RateLimit;
   /** Join attempts, per user. */
   JOIN_RATE_LIMIT_USER: RateLimit;
+  /** Invite requests, per user. */
+  INVITE_RATE_LIMIT_USER: RateLimit;
   PUBLIC_URL: string;
   /** The frontend that emailed links open: https://gnomik.me in production, a local one for previews. */
   FRONTEND_URL: string;

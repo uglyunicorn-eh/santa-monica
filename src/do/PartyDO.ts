@@ -1,7 +1,8 @@
 import { DurableObject } from 'cloudflare:workers';
 
 import { Env } from 'src/env';
-import { renderPartyNotification, sendMail } from 'src/mail';
+import { ADDRESS_QUOTA } from 'src/api/rateLimit';
+import { renderPartyInvite, renderPartyNotification, sendMail } from 'src/mail';
 import santaShuffle from 'src/utils/santaShuffle';
 import { Session, sessionMatches } from 'src/utils/session';
 
@@ -9,7 +10,7 @@ import { newObjectId } from 'src/utils/ids';
 import { LIVE_USER_HEADER } from 'src/api/live';
 import { Outbox } from './outbox';
 
-import { CreatePartyInput, ForgetMemberResult, Member, PartyErrorCode, PartyResult, PartyView, UserPartyRecord, UserRecord, UserUpdate } from './types';
+import { CreatePartyInput, ForgetMemberResult, Member, PartyErrorCode, PartyResult, PartyUserError, PartyView, UserPartyRecord, UserRecord, UserUpdate } from './types';
 
 
 type PartyRow = {
@@ -44,7 +45,9 @@ type OutboxMessage =
   // Sent when the party is gone for good (erased after deletion, or its host's account was deleted): the party row is
   // gone, so the slug travels with the message.
   | { kind: 'user.partyPurged'; email: string; slug: string }
-  | { kind: 'mail.partyNotification'; email: string; partyName: string; slug: string };
+  | { kind: 'mail.partyNotification'; email: string; partyName: string; slug: string }
+  // An invite from the host. Counted against the recipient's hourly email cap when it goes out; over the cap, it's dropped.
+  | { kind: 'mail.partyInvite'; email: string; hostName: string; partyName: string; slug: string; isProtected: boolean };
 
 
 
@@ -86,6 +89,16 @@ const fail = (code: PartyErrorCode, message: string, fieldName: string | null = 
 
 const notLoggedIn = fail('unauthenticated', 'You must be logged in before joining the party.');
 const tryAgain = fail('unavailable', "We couldn't reach your account. Please try again in a minute.");
+
+/** Invite emails one party can send in all, so a party can't be used to email lots of strangers. */
+export const MAX_PARTY_INVITES = 50;
+/** One address gets at most one invite to a party within this window; asking again sooner is answered as done. */
+export const REINVITE_AFTER_MS = 24 * 60 * 60 * 1000;
+
+/** What the host asked to invite, address by address. */
+export type InviteResult =
+  | { ok: true; invited: string[]; alreadyInvited: string[]; alreadyJoined: string[]; invitesLeft: number }
+  | { ok: false; error: PartyUserError };
 
 const closedToNewMembers = fail('conflict', 'Party is already packed. Sorry, we cannot accept a new participant...', 'party');
 const partyIsFull = fail('conflict', `This party is full: it already has ${MAX_PARTY_MEMBERS} people.`, 'party');
@@ -129,6 +142,14 @@ export class PartyDO extends DurableObject<Env> {
         }
       }
     }
+    // Invites the host sent, by address: who was invited when, and how many invite emails the party sent in all.
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS invites (
+        email TEXT PRIMARY KEY,
+        invited_at INTEGER NOT NULL,
+        sent INTEGER NOT NULL DEFAULT 1
+      )
+    `);
     // Wrong secret phrases per person, so guessing one is slow (see MAX_PHRASE_GUESSES).
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS phrase_guesses (
@@ -323,6 +344,60 @@ export class PartyDO extends DurableObject<Env> {
 
   async close(userId: string): Promise<PartyResult> {
     return this.told(await this.closeNow(userId));
+  }
+
+  /**
+   * Emails an invite to each address (host only, while the party is open). Members and addresses invited in the last
+   * REINVITE_AFTER_MS are skipped, so a repeated request sends nothing again. Refused as a whole when the party
+   * would go over MAX_PARTY_INVITES. `emails` are canonical addresses (`canonicalEmail`).
+   */
+  async invite(userId: string, emails: string[]): Promise<InviteResult> {
+    const party = this.liveParty();
+    if (!party) {
+      return fail('not_found', 'Party does not exist.', 'party');
+    }
+    if (party.host_id !== userId) {
+      return fail('forbidden', 'Only the host can invite people to the party.', 'party');
+    }
+    if (party.is_closed) {
+      return fail('conflict', 'The dice are already rolled: nobody new can join this party.', 'party');
+    }
+    // Invites say who sent them: the name the host goes by in this party (the host can't leave, so it's always there).
+    const hostName = this.membership(userId)!.name;
+    const now = Date.now();
+    const members = new Set(this.sql.exec<{ member_email: string | null }>('SELECT member_email FROM memberships').toArray()
+      .map(row => row.member_email));
+    const recent = new Set(this.sql.exec<{ email: string }>('SELECT email FROM invites WHERE invited_at > ?', now - REINVITE_AFTER_MS)
+      .toArray().map(row => row.email));
+    const invited: string[] = [];
+    const alreadyInvited: string[] = [];
+    const alreadyJoined: string[] = [];
+    for (const email of new Set(emails)) {
+      (members.has(email) ? alreadyJoined : recent.has(email) ? alreadyInvited : invited).push(email);
+    }
+    const used = this.sql.exec<{ n: number | null }>('SELECT SUM(sent) AS n FROM invites').one().n ?? 0;
+    if (used + invited.length > MAX_PARTY_INVITES) {
+      const left = MAX_PARTY_INVITES - used;
+      return fail(
+        'rate_limited',
+        left ? `This party can send only ${left} more invite${left === 1 ? '' : 's'}.` : 'This party has sent all the invites it can. Share its link instead.',
+        'emails',
+      );
+    }
+    this.ctx.storage.transactionSync(() => {
+      for (const email of invited) {
+        this.sql.exec(
+          `INSERT INTO invites (email, invited_at) VALUES (?, ?)
+           ON CONFLICT (email) DO UPDATE SET invited_at = excluded.invited_at, sent = sent + 1`,
+          email, now,
+        );
+        this.enqueue({ kind: 'mail.partyInvite', email, hostName, partyName: party.name, slug: party.slug, isProtected: Boolean(party.password) });
+      }
+    });
+    if (invited.length) {
+      await this.deliverSoon();
+    }
+    return { ok: true, invited, alreadyInvited, alreadyJoined, invitesLeft: MAX_PARTY_INVITES - used - invited.length };
   }
 
   /** Only the host can still see a deleted party (to restore it): everyone else stops watching. */
@@ -844,6 +919,19 @@ export class PartyDO extends DurableObject<Env> {
   /** Delivers a batch: one email, or all queued changes for one user in a single UserDO call. */
   private async deliver(messages: OutboxMessage[]) {
     const [first] = messages;
+    if (first.kind === 'mail.partyInvite') {
+      // Invites go to addresses that may never have asked for anything: they share the per-address cap with every
+      // other email, and one over it is dropped, not retried. A party deleted or drawn since then has nothing to join.
+      const party = this.liveParty();
+      if (!party || party.is_closed || !await this.env.USER.getByName(first.email).countMail(ADDRESS_QUOTA)) {
+        return;
+      }
+      return await sendMail(this.env, first.email, renderPartyInvite({
+        hostName: first.hostName,
+        party: { name: first.partyName, url: `${this.env.FRONTEND_URL}/p/${first.slug}/`, isProtected: first.isProtected },
+        assetsUrl: this.env.PUBLIC_URL,
+      }));
+    }
     if (first.kind === 'mail.partyNotification') {
       return await sendMail(this.env, first.email, renderPartyNotification({
         party: { name: first.partyName, url: `${this.env.FRONTEND_URL}/p/${first.slug}/` },
