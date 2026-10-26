@@ -1,7 +1,7 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 
-import { MAX_BODY_BYTES, MAX_NAME_LENGTH } from 'src/api/limits';
+import { MAX_BODY_BYTES, MAX_PARTY_NAME_LENGTH, MAX_PERSON_NAME_LENGTH } from 'src/api/limits';
 import { PARTY_CODE_RE } from 'src/api/schemas';
 import { MAX_NEW_PARTIES_PER_DAY, MAX_OPEN_HOSTED_PARTIES } from 'src/api/routes/parties';
 import { MAX_PARTY_MEMBERS, MAX_PARTY_PHRASE_GUESSES, MAX_PHRASE_GUESSES, PHRASE_GUESS_WINDOW_MS } from 'src/do/PartyDO';
@@ -35,10 +35,21 @@ describe('request size', () => {
     expect(at).toMatchObject({ status: 400, body: { error: { message: 'The request body must be JSON.' } } });
   });
 
-  it('bounds names at the shared limit', async () => {
+  it(`bounds person names at ${MAX_PERSON_NAME_LENGTH} and party names at ${MAX_PARTY_NAME_LENGTH}`, async () => {
     const who = await signIn();
-    expect((await request('PATCH', '/v1/me', { token: who.token, body: { name: 'x'.repeat(MAX_NAME_LENGTH) } })).status).toBe(200);
-    expect((await request('PATCH', '/v1/me', { token: who.token, body: { name: 'x'.repeat(MAX_NAME_LENGTH + 1) } })).status).toBe(400);
+    const rename = (length: number) => request('PATCH', '/v1/me', { token: who.token, body: { name: 'x'.repeat(length) } });
+    expect((await rename(MAX_PERSON_NAME_LENGTH)).status).toBe(200);
+    expect(await rename(MAX_PERSON_NAME_LENGTH + 1)).toMatchObject({
+      status: 400, body: { error: { field: 'name', message: `Name must be at most ${MAX_PERSON_NAME_LENGTH} characters.` } },
+    });
+    const create = (length: number) => request('POST', '/v1/parties', { token: who.token, body: { name: 'p'.repeat(length) } });
+    expect((await create(MAX_PARTY_NAME_LENGTH)).status).toBe(201);
+    expect(await create(MAX_PARTY_NAME_LENGTH + 1)).toMatchObject({ status: 400, body: { error: { field: 'name' } } });
+    const party = (await create(MAX_PARTY_NAME_LENGTH)).body;
+    const guest = await signIn();
+    const join = (length: number) => request('POST', '/v1/parties/join', { token: guest.token, body: { code: party.code, name: 'g'.repeat(length) } });
+    expect(await join(MAX_PERSON_NAME_LENGTH + 1)).toMatchObject({ status: 400, body: { error: { field: 'name' } } });
+    expect((await join(MAX_PERSON_NAME_LENGTH)).status).toBe(200);
   });
 });
 
