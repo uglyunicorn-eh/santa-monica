@@ -10,7 +10,7 @@ import { newObjectId } from 'src/utils/ids';
 import { LIVE_USER_HEADER } from 'src/api/live';
 import { Outbox } from './outbox';
 
-import { CreatePartyInput, ForgetMemberResult, Member, PartyErrorCode, PartyResult, PartyView, UserPartyRecord, UserRecord, UserUpdate } from './types';
+import { CreatePartyInput, ForgetMemberResult, Member, PartyErrorCode, PartyResult, PartyUserError, PartyView, UserPartyRecord, UserRecord, UserUpdate } from './types';
 
 
 type PartyRow = {
@@ -98,7 +98,7 @@ export const REINVITE_AFTER_MS = 24 * 60 * 60 * 1000;
 /** What the host asked to invite, address by address. */
 export type InviteResult =
   | { ok: true; invited: string[]; alreadyInvited: string[]; alreadyJoined: string[]; invitesLeft: number }
-  | { ok: false; error: { code: PartyErrorCode; fieldName: string | null; message: string } };
+  | { ok: false; error: PartyUserError };
 
 const closedToNewMembers = fail('conflict', 'Party is already packed. Sorry, we cannot accept a new participant...', 'party');
 const partyIsFull = fail('conflict', `This party is full: it already has ${MAX_PARTY_MEMBERS} people.`, 'party');
@@ -362,18 +362,19 @@ export class PartyDO extends DurableObject<Env> {
     if (party.is_closed) {
       return fail('conflict', 'The dice are already rolled: nobody new can join this party.', 'party');
     }
-    // Invites say who sent them: the name the host goes by in this party.
-    // The host is always a member: they can't leave their own party.
+    // Invites say who sent them: the name the host goes by in this party (the host can't leave, so it's always there).
     const hostName = this.membership(userId)!.name;
     const now = Date.now();
     const members = new Set(this.sql.exec<{ member_email: string | null }>('SELECT member_email FROM memberships').toArray()
       .map(row => row.member_email));
     const recent = new Set(this.sql.exec<{ email: string }>('SELECT email FROM invites WHERE invited_at > ?', now - REINVITE_AFTER_MS)
       .toArray().map(row => row.email));
-    const unique = [...new Set(emails)];
-    const alreadyJoined = unique.filter(email => members.has(email));
-    const alreadyInvited = unique.filter(email => !members.has(email) && recent.has(email));
-    const invited = unique.filter(email => !members.has(email) && !recent.has(email));
+    const invited: string[] = [];
+    const alreadyInvited: string[] = [];
+    const alreadyJoined: string[] = [];
+    for (const email of new Set(emails)) {
+      (members.has(email) ? alreadyJoined : recent.has(email) ? alreadyInvited : invited).push(email);
+    }
     const used = this.sql.exec<{ n: number | null }>('SELECT SUM(sent) AS n FROM invites').one().n ?? 0;
     if (used + invited.length > MAX_PARTY_INVITES) {
       const left = MAX_PARTY_INVITES - used;
