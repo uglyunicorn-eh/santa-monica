@@ -1,4 +1,4 @@
-import { actionColors, withAction } from './simple';
+import { actionTones, withAction } from './simple';
 
 // Sent to the NEW address. Placeholders: {{url}}, {{oldEmail}}, {{newEmail}}, {{assetsUrl}}, {{assetsVersion}}.
 export const subject = 'Confirm your new email for Anonymous Ded Morozes';
@@ -6,7 +6,7 @@ export const subject = 'Confirm your new email for Anonymous Ded Morozes';
 export const vars = {
   title: 'Confirm your new email',
   action: 'Use this email',
-  actionColor: actionColors.go,
+  ...actionTones.go,
   footer: "The link works for an hour. If you didn't ask for this, ignore this email and nothing will change.",
 };
 
