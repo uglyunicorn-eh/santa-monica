@@ -1,3 +1,8 @@
+[![Stand With Ukraine](https://raw.githubusercontent.com/vshymanskyy/StandWithUkraine/main/banner2-direct.svg)](https://savelife.in.ua/en/)
+
+> [!IMPORTANT]
+> Russia is waging a full-scale war against Ukraine. Please help Ukraine's defenders: donate to [Come Back Alive](https://savelife.in.ua/en/).
+
 ![Welcome to Santa Monica](santa-monica.jpg)
 
 # Santa Monica
