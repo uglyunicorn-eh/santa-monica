@@ -68,18 +68,18 @@ export async function mailbox(email: string): Promise<Mail[]> {
 }
 
 /**
- * The token at the end of an emailed link to `path` (e.g. "enter", "profile/delete", "profile/email"), after a `/` or,
- * for links that keep it out of the URL path, a `#`.
+ * The token at the end of an emailed link to `path` (e.g. "enter/link", "profile/delete", "profile/email"). Links carry
+ * it after a `#`, which keeps it out of the URL path (and so out of logs and the Referer header).
  */
 export function linkToken(mail: Mail, path: string): string {
-  const match = new RegExp(`${FRONTEND.replace(/[.]/g, '\\.')}/${path}[/#]([\\w-]+\\.[\\w-]+\\.[\\w-]+)`).exec(mail.text ?? '');
+  const match = new RegExp(`${FRONTEND.replace(/[.]/g, '\\.')}/${path}#([\\w-]+\\.[\\w-]+\\.[\\w-]+)`).exec(mail.text ?? '');
   if (!match) {
     throw new Error(`No ${path} link in the email`);
   }
   return match[1];
 }
 
-export const magicLinkToken = (mail: Mail) => linkToken(mail, 'enter');
+export const magicLinkToken = (mail: Mail) => linkToken(mail, 'enter/link');
 
 export const requestMagicLink = (email: string, options: CallOptions & { party?: string } = {}) =>
   call('POST', '/v1/auth/magic-link', { ...options, body: { email, ...(options.party ? { party: options.party } : {}) } });

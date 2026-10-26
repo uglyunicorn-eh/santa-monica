@@ -63,7 +63,7 @@ auth.post('/magic-link', action('enterRequest', async c => {
     email, ...(typed === email ? {} : { typed }), jti: crypto.randomUUID(), ...(party ? { party } : {}),
   }, { ttl: MAGIC_LINK_TTL });
   try {
-    await sendRequestedMail(env, email, renderSignIn({ magicLink: `${env.FRONTEND_URL}/enter/${token}`, assetsUrl: env.PUBLIC_URL }), 'email', 'the magic link');
+    await sendRequestedMail(env, email, renderSignIn({ magicLink: `${env.FRONTEND_URL}/enter/link#${token}`, assetsUrl: env.PUBLIC_URL }), 'email', 'the magic link');
   } catch (error) {
     if (key) {
       await recipient.releaseMailRequest(key, detail);

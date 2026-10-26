@@ -17,7 +17,7 @@ const key = () => crypto.randomUUID();
 const DAY = 24 * 60 * 60 * 1000;
 
 /** The token from the last link of `path` sent (after a `/`, or after `#` for links that keep it out of the URL path). */
-const tokenFrom = (text: string, path: string) => new RegExp(`/${path}[/#]([\\w-]+\\.[\\w-]+\\.[\\w-]+)`).exec(text)![1];
+const tokenFrom = (text: string, path: string) => new RegExp(`/${path}#([\\w-]+\\.[\\w-]+\\.[\\w-]+)`).exec(text)![1];
 
 const createParty = (token: string, name = 'Party', options: { password?: string; key?: string; env?: typeof env } = {}) =>
   request('POST', '/v1/parties', { token, key: options.key, env: options.env, body: { name, ...(options.password ? { password: options.password } : {}) } });
@@ -35,7 +35,7 @@ describe('POST /v1/auth/magic-link', () => {
       expect(await request('POST', '/v1/auth/magic-link', { body, env: testEnv({ EMAIL }) })).toMatchObject({ status: 202, body: { ok: true } });
     }
     expect(sent.map(m => m.to)).toEqual([email, email]);
-    const [first, second] = await Promise.all(sent.map(m => jwt().jwtVerify<EnterRequestToken>(tokenFrom(m.text, 'enter'), 'EnterRequest')));
+    const [first, second] = await Promise.all(sent.map(m => jwt().jwtVerify<EnterRequestToken>(tokenFrom(m.text, 'enter/link'), 'EnterRequest')));
     expect(first.jti).not.toBe(second.jti);
     expect(second.party).toBe(party.code);
     expect(first.party).toBeUndefined();

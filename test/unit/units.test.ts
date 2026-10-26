@@ -52,12 +52,12 @@ describe('ids', () => {
 
 describe('mail templates', () => {
   it('fills the sign-in template with no SendGrid leftovers', () => {
-    const mail = renderSignIn({ magicLink: 'https://gnomik.me/enter/abc.def', assetsUrl: 'https://api.test' });
+    const mail = renderSignIn({ magicLink: 'https://gnomik.me/enter/link#abc.def', assetsUrl: 'https://api.test' });
     expect(mail.subject).toBe('Sign in to Anonymous Ded Morozes');
-    expect(mail.html).toContain('href="https://gnomik.me/enter/abc.def"');
+    expect(mail.html).toContain('href="https://gnomik.me/enter/link#abc.def"');
     expect(mail.html).toContain(`https://api.test/email/gnomik.png?v=${version}`);
     expect(mail.html).toContain('href="https://gnomik.me/terms/"');
-    expect(mail.text).toContain('https://gnomik.me/enter/abc.def');
+    expect(mail.text).toContain('https://gnomik.me/enter/link#abc.def');
     expect(mail.html + mail.text).not.toMatch(/\{\{|sendgrid|sing in/);
   });
 
@@ -74,17 +74,17 @@ describe('mail templates', () => {
     expect(deletion.text).toContain('https://gnomik.me/profile/delete/abc');
     expect(deletion.html).toContain('href="https://gnomik.me/profile/delete/abc"');
 
-    const change = renderEmailChange({ url: 'https://gnomik.me/profile/email/abc', oldEmail: 'old@example.com', newEmail: 'a&b@example.com', assetsUrl: 'https://api.test' });
+    const change = renderEmailChange({ url: 'https://gnomik.me/profile/email#abc', oldEmail: 'old@example.com', newEmail: 'a&b@example.com', assetsUrl: 'https://api.test' });
     expect(change.text).toContain('from old@example.com to a&b@example.com');
     expect(change.html).toContain('a&amp;b@example.com');
-    expect(change.html).toContain('href="https://gnomik.me/profile/email/abc"');
+    expect(change.html).toContain('href="https://gnomik.me/profile/email#abc"');
 
     const notice = renderEmailChangeNotice({
-      oldEmail: 'old@example.com', newEmail: 'new@example.com', cancelUrl: 'https://gnomik.me/profile/email/cancel/abc', assetsUrl: 'https://api.test',
+      oldEmail: 'old@example.com', newEmail: 'new@example.com', cancelUrl: 'https://gnomik.me/profile/email/cancel#abc', assetsUrl: 'https://api.test',
     });
     expect(notice.text).toContain('from old@example.com to new@example.com');
-    expect(notice.text).toContain('https://gnomik.me/profile/email/cancel/abc');
-    expect(notice.html).toContain('href="https://gnomik.me/profile/email/cancel/abc"');
+    expect(notice.text).toContain('https://gnomik.me/profile/email/cancel#abc');
+    expect(notice.html).toContain('href="https://gnomik.me/profile/email/cancel#abc"');
     expect(notice.html).toContain("This wasn&#39;t me");
 
     const taken = renderEmailTakenNotice({ email: 'a&b@example.com', assetsUrl: 'https://api.test' });

@@ -202,14 +202,14 @@ me.post('/email-change', requireSession, action('requestEmailChange', async c =>
       const token = await jwt.issueToken<EmailChangeToken>('EmailChange', {
         sub, email: user.email, newEmail, jti, ver: user.tokenVersion,
       }, { ttl: LINK_TTL });
-      const link = renderEmailChange({ url: `${env.FRONTEND_URL}/profile/email/${token}`, oldEmail: user.email, newEmail, assetsUrl: env.PUBLIC_URL });
+      const link = renderEmailChange({ url: `${env.FRONTEND_URL}/profile/email#${token}`, oldEmail: user.email, newEmail, assetsUrl: env.PUBLIC_URL });
       await sendRequestedMail(env, newEmail, link, 'email');
     }
     // Sent the same way in both cases. Cancelling when nothing was sent still signs out everywhere, which is what
     // someone who didn't ask for the change wants.
     const cancel = await jwt.issueToken<EmailChangeCancelToken>('EmailChangeCancel', { sub, email: user.email, jti }, { ttl: LINK_TTL });
     await sendCourtesyMail(env, user.email, renderEmailChangeNotice({
-      oldEmail: user.email, newEmail, cancelUrl: `${env.FRONTEND_URL}/profile/email/cancel/${cancel}`, assetsUrl: env.PUBLIC_URL,
+      oldEmail: user.email, newEmail, cancelUrl: `${env.FRONTEND_URL}/profile/email/cancel#${cancel}`, assetsUrl: env.PUBLIC_URL,
     }));
   });
 }));

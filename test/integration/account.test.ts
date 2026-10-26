@@ -159,7 +159,7 @@ describe('changing the email', () => {
     const notice = (await mailbox(who.email)).at(-1)!;
     expect(notice.text).toContain(newEmail);
     // The notice has only the link that cancels the change, never the one that confirms it.
-    expect(notice.text).not.toMatch(/profile\/email\/(?!cancel\/)/);
+    expect(notice.text).not.toContain('/profile/email#');
     expect(linkToken(notice, 'profile/email/cancel')).toBeTruthy();
 
     const res = await confirmEmailChange(token);
