@@ -1025,14 +1025,13 @@ describe('the remaining refusals', () => {
 
     const { body: other } = await createParty(host.token, 'Other');
     await stub(other.code).delete(host.id);
-    // Let the delete's own alarm run first; it then waits for the end of the restore window.
-    await runDurableObjectAlarm(stub(other.code));
-    // Past the window, with no alarm left: one firing before the restore would erase the party (then "not found").
-    await runInDurableObject(stub(other.code), async (_i, state) => {
+    // Past the window, and asked at once, in the same call: an alarm running in between would erase the party first
+    // (then the answer is "not found", not "too late").
+    const late = await runInDurableObject(stub(other.code), async (instance: PartyDO, state) => {
       state.storage.sql.exec('UPDATE party SET deleted_at = ?, restorable_until = NULL', Date.now() - DAY - 1000);
-      await state.storage.deleteAlarm();
+      return instance.restore(host.id);
     });
-    expect(await stub(other.code).restore(host.id)).toMatchObject({ ok: false, error: { code: 'conflict', message: 'This party was deleted more than a day ago and can no longer be restored.' } });
+    expect(late).toMatchObject({ ok: false, error: { code: 'conflict', message: 'This party was deleted more than a day ago and can no longer be restored.' } });
   });
 
   it('refuse a confirmation link that was used by another request, or while the account is busy', async () => {
