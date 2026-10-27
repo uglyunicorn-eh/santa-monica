@@ -38,6 +38,9 @@ async function runAlarm(code: string) {
   return sent;
 }
 
+/** Only the auto-prune emails among what was sent (a draw's own emails may go out in the same alarm run). */
+const pruned = (sent: { subject: string }[]) => sent.filter(m => m.subject.endsWith('was put away'));
+
 const myParties = async (token: string) => (await request('GET', '/v1/me/parties', { token })).body.items as { code: string; deletedAt: string | null; restorableUntil: string | null }[];
 
 describe('auto-prune', () => {
@@ -81,7 +84,7 @@ describe('auto-prune', () => {
     expect((await myParties(host.token)).find(p => p.code === code)).toMatchObject({ restorableUntil: new Date(until).toISOString() });
     expect((await myParties(guest.token)).map(p => p.code)).not.toContain(code);
     // A second alarm sends nothing more.
-    expect(await runAlarm(code)).toEqual([]);
+    expect(pruned(await runAlarm(code))).toEqual([]);
   });
 
   it('can be restored within the week, with 45 fresh days, and is erased for good after it', async () => {
@@ -108,7 +111,7 @@ describe('auto-prune', () => {
     const { code } = await createParty(host.token, 'No address');
     await partySql(code, 'UPDATE memberships SET member_email = NULL');
     await partySql(code, 'UPDATE party SET prune_at = ?', Date.now() - 1000);
-    expect(await runAlarm(code)).toEqual([]);
+    expect(pruned(await runAlarm(code))).toEqual([]);
     expect((await partySql<{ deleted_at: number | null }>(code, 'SELECT deleted_at FROM party'))[0].deleted_at).not.toBeNull();
   });
 
@@ -124,7 +127,7 @@ describe('auto-prune', () => {
     await write('join', guest.token, { code: drawn.code, name: 'Guest' });
     await write('draw', host.token, { code: drawn.code });
     await partySql(drawn.code, 'UPDATE party SET prune_at = ?', Date.now() - 1000);
-    expect(await runAlarm(drawn.code)).toEqual([]);
+    expect(pruned(await runAlarm(drawn.code))).toEqual([]);
     expect(await partySql(drawn.code, 'SELECT deleted_at FROM party')).toEqual([{ deleted_at: null }]);
   });
 
@@ -132,7 +135,7 @@ describe('auto-prune', () => {
     const host = await signIn(uniqueEmail('host'), 'Host');
     const { code } = await createParty(host.token, 'Ancient');
     await partySql(code, 'UPDATE party SET prune_at = ?', AUTO_PRUNE_SINCE - 1);
-    expect(await runAlarm(code)).toEqual([]);
+    expect(pruned(await runAlarm(code))).toEqual([]);
     expect(await partySql(code, 'SELECT * FROM party')).toEqual([]);
     expect(await partySql(code, 'SELECT slug FROM cancelled')).toEqual([{ slug: code }]);
     expect((await myParties(host.token)).map(p => p.code)).not.toContain(code);
