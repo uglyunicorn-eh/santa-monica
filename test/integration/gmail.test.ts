@@ -33,7 +33,8 @@ describe('Gmail addresses', () => {
     expect(await mailbox(`${id}+santa@gmail.com`)).toEqual([]);
   });
 
-  it('share one per-address rate limit', async () => {
+  // The limit counts in one-minute windows; a run that crosses into the next one sees the count start again.
+  it('share one per-address rate limit', { retry: 2 }, async () => {
     const id = gmailUser();
     const statuses = [];
     for (const spelling of [`${id}@gmail.com`, `${id}+a@gmail.com`, `${id}+b@googlemail.com`, `${id.toUpperCase()}@gmail.com`, `${dotted(id)}@gmail.com`]) {

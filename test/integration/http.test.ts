@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import { MAX_BODY_BYTES } from 'src/api/limits';
 
-import { api, apiError, call, signIn, uniqueEmail, uniqueIp } from './support';
+import { api, apiError, call, signIn, uniqueEmail, uniqueIp, untilRefused } from './support';
 
 import { version } from 'package.json';
 
@@ -146,10 +146,9 @@ describe('HTTP surface', () => {
 
   it('allows ten lookups of old 5-letter codes a minute from one address; 8-letter codes have their own limit', async () => {
     const ip = uniqueIp();
-    for (let i = 0; i < 10; i++) {
-      expect((await call('POST', '/v1/parties/lookup', { body: { code: 'QWERT' }, ip })).status).toBe(404);
-    }
-    expect(await call('POST', '/v1/parties/lookup', { body: { code: 'QWERT' }, ip })).toEqual({ status: 429, body: apiError('rate_limited', expect.any(String), 'party') });
+    const answers = await untilRefused(10, () => call('POST', '/v1/parties/lookup', { body: { code: 'QWERT' }, ip }));
+    expect(answers.slice(0, 10).map(a => a.status)).toEqual(Array(10).fill(404));
+    expect(answers.at(-1)).toEqual({ status: 429, body: apiError('rate_limited', expect.any(String), 'party') });
     expect((await call('POST', '/v1/parties/lookup', { body: { code: 'QWERTYUI' }, ip })).status).toBe(404);
   });
 

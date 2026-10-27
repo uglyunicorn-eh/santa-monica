@@ -97,6 +97,19 @@ export async function call<T = any>(method: string, path: string, options: CallO
   return answer;
 }
 
+/**
+ * Sends `send(i)` until it's refused (429), at most 2·limit + 1 times, and returns every answer. Rate Limiting
+ * bindings count in fixed one-minute windows, and a run may cross into the next one, which starts the count again:
+ * so the first `limit` answers are always let through, and a refusal always comes, but its place may vary.
+ */
+export async function untilRefused<T extends { status: number }>(limit: number, send: (i: number) => Promise<T>): Promise<T[]> {
+  const answers: T[] = [];
+  for (let i = 0; i < 2 * limit + 1 && answers.at(-1)?.status !== 429; i++) {
+    answers.push(await send(i));
+  }
+  return answers;
+}
+
 /** The error body an expected failure answers with. */
 export const apiError = (code: string, message?: string, field?: string) => ({
   error: { code, ...(message === undefined ? {} : { message }), ...(field === undefined ? {} : { field }) },

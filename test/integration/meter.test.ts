@@ -6,7 +6,7 @@ import { forgetStats } from 'src/api/routes/stats';
 import { ROLLED_BEFORE_COUNTER, STATS_NAME } from 'src/do/StatsDO';
 import { strToNodeId } from 'src/utils/strings/nodeId';
 
-import { api, call, createParty, drawParty, joinParty, signIn, uniqueEmail, uniqueIp } from './support';
+import { api, call, createParty, drawParty, joinParty, signIn, uniqueEmail, uniqueIp, untilRefused } from './support';
 
 // Plan section 3 (the Party'o'meter) and review fix 4.
 
@@ -79,16 +79,12 @@ describe("the Party'o'meter", () => {
     expect((await watch({ origin: APP })).status).toBe(400);
     expect((await watch({ upgrade: 'websocket', origin: 'https://evil.example' })).status).toBe(403);
     const ip = uniqueIp();
-    const sockets: WebSocket[] = [];
-    for (let i = 0; i < 30; i++) {
-      const res = await watch({ upgrade: 'websocket', origin: APP }, ip);
-      expect(res.status).toBe(101);
-      sockets.push(res.webSocket!);
-    }
-    expect((await watch({ upgrade: 'websocket', origin: APP }, ip)).status).toBe(429);
-    for (const ws of sockets) {
-      ws.accept();
-      ws.close();
+    const answers = await untilRefused(30, () => watch({ upgrade: 'websocket', origin: APP }, ip));
+    expect(answers.slice(0, 30).map(res => res.status)).toEqual(Array(30).fill(101));
+    expect(answers.at(-1)!.status).toBe(429);
+    for (const res of answers.filter(r => r.webSocket)) {
+      res.webSocket!.accept();
+      res.webSocket!.close();
     }
   });
 

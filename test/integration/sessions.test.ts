@@ -9,7 +9,7 @@ import { nodeIdToStr, strToNodeId } from 'src/utils/strings/nodeId';
 
 import {
   api, browserKey, call, createParty, joinParty, jwt, mailbox, magicLinkToken, mintEnterRequestToken, mintUserToken, proof, redeem,
-  requestEmailChange, requestMagicLink, signIn, signInBound, uniqueEmail, uniqueIp,
+  requestEmailChange, requestMagicLink, signIn, signInBound, uniqueEmail, uniqueIp, untilRefused,
 } from './support';
 
 // Plan sections 4.1 (the party code out of the URL) and 4.3 (bound sessions, DPoP), with review fix 3 (a proof works
@@ -35,10 +35,9 @@ describe('POST /v1/parties/lookup', () => {
     expect(await call('POST', '/v1/parties/lookup', { body: { code: '1' } })).toMatchObject({ status: 400, body: { error: { code: 'invalid', field: 'code' } } });
     expect((await call('POST', '/v1/parties/lookup', { body: { code: 'QQQQQQQQ' } })).status).toBe(404);
     const ip = uniqueIp();
-    for (let i = 0; i < 60; i++) {
-      expect((await call('POST', '/v1/parties/lookup', { body: { code: 'QQQQQQQQ' }, ip })).status).toBe(404);
-    }
-    expect((await call('POST', '/v1/parties/lookup', { body: { code: 'QQQQQQQQ' }, ip })).status).toBe(429);
+    const answers = await untilRefused(60, () => call('POST', '/v1/parties/lookup', { body: { code: 'QQQQQQQQ' }, ip }));
+    expect(answers.slice(0, 60).every(a => a.status === 404)).toBe(true);
+    expect(answers.at(-1)!.status).toBe(429);
   });
 });
 
@@ -204,9 +203,8 @@ describe("a party's live socket", () => {
   it('gets its ticket under the lookup limit, and the ticket works for five minutes', async () => {
     const host = await signIn(uniqueEmail('host'));
     const ip = uniqueIp();
-    for (let i = 0; i < 60; i++) {
-      await call('POST', '/v1/parties/lookup', { body: { code: 'QQQQQQQQ' }, ip });
-    }
+    // Lookups until this client is refused; then a ticket for a code is refused too, as it counts the same way.
+    expect((await untilRefused(60, () => call('POST', '/v1/parties/lookup', { body: { code: 'QQQQQQQQ' }, ip }))).at(-1)!.status).toBe(429);
     expect((await call('POST', '/v1/live/ticket', { token: host.token, body: { code: 'QQQQQQQQ' }, ip })).status).toBe(429);
     const { ticket } = (await call('POST', '/v1/live/ticket', { token: host.token })).body;
     const { iat, exp } = await jwt().jwtVerify<{ iat: number; exp: number }>(ticket, 'LiveTicket');

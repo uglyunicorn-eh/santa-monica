@@ -43,7 +43,9 @@ describe('nothing stored before a link is used', () => {
 });
 
 describe('the per-address email limit', () => {
-  it('allows about 3 emails a minute to one address, counted by its hash, for sign-in links, invites and email-change links alike', async () => {
+  // The limit counts in one-minute windows; a run that crosses into the next one sees the count start again, and
+  // this test mixes several kinds of email, so it can't simply keep going until refused. It tries again instead.
+  it('allows about 3 emails a minute to one address, counted by its hash, for sign-in links, invites and email-change links alike', { retry: 2 }, async () => {
     const email = uniqueEmail('busy');
     // Two sign-in links, then an invite: the third email.
     for (let i = 0; i < 2; i++) {

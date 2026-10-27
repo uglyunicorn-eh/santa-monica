@@ -5,7 +5,7 @@ import { nodeIdToStr } from 'src/utils/strings/nodeId';
 
 import {
   apiError, createParty, magicLinkToken, mailbox, me, mintEnterRequestToken, mintUserToken, newKey, redeem,
-  requestMagicLink, signIn, uniqueEmail,
+  requestMagicLink, signIn, uniqueEmail, uniqueIp, untilRefused,
 } from './support';
 
 describe('magic-link sign-in', () => {
@@ -150,31 +150,24 @@ describe('repeating a sign-in request (Idempotency-Key)', () => {
 describe('rate limiting', () => {
   it('allows 3 magic links per email per minute', async () => {
     const email = uniqueEmail('limited');
-    const statuses = [];
-    for (let i = 0; i < 5; i++) {
-      statuses.push((await requestMagicLink(email)).status);
-    }
-    expect(statuses).toEqual([202, 202, 202, 429, 429]);
-    expect(await mailbox(email)).toHaveLength(3);
+    const statuses = (await untilRefused(3, () => requestMagicLink(email))).map(r => r.status);
+    expect(statuses.slice(0, 3)).toEqual([202, 202, 202]);
+    expect(statuses.at(-1)).toBe(429);
+    expect(await mailbox(email)).toHaveLength(statuses.filter(s => s === 202).length);
   });
 
   it('counts the email case-insensitively', async () => {
     const email = uniqueEmail('cased');
-    const statuses = [];
-    for (const variant of [email, email.toUpperCase(), email, email.toUpperCase()]) {
-      statuses.push((await requestMagicLink(variant)).status);
-    }
-    expect(statuses).toEqual([202, 202, 202, 429]);
+    const statuses = (await untilRefused(3, i => requestMagicLink(i % 2 ? email.toUpperCase() : email))).map(r => r.status);
+    expect(statuses.slice(0, 3)).toEqual([202, 202, 202]);
+    expect(statuses.at(-1)).toBe(429);
   });
 
   it('allows 10 magic links per IP per minute, across emails', async () => {
-    const ip = '203.0.113.77';
-    const statuses = [];
-    for (let i = 0; i < 12; i++) {
-      statuses.push((await requestMagicLink(uniqueEmail('ip'), { ip })).status);
-    }
+    const ip = uniqueIp();
+    const statuses = (await untilRefused(10, () => requestMagicLink(uniqueEmail('ip'), { ip }))).map(r => r.status);
     expect(statuses.slice(0, 10).every(s => s === 202)).toBe(true);
-    expect(statuses.slice(10)).toEqual([429, 429]);
+    expect(statuses.at(-1)).toBe(429);
   });
 });
 
