@@ -45,7 +45,6 @@
     "workerd": true
   },
   "overrides": {
-    "undici": "7.30.1",
-    "zod": "4.6.6"
+    "undici": "7.30.1"
   }
 }
