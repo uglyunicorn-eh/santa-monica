@@ -1,7 +1,7 @@
 {
   "name": "santa-monica",
   "description": "Backyard of the Anonymous Ded Morozes",
-  "version": "5.0.0-rc",
+  "version": "5.0.0-rc.3",
   "license": "MIT",
   "private": true,
   "type": "module",
