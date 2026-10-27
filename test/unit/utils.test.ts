@@ -3,7 +3,7 @@ import * as jose from 'jose';
 import { describe, expect, it } from 'vitest';
 
 import { isPermanentMailError, render } from 'src/mail';
-import { createJwtHelpers } from 'src/utils/jwt';
+import { createJwtHelpers, isExpiredToken } from 'src/utils/jwt';
 import { strToNodeId } from 'src/utils/strings/nodeId';
 import { randomInt, randomString } from 'src/utils/strings/random';
 
@@ -34,26 +34,43 @@ describe('jwt', () => {
     await expect(helpers.jwtVerify(token, 'UserToken')).rejects.toThrow();
   });
 
-  it('issues ES256 tokens the frontend can verify with the public key', async () => {
-    const frontend = createJwtHelpers({ privateKey: env.JWT_PRIVATE_KEY, issuer: 'api.gnomik.me' });
-    const token = await frontend.issueToken('EnterRequest', { email: 'a@example.com' }, { ttl: 60 });
-    // This is what the frontend does (src/components/hooks/useJWT.tsx in santa-barbara).
-    const publicKey = await jose.importSPKI(env.TEST_PUBLIC_KEY, 'ES256');
-    const { payload, protectedHeader } = await jose.jwtVerify(token, publicKey, { issuer: 'api.gnomik.me' });
-    expect(protectedHeader.alg).toBe('ES256');
-    expect(payload).toMatchObject({ email: 'a@example.com', iss: 'api.gnomik.me' });
+  it('issues encrypted tokens (dir, A256GCM) that nothing outside the Worker can read', async () => {
+    const token = await helpers.issueToken('EnterRequest', { email: 'a@example.com', party: 'QWERTYUI' }, { ttl: 60 });
+    expect(token.split('.')).toHaveLength(5);
+    expect(jose.decodeProtectedHeader(token)).toMatchObject({ alg: 'dir', enc: 'A256GCM', t: 'EnterRequest' });
+    // Not a JWS: there is no readable payload in it.
+    expect(() => jose.decodeJwt(token)).toThrow();
+    const readable = token.split('.').map(part => { try { return atob(part.replace(/-/g, '+').replace(/_/g, '/')); } catch { return ''; } }).join('');
+    expect(readable).not.toContain('example.com');
+    expect(readable).not.toContain('QWERTYUI');
   });
 
-  it('accepts a key stored on one line with escaped line breaks', async () => {
+  it('refuses a token with a changed byte', async () => {
+    const token = await helpers.issueToken('UserToken', { sub: 'x' }, { ttl: 60 });
+    const parts = token.split('.');
+    parts[3] = (parts[3][0] === 'A' ? 'B' : 'A') + parts[3].slice(1);
+    await expect(helpers.jwtVerify(parts.join('.'), 'UserToken')).rejects.toThrow();
+  });
+
+  it('refuses an expired token as expired, unless asked to accept it for a while', async () => {
+    const token = await helpers.issueToken('EnterRequest', { email: 'a@example.com' }, { ttl: -60 });
+    const error = await helpers.jwtVerify(token, 'EnterRequest').catch(e => e);
+    expect(isExpiredToken(error)).toBe(true);
+    expect(isExpiredToken(new Error('other'))).toBe(false);
+    expect(await helpers.jwtVerify(token, 'EnterRequest', { expiredFor: 3600 })).toMatchObject({ email: 'a@example.com' });
+    await expect(helpers.jwtVerify(token, 'EnterRequest', { expiredFor: 10 })).rejects.toThrow();
+  });
+
+  it('derives the same key from a secret stored on one line with escaped line breaks', async () => {
     const escaped = createJwtHelpers({ privateKey: env.JWT_PRIVATE_KEY.trim().split('\n').join('\\n'), issuer: 'api.test' });
     const token = await escaped.issueToken('UserToken', { sub: 'x' }, { ttl: 60 });
     expect(await helpers.jwtVerify(token, 'UserToken')).toMatchObject({ sub: 'x' });
   });
 
-  it('fails clearly on an unusable key, and does not cache the failure', async () => {
-    const broken = createJwtHelpers({ privateKey: '-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----', issuer: 'api.test' });
-    await expect(broken.issueToken('UserToken', {})).rejects.toThrow();
-    await expect(broken.issueToken('UserToken', {})).rejects.toThrow();
+  it('fails clearly without a secret, and does not cache the failure', async () => {
+    const broken = createJwtHelpers({ privateKey: '  ', issuer: 'api.test' });
+    await expect(broken.issueToken('UserToken', {})).rejects.toThrow('JWT_PRIVATE_KEY is not set.');
+    await expect(broken.issueToken('UserToken', {})).rejects.toThrow('JWT_PRIVATE_KEY is not set.');
   });
 });
 

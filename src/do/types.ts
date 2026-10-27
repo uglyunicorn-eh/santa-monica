@@ -23,8 +23,10 @@ export type UserPartyRecord = {
   isClosed: boolean;
   /** When the host drew the party. Null while it is open, and for parties drawn before this was recorded. */
   closedAt: number | null;
-  /** When the host deleted the party (it can be restored for a day). Only the host keeps a deleted party in their list. */
+  /** When the host deleted the party. Only the host keeps a deleted party in their list. */
   deletedAt?: number | null;
+  /** Until when a deleted party can be restored: a day after the host deletes it, a week after it's pruned. */
+  restorableUntil?: number | null;
 };
 
 /** A row of the user's party list. Rows stored before summaries existed have null flags until they are refreshed. */
@@ -67,6 +69,8 @@ export type PartyView = {
   closedAt: number | null;
   /** Set when the host deleted the party; only the host can see a deleted party. */
   deletedAt: number | null;
+  /** Until when a deleted party can be restored; null when it isn't deleted. */
+  restorableUntil: number | null;
   participantCount: number | null;
   participants: string[] | null;
   target: { id: string; name: string } | null;

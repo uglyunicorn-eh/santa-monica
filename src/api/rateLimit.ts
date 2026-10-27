@@ -1,36 +1,32 @@
 import { fail } from 'src/api/errors';
-import type { MailQuota } from 'src/do/UserDO';
 import { Env } from 'src/env';
-
-/**
- * At most this many emails to one address per hour: sign-in links, account links, email-change links. Counted
- * exactly by the address's UserDO (`MAIL_QUOTA_WINDOW_MS`), on top of the approximate per-minute limits below. Kept
- * low, but not so low that someone who knows an address can lock its owner out for long: at worst for an hour.
- */
-export const EMAILS_PER_ADDRESS_PER_HOUR = 6;
-
-export const ADDRESS_QUOTA: MailQuota = { limit: EMAILS_PER_ADDRESS_PER_HOUR };
-
-/** Counted against the address, but never refused: the notice to the current address about an email change. */
-export const NOTICE_QUOTA: MailQuota = { limit: EMAILS_PER_ADDRESS_PER_HOUR, always: true };
-
-export const tooManyForAddress = (field?: string) =>
-  fail('rate_limited', "That's a lot of emails for this address. Please try again in an hour.", field);
+import { mailRef, partyRef } from 'src/utils/logRef';
+import { annotate } from 'src/utils/tracing';
 
 /** The key of the limit on all emails together (`MAIL_RATE_LIMIT_ALL`). */
 export const ALL_MAIL = 'all';
 
 /**
- * The limits for anything that sends an email (magic links, account confirmations): per client IP and per
- * recipient. Returns which one was hit, or undefined. The limit on all emails together is taken later, by
+ * The limits for anything that sends an email (magic links, account links): per client IP, and per recipient
+ * (`takeAddressLimit`). Returns which one was hit, or undefined. The limit on all emails together is taken later, by
  * `takeAllMail`, right before an email goes out.
  */
 export async function emailRateLimit(env: Env, clientIp: string, email: string): Promise<'ip' | 'email' | undefined> {
-  const [byIp, byEmail] = await Promise.all([
+  const [byIp, byAddress] = await Promise.all([
     env.ENTER_RATE_LIMIT_IP.limit({ key: clientIp }),
-    env.ENTER_RATE_LIMIT_EMAIL.limit({ key: email }),
+    takeAddressLimit(env, email),
   ]);
-  return !byIp.success ? 'ip' : !byEmail.success ? 'email' : undefined;
+  return !byIp.success ? 'ip' : !byAddress ? 'email' : undefined;
+}
+
+/**
+ * Counts one email to `email` (canonical) against its limit, about 3 a minute (`MAIL_RATE_LIMIT_ADDRESS`), keyed by
+ * the address's hash (`mailRef`). False when it's used up. This is the only per-address limit, and it stores nothing:
+ * an address that never signs in leaves nothing behind. The notice of an email change to the current address is never
+ * limited (src/api/routes/me.ts), so a burst of requests can't hold it back.
+ */
+export async function takeAddressLimit(env: Env, email: string): Promise<boolean> {
+  return (await env.MAIL_RATE_LIMIT_ADDRESS.limit({ key: await mailRef(env, email) })).success;
 }
 
 /**
@@ -58,4 +54,20 @@ export async function admitLegacyCode(env: Env, clientIp: string, code: string, 
   if (!success) {
     throw fail('rate_limited', 'Too many tries with this kind of party code. Please wait a minute and try again.', field);
   }
+}
+
+/**
+ * Party codes are how a party without a secret phrase is reached, and any route that takes one tells whether it
+ * exists. So every one of them is limited per client: 60 codes a minute, 10 for old 5-letter codes. Returns the
+ * code's log ref (also put on the trace).
+ */
+export async function admitPartyCode(env: Env, clientIp: string, code: string, field = 'party'): Promise<string> {
+  const ref = await partyRef(env, code);
+  annotate({ 'party.ref': ref });
+  const { success } = await env.PARTY_LOOKUP_RATE_LIMIT_IP.limit({ key: clientIp });
+  if (!success) {
+    throw fail('rate_limited', 'Too many party lookups. Please wait a minute and try again.', field);
+  }
+  await admitLegacyCode(env, clientIp, code, field);
+  return ref;
 }

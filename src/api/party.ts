@@ -27,7 +27,7 @@ export async function listParties(env: Env, email: string, session: Session, fir
     const views = await Promise.all(stale.map(item => env.PARTY.getByName(item.slug).view(session.userId)));
     const records = views.map((view, i): UserPartyRecord | null => view && {
       slug: view.slug, name: view.name, isHost: view.isHost, isProtected: view.isProtected, isClosed: view.isClosed,
-      deletedAt: view.deletedAt, createdAt: stale[i].createdAt, closedAt: view.closedAt,
+      deletedAt: view.deletedAt, restorableUntil: view.restorableUntil, createdAt: stale[i].createdAt, closedAt: view.closedAt,
     });
     stale.forEach((item, i) => refreshed.set(item.slug, records[i]));
     await user.apply(records.filter(record => record !== null).map(party => ({ type: 'addParty' as const, party })));

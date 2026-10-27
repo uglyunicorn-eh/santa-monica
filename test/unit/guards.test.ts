@@ -2,6 +2,7 @@ import { env, runInDurableObject } from 'cloudflare:test';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ALL_MAIL, emailRateLimit, takeAllMail } from 'src/api/rateLimit';
+import { MAX_REMEMBERED_REQUESTS, REQUEST_MEMO_MS, forgetRequest, forgetRequests, rememberRequest, seenRequest } from 'src/api/requestMemo';
 import { PUBLIC_CACHE_MS, PUBLIC_VIEW_MS, MAX_CACHED_VIEWS, cacheTtl, cachedView, cachedViewCount, clearViews, forgetView, keepView, viewTtl } from 'src/api/viewCache';
 import { PartyDO } from 'src/do/PartyDO';
 import { MAX_ATTEMPTS } from 'src/do/outbox';
@@ -120,12 +121,11 @@ describe('signed-out view cache', () => {
 });
 
 describe('POST /v1/parties/lookup', () => {
-  it('answers like GET /v1/parties?code=, and refuses a malformed code like other party writes', async () => {
+  it('takes the code in any case, and refuses a malformed code like other party writes', async () => {
     const host = await signIn(uniqueEmail('host'), 'Host');
     const { body: party } = await request('POST', '/v1/parties', { token: host.token, body: { name: 'Lookup' } });
-    const byQuery = await request('GET', `/v1/parties?code=${party.code}`, { token: host.token });
     const byBody = await request('POST', '/v1/parties/lookup', { token: host.token, body: { code: party.code.toLowerCase() } });
-    expect(byBody).toMatchObject({ status: 200, body: byQuery.body });
+    expect(byBody).toMatchObject({ status: 200, body: { code: party.code, isHost: true } });
     expect(await request('POST', '/v1/parties/lookup', { body: { code: '1' } })).toMatchObject({ status: 400, body: { error: { code: 'invalid', field: 'code' } } });
     expect(await request('POST', '/v1/parties/lookup', { body: { code: party.code }, env: testEnv({ PARTY_LOOKUP_RATE_LIMIT_IP: denied }) }))
       .toMatchObject({ status: 429 });
@@ -138,7 +138,7 @@ describe('the limit on all emails together', () => {
   it('is not part of the per-IP and per-address limits', async () => {
     const keys: string[] = [];
     expect(await emailRateLimit(testEnv({ ENTER_RATE_LIMIT_IP: denied, MAIL_RATE_LIMIT_ALL: counting(keys) }), '1.2.3.4', 'a@example.com')).toBe('ip');
-    expect(await emailRateLimit(testEnv({ ENTER_RATE_LIMIT_EMAIL: denied, MAIL_RATE_LIMIT_ALL: counting(keys) }), '1.2.3.4', 'a@example.com')).toBe('email');
+    expect(await emailRateLimit(testEnv({ MAIL_RATE_LIMIT_ADDRESS: denied, MAIL_RATE_LIMIT_ALL: counting(keys) }), '1.2.3.4', 'a@example.com')).toBe('email');
     expect(await emailRateLimit(testEnv({ MAIL_RATE_LIMIT_ALL: denied }), '1.2.3.4', 'a@example.com')).toBeUndefined();
     expect(keys).toEqual([]);
     expect(await takeAllMail(testEnv({ MAIL_RATE_LIMIT_ALL: counting(keys) }))).toBe(true);
@@ -150,13 +150,7 @@ describe('the limit on all emails together', () => {
     const keys: string[] = [];
     // Refused for another reason first: a party code that doesn't exist, or an address over its cap.
     expect((await request('POST', '/v1/auth/magic-link', { body: { email: uniqueEmail(), party: 'QQQQQQQQ' }, env: testEnv({ MAIL_RATE_LIMIT_ALL: counting(keys) }) })).status).toBe(404);
-    const capped = uniqueEmail('capped');
-    await runInDurableObject(env.USER.getByName(capped), async (_i, state) => {
-      for (let i = 0; i < 20; i++) {
-        state.storage.sql.exec('INSERT INTO mail_sent (at) VALUES (?)', Date.now());
-      }
-    });
-    expect((await request('POST', '/v1/auth/magic-link', { body: { email: capped }, env: testEnv({ MAIL_RATE_LIMIT_ALL: counting(keys) }) })).status).toBe(429);
+    expect((await request('POST', '/v1/auth/magic-link', { body: { email: uniqueEmail('capped') }, env: testEnv({ MAIL_RATE_LIMIT_ADDRESS: denied, MAIL_RATE_LIMIT_ALL: counting(keys) }) })).status).toBe(429);
     expect(keys).toEqual([]);
     expect((await request('POST', '/v1/auth/magic-link', { body: { email: uniqueEmail() }, env: testEnv({ MAIL_RATE_LIMIT_ALL: counting(keys) }) })).status).toBe(202);
     expect(keys).toEqual([ALL_MAIL]);
@@ -177,11 +171,14 @@ describe('the limit on all emails together', () => {
     const host = await signIn(uniqueEmail('host'), 'Host');
     const { body: party } = await request('POST', '/v1/parties', { token: host.token, body: { name: 'Invites' } });
     const invited = uniqueEmail('invited');
-    const sent = () => runInDurableObject(env.USER.getByName(invited), async (_i, state) => state.storage.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM mail_sent').one().n);
+    // What the invite counted against its address's limit.
+    const counted: string[] = [];
+    const address = { limit: async ({ key }: { key: string }) => { counted.push(key); return { success: true }; } } as unknown as RateLimit;
+    const sent = async () => counted.length;
     const queued = () => runInDurableObject(env.PARTY.getByName(party.code), async (_i, state) => state.storage.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM outbox').one().n);
     const runWith = (limit: RateLimit) => runInDurableObject(env.PARTY.getByName(party.code), async (instance: PartyDO) => {
       const original = (instance as any).env;
-      (instance as any).env = { ...original, MAIL_RATE_LIMIT_ALL: limit };
+      (instance as any).env = { ...original, MAIL_RATE_LIMIT_ALL: limit, MAIL_RATE_LIMIT_ADDRESS: address };
       try {
         await (instance as any).runOutbox(() => true, true);
       } finally {
@@ -220,5 +217,32 @@ describe('the limit on all emails together', () => {
     });
     await runWith(allowed);
     expect([await queued(), await sent()]).toEqual([0, before + 1]);
+  });
+});
+
+describe('remembered sign-in requests', () => {
+  afterEach(forgetRequests);
+
+  it('are remembered for a while, for the same detail only, and let go when their email fails', () => {
+    rememberRequest('k', 'party', 0);
+    expect(seenRequest('k', 'party', REQUEST_MEMO_MS - 1)).toBe(true);
+    expect(seenRequest('k', 'other', 1)).toBe(false);
+    expect(seenRequest('k', 'party', REQUEST_MEMO_MS)).toBe(false);
+    expect(seenRequest('k', 'party', 1)).toBe(false); // gone once it expired
+    rememberRequest('k', 'party');
+    forgetRequest('k', 'other');
+    expect(seenRequest('k', 'party')).toBe(true);
+    forgetRequest('k', 'party');
+    expect(seenRequest('k', 'party')).toBe(false);
+  });
+
+  it('drop the oldest when full', () => {
+    for (let i = 0; i < MAX_REMEMBERED_REQUESTS; i++) {
+      rememberRequest(`r${i}`, '');
+    }
+    rememberRequest('newest', '');
+    expect(seenRequest('r0', '')).toBe(false);
+    expect(seenRequest('r1', '')).toBe(true);
+    expect(seenRequest('newest', '')).toBe(true);
   });
 });

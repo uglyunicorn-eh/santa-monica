@@ -7,6 +7,7 @@ import * as emailChangeNotice from './templates/emailChangeNotice';
 import * as emailTakenNotice from './templates/emailTakenNotice';
 import * as partyInvite from './templates/partyInvite';
 import * as partyNotification from './templates/partyNotification';
+import * as partyPruned from './templates/partyPruned';
 import * as signIn from './templates/signIn';
 
 import { from } from 'src/config.json';
@@ -54,6 +55,13 @@ export const renderAccountDeletion = ({ url, assetsUrl }: { url: string; assetsU
 
 // The body has placeholders of its own, so it is filled first (as plain text: render escapes it once, in the HTML part).
 const fillBody = (body: string, vars: Record<string, string>) => fill(body, vars, s => s);
+
+/** The host's notice that an open party was deleted for want of activity, with the date until which it can come back. */
+export const renderPartyPruned = ({ party, restorableUntil, assetsUrl }: { party: { name: string; url: string }; restorableUntil: number; assetsUrl: string }) => {
+  const until = new Date(restorableUntil).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+  const vars = { 'party.name': party.name, url: party.url, until, assetsUrl, assetsVersion };
+  return render(partyPruned, { ...partyPruned.vars, ...vars, body: fillBody(partyPruned.body, vars) });
+};
 
 export const renderPartyInvite = ({ hostName, party, assetsUrl }: { hostName: string; party: { name: string; url: string; isProtected: boolean }; assetsUrl: string }) => {
   const vars = { 'host.name': hostName, 'party.name': party.name, 'party.url': party.url, assetsUrl, assetsVersion };

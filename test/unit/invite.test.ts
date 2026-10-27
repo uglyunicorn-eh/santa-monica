@@ -1,7 +1,7 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 
-import { EMAILS_PER_ADDRESS_PER_HOUR } from 'src/api/rateLimit';
+import { mailRef } from 'src/utils/logRef';
 import { MAX_PARTY_INVITES, REINVITE_AFTER_MS } from 'src/do/PartyDO';
 
 import { denied, drainOutbox, mailer, request, signIn, testEnv, uniqueEmail } from './helpers';
@@ -99,18 +99,23 @@ describe('POST /v1/parties/invite', () => {
       .toMatchObject({ status: 429, body: { error: { code: 'rate_limited', field: 'emails' } } });
   });
 
-  it("drops an invite to an address that is over its hourly email cap, or for a party that's gone", async () => {
+  it("drops an invite to an address that is over its email limit, or for a party that's gone, storing nothing for it", async () => {
     const host = await signIn(uniqueEmail('host'), 'Host');
     const party = await createParty(host.token);
     const sent = await partyMailer(party.code);
     const e = testEnv();
     const busy = uniqueEmail('busy');
-    for (let i = 0; i < EMAILS_PER_ADDRESS_PER_HOUR; i++) {
-      await env.USER.getByName(busy).countMail({ limit: EMAILS_PER_ADDRESS_PER_HOUR });
+    // The limit is the real binding inside the party: use it up for this address.
+    const ref = await mailRef(env, busy);
+    for (let i = 0; i < 3; i++) {
+      await env.MAIL_RATE_LIMIT_ADDRESS.limit({ key: ref });
     }
     await invite(host.token, party.code, [busy], e);
     await drainOutbox(party.code);
     expect(sent).toHaveLength(0);
+    // Nothing was stored for the address.
+    expect(await runInDurableObject(env.USER.getByName(busy), async (_i, state) =>
+      state.storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '_cf_%'").toArray())).toEqual([]);
 
     const other = await createParty(host.token);
     const otherSent = await partyMailer(other.code);

@@ -6,15 +6,14 @@ import { action } from 'src/api/action';
 import { ApiContext, ApiEnv, RequestSession, clientIp, jwtFor } from 'src/api/context';
 import { fail, notSignedIn } from 'src/api/errors';
 import { idempotencyKey, keyHash, readBody, readQuery, send } from 'src/api/input';
-import { liveRequest, passUpgrade } from 'src/api/live';
+import { invalidTicket, liveRequest, passUpgrade } from 'src/api/live';
 import { listParties } from 'src/api/party';
-import { ADDRESS_QUOTA, NOTICE_QUOTA, emailRateLimit, tooManyForAddress } from 'src/api/rateLimit';
+import { emailRateLimit } from 'src/api/rateLimit';
 import { requireSession } from 'src/api/session';
 import { accepted, bodies, linkAccount, unrevealedParties, partyPage, queries, session as sessionJson, tokens, user as userJson } from 'src/api/schemas';
 import { AccountDeletionToken, EmailChangeCancelToken, EmailChangeToken } from 'src/api/types';
 import { issueSession, sendCourtesyMail, sendRequestedMail } from 'src/api/users';
 import { forgetView } from 'src/api/viewCache';
-import type { MailQuota } from 'src/do/UserDO';
 import { UserRecord } from 'src/do/types';
 import { renderAccountDeletion, renderEmailChange, renderEmailChangeNotice, renderEmailTakenNotice } from 'src/mail';
 import { canonicalEmail } from 'src/utils/email';
@@ -98,31 +97,32 @@ me.post('/parties/revealed', requireSession, action('partyRevealed', async c => 
  * `party.revealed` when they reveal their name in one (in any tab). One call to the user.
  */
 me.get('/live', action('watchMe', async c => {
-  const { email, request } = await liveRequest(c);
+  const { email, party, request } = await liveRequest(c);
+  // A party's ticket opens only that party's socket.
+  if (party) {
+    throw invalidTicket();
+  }
   const answer = await c.env.USER.getByName(email).fetch(request);
   return passUpgrade(answer, () => fail('unauthenticated', 'This live-updates ticket is no longer valid.', 'ticket'));
 }));
 
 /**
- * Starts an account email request in one UserDO call (session check, idempotency claim, and counting the email to
- * the user's address against `quota`), runs `deliver`, and frees the claim when `deliver` fails, so a retry sends the
- * email. A repeat of a claimed request answers 202 without sending.
+ * Starts an account email request in one UserDO call (session check and idempotency claim, in the account's own
+ * object), runs `deliver`, and frees the claim when `deliver` fails, so a retry sends the email. A repeat of a claimed
+ * request answers 202 without sending.
  */
-async function mailRequest(c: ApiContext, kind: string, detail: string, quota: MailQuota, deliver: (user: UserRecord) => Promise<void>) {
+async function mailRequest(c: ApiContext, kind: string, detail: string, deliver: (user: UserRecord) => Promise<void>) {
   const s = session(c);
   const key = idempotencyKey(c);
   const claim = key && `${kind}:${key}`;
   const userDO = c.env.USER.getByName(s.email);
-  const user = await userDO.beginMailRequest(s, claim, detail, quota);
-  annotate({ 'mail.request_repeated': user === 'repeat', 'mail.capped': user === 'capped' });
+  const user = await userDO.beginMailRequest(s, claim, detail);
+  annotate({ 'mail.request_repeated': user === 'repeat' });
   if (!user) {
     throw notSignedIn();
   }
   if (user === 'repeat') {
     return send(c, accepted, { ok: true }, 202);
-  }
-  if (user === 'capped') {
-    throw tooManyForAddress();
   }
   try {
     await deliver(user);
@@ -152,7 +152,7 @@ me.post('/sign-out', requireSession, action('signOutEverywhere', async c => {
 me.post('/deletion', requireSession, action('requestAccountDeletion', async c => {
   await readBody(c, bodies.empty);
   const { env } = c;
-  return await mailRequest(c, 'deletion', '', ADDRESS_QUOTA, async user => {
+  return await mailRequest(c, 'deletion', '', async user => {
     const rateLimited = await emailRateLimit(env, clientIp(c), user.email);
     annotate({ 'auth.rate_limited': rateLimited ?? false });
     if (rateLimited) {
@@ -175,25 +175,22 @@ me.post('/email-change', requireSession, action('requestEmailChange', async c =>
   const { email: newEmail, typed } = await readBody(c, bodies.emailChange);
   const { env } = c;
   // The notice to the current address counts against it but never blocks the change; the new address's cap does.
-  return await mailRequest(c, 'email', newEmail, NOTICE_QUOTA, async user => {
+  return await mailRequest(c, 'email', newEmail, async user => {
     if (newEmail === canonicalEmail(user.email)) {
       throw fail('invalid', "That's already your email.", 'email');
     }
-    // An account made before addresses were normalized may still be kept under the address as typed.
-    const [rateLimited, recipient, takenAsTyped] = await Promise.all([
+    // Only the new address is limited. An account made before addresses were normalized may still be kept under the
+    // address as typed. Both checks only read, so an address without an account is left with nothing stored.
+    const [rateLimited, account, takenAsTyped] = await Promise.all([
       emailRateLimit(env, clientIp(c), newEmail),
-      env.USER.getByName(newEmail).checkRecipient(ADDRESS_QUOTA),
+      env.USER.getByName(newEmail).get(),
       typed === newEmail ? null : env.USER.getByName(typed).get(),
     ]);
     annotate({ 'auth.rate_limited': rateLimited ?? false });
     if (rateLimited) {
       throw tooManyEmails();
     }
-    annotate({ 'mail.capped': recipient === 'capped' });
-    if (recipient === 'capped') {
-      throw tooManyForAddress('email');
-    }
-    const taken = recipient === 'taken' || Boolean(takenAsTyped);
+    const taken = Boolean(account) || Boolean(takenAsTyped);
     annotate({ 'account.email_taken': taken });
     const jwt = jwtFor(env);
     const sub = nodeIdToStr({ kind: 'User', id: user.id });
@@ -207,8 +204,9 @@ me.post('/email-change', requireSession, action('requestEmailChange', async c =>
       const link = renderEmailChange({ url: `${env.FRONTEND_URL}/profile/email#${token}`, oldEmail: user.email, newEmail, assetsUrl: env.PUBLIC_URL });
       await sendRequestedMail(env, newEmail, link, 'email');
     }
-    // Sent the same way in both cases. Cancelling when nothing was sent still signs out everywhere, which is what
-    // someone who didn't ask for the change wants.
+    // Sent the same way in both cases, and never limited per address: it's how the owner stops a change made with a
+    // stolen session. Cancelling when nothing was sent still signs out everywhere, which is what someone who didn't
+    // ask for the change wants.
     const cancel = await jwt.issueToken<EmailChangeCancelToken>('EmailChangeCancel', { sub, email: user.email, jti }, { ttl: LINK_TTL });
     await sendCourtesyMail(env, user.email, renderEmailChangeNotice({
       oldEmail: user.email, newEmail, cancelUrl: `${env.FRONTEND_URL}/profile/email/cancel#${cancel}`, assetsUrl: env.PUBLIC_URL,

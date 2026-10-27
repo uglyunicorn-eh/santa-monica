@@ -122,11 +122,11 @@ describe('API action spans', () => {
     const { body: party } = await request('POST', '/v1/parties', { token: who.token, body: { name: 'Query spans' } });
     const spans = captureSpans();
 
-    await request('GET', `/v1/parties?code=${party.code}`, { token: who.token });
+    await request('POST', '/v1/parties/lookup', { body: { code: party.code }, token: who.token });
     await request('GET', '/v1/me/parties', { token: who.token });
     await request('GET', '/v1/me', { token: who.token });
 
-    expect(spans.map(s => s.name)).toEqual(['api.party', 'api.partyHistory', 'api.user']);
+    expect(spans.map(s => s.name)).toEqual(['api.lookUpParty', 'api.partyHistory', 'api.user']);
     expect(spans[0].attributes).toMatchObject({ 'party.ref': await partyRef(env, party.code), 'party.found': true, 'party.joined': true });
     // The code itself is never recorded: it is the key to a party without a secret phrase.
     expect(JSON.stringify(spans)).not.toContain(party.code);

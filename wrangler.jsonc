@@ -23,11 +23,8 @@
     "PUBLIC_URL": "https://api.gnomik.me",
     "FRONTEND_URL": "https://gnomik.me",
     "ALLOWED_ORIGINS": "https://gnomik.me,https://*.santa-57a.pages.dev",
-    // New session tokens and live tickets carry the email sealed (`em`) instead of readable (`email`). Turn on one
-    // release after the code that reads `em` is deployed, so a rollback never meets a token it can't read.
-    "SEAL_TOKEN_EMAIL": "false",
-    // Only session tokens bound to a browser's key (DPoP) count. Turn on 30 days after the app starts binding at
-    // sign-in: by then every unbound token has expired, so nobody is signed out early.
+    // Only session tokens bound to a browser's key (DPoP) count. Turn on with the web app release that binds at sign-in
+    // (every session starts fresh then), after the checks in the README's deploy notes. Off again is the kill switch.
     "REQUIRE_BOUND_SESSIONS": "false"
   },
   "durable_objects": {
@@ -47,7 +44,8 @@
   ],
   "ratelimits": [
     { "name": "ENTER_RATE_LIMIT_IP", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } },
-    { "name": "ENTER_RATE_LIMIT_EMAIL", "namespace_id": "1002", "simple": { "limit": 3, "period": 60 } },
+    // Emails to one address, keyed by a hash of it (`mailRef`), never the address: the only per-address email limit.
+    { "name": "MAIL_RATE_LIMIT_ADDRESS", "namespace_id": "1002", "simple": { "limit": 3, "period": 60 } },
     // Party codes are the key to a party without a secret phrase, so looking them up and joining are limited too.
     { "name": "PARTY_LOOKUP_RATE_LIMIT_IP", "namespace_id": "1003", "simple": { "limit": 60, "period": 60 } },
     // Old 5-letter codes (about 1.2·10^7 of them) are far easier to guess than 8-letter ones, so trying them is slower.
@@ -77,7 +75,6 @@
         "PUBLIC_URL": "https://gnomik-api-preview.uglyunicorn.workers.dev",
         "FRONTEND_URL": "http://localhost:4321",
         "ALLOWED_ORIGINS": "https://gnomik.me,https://*.santa-57a.pages.dev,http://localhost:4321,http://localhost:4322,http://localhost:4323",
-        "SEAL_TOKEN_EMAIL": "false",
         "REQUIRE_BOUND_SESSIONS": "false"
       },
       "durable_objects": {
@@ -92,7 +89,7 @@
       ],
       "ratelimits": [
         { "name": "ENTER_RATE_LIMIT_IP", "namespace_id": "2001", "simple": { "limit": 10, "period": 60 } },
-        { "name": "ENTER_RATE_LIMIT_EMAIL", "namespace_id": "2002", "simple": { "limit": 3, "period": 60 } },
+        { "name": "MAIL_RATE_LIMIT_ADDRESS", "namespace_id": "2002", "simple": { "limit": 3, "period": 60 } },
         { "name": "PARTY_LOOKUP_RATE_LIMIT_IP", "namespace_id": "2003", "simple": { "limit": 60, "period": 60 } },
         { "name": "LEGACY_CODE_LOOKUP_RATE_LIMIT_IP", "namespace_id": "2005", "simple": { "limit": 10, "period": 60 } },
         { "name": "JOIN_RATE_LIMIT_USER", "namespace_id": "2004", "simple": { "limit": 10, "period": 60 } },
@@ -112,8 +109,7 @@
           "EMAIL_ALLOWLIST": "@uglyunicorn.ca,@gnomik.me",
           "FRONTEND_URL": "http://localhost:4321",
           "ALLOWED_ORIGINS": "https://gnomik.me,https://*.santa-57a.pages.dev,http://localhost:4321,http://localhost:4322,http://localhost:4323",
-          // Previews can turn these on before production, to try them with the app.
-          "SEAL_TOKEN_EMAIL": "false",
+          // Previews can turn this on before production, to try it with the app.
           "REQUIRE_BOUND_SESSIONS": "false"
         },
         // The code reads these from env, so Previews need them declared (each Preview still gets its own storage).
@@ -129,7 +125,7 @@
         ],
         "ratelimits": [
           { "name": "ENTER_RATE_LIMIT_IP", "namespace_id": "2001", "simple": { "limit": 10, "period": 60 } },
-          { "name": "ENTER_RATE_LIMIT_EMAIL", "namespace_id": "2002", "simple": { "limit": 3, "period": 60 } },
+          { "name": "MAIL_RATE_LIMIT_ADDRESS", "namespace_id": "2002", "simple": { "limit": 3, "period": 60 } },
           { "name": "PARTY_LOOKUP_RATE_LIMIT_IP", "namespace_id": "2003", "simple": { "limit": 60, "period": 60 } },
           { "name": "LEGACY_CODE_LOOKUP_RATE_LIMIT_IP", "namespace_id": "2005", "simple": { "limit": 10, "period": 60 } },
           { "name": "JOIN_RATE_LIMIT_USER", "namespace_id": "2004", "simple": { "limit": 10, "period": 60 } },

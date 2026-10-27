@@ -5,18 +5,21 @@
 //   CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... node scripts/data.ts count          # drawn parties
 //   CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... node scripts/data.ts tidy           # what tidy would change
 //   CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... node scripts/data.ts tidy --apply   # change it
+//   CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... node scripts/data.ts wake           # start every open party once
 //
 // The token needs Workers Scripts Write (the SQL endpoint asks for it even to read). WORKER defaults to gnomik-api
-// (production). Reads only ever select flags and counts; nothing personal leaves Cloudflare.
+// (production), and API_URL (for `wake`) to https://api.gnomik.me. Reads only ever select flags, counts and party
+// codes (for `wake`, which sends them straight to the API); nothing personal leaves Cloudflare.
 
 const token = process.env.CLOUDFLARE_API_TOKEN;
 const account = process.env.CLOUDFLARE_ACCOUNT_ID;
 const worker = process.env.WORKER ?? 'gnomik-api';
+const apiUrl = process.env.API_URL ?? 'https://api.gnomik.me';
 const [command, flag] = process.argv.slice(2);
 const apply = flag === '--apply';
 
-if (!token || !account || !['count', 'tidy'].includes(command)) {
-  console.error('Usage: CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... node scripts/data.ts count|tidy [--apply]');
+if (!token || !account || !['count', 'tidy', 'wake'].includes(command)) {
+  console.error('Usage: CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... node scripts/data.ts count|tidy [--apply]|wake');
   process.exit(1);
 }
 
@@ -78,17 +81,52 @@ async function tables(namespace: string, id: string): Promise<Set<string>> {
   return new Set(result.rows.map(row => String(row[0])));
 }
 
-/** Drawn parties, for the Party'o'meter's starting value (ROLLED_BEFORE_COUNTER in src/do/StatsDO.ts). */
+/** A party's row, read with `SELECT *`: old parties lack the newer columns, and naming one fails the query. */
+async function partyRow(namespace: string, id: string): Promise<Record<string, unknown> | undefined> {
+  if (!(await tables(namespace, id)).has('party')) {
+    return undefined;
+  }
+  const [result] = await sql(namespace, id, ['SELECT * FROM party']);
+  const row = result.rows[0];
+  return row && Object.fromEntries(result.columns.map((column, i) => [column, row[i]]));
+}
+
+/** Drawn and open parties: drawn for the Party'o'meter's starting value (ROLLED_BEFORE_COUNTER in src/do/StatsDO.ts). */
 async function count() {
   const { namespace, ids } = await objects('PartyDO');
   let drawn = 0;
+  let open = 0;
   for (const id of ids) {
-    if ((await tables(namespace, id)).has('party')) {
-      const [result] = await sql(namespace, id, ['SELECT COUNT(*) FROM party WHERE is_closed = 1']);
-      drawn += Number(first(result));
+    const party = await partyRow(namespace, id);
+    if (party?.is_closed) {
+      drawn++;
+    } else if (party && !party.deleted_at) {
+      open++;
     }
   }
-  console.log(`${worker}: ${drawn} drawn parties (${ids.length} party objects with data)`);
+  console.log(`${worker}: ${drawn} drawn and ${open} open parties (${ids.length} party objects with data)`);
+}
+
+/**
+ * Starts every open party once, with a signed-out lookup through the API, so parties nobody opens get their alarm:
+ * one past its prune date is then deleted (or erased, if it went quiet before auto-prune) by its own code, which keeps
+ * the host's list and the code's tombstone right. Run once after the deploy that brings auto-prune, then `count`.
+ */
+async function wake() {
+  const { namespace, ids } = await objects('PartyDO');
+  let woken = 0;
+  for (const id of ids) {
+    const party = await partyRow(namespace, id);
+    if (!party || party.is_closed || party.deleted_at) {
+      continue;
+    }
+    const res = await fetch(new URL('/v1/parties/lookup', apiUrl), {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: party.slug }),
+    });
+    console.log(`party ${id}: ${res.status}`);
+    woken++;
+  }
+  console.log(`Started ${woken} open part${woken === 1 ? 'y' : 'ies'}. Run count in a minute to see what's left open.`);
 }
 
 /**
@@ -160,4 +198,4 @@ async function tidy() {
   console.log(apply ? `Applied ${changes.length} change(s).` : `${changes.length} object(s) to change. Run again with --apply to change them.`);
 }
 
-await (command === 'count' ? count() : tidy());
+await (command === 'count' ? count() : command === 'wake' ? wake() : tidy());

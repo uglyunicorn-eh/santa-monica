@@ -7,6 +7,7 @@ import type { ContentfulStatusCode } from 'hono/utils/http-status';
 export const ERROR_STATUS = {
   invalid: 400,
   invalid_link: 400,
+  link_expired: 400,
   unauthenticated: 401,
   forbidden: 403,
   not_found: 404,

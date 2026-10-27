@@ -1,21 +1,33 @@
 # Plan: keep less data, traffic spikes, Party'o'meter, safer sessions
 
-Status, checked against branch `keep-less-meter-sessions` on 2026-10-27 (uncommitted; 286 unit tests at 100% coverage and 154 integration tests pass, with 22 pending for the parts not built):
+Status, checked against branch `keep-less-meter-sessions` on 2026-10-27 (uncommitted since `ae9a85d`; 302 unit tests at 100% coverage and 172 integration tests pass). The API side of every section is built; what's left is the web app, and the deploy steps.
 
 | Part | State | Differences from this plan |
 |---|---|---|
 | 1. Keep less | Built | `tidy()` runs when the party starts and after each outbox run, not only in `alarm()`. `scripts/data.ts tidy` is written, not yet run with `--apply`. |
 | 2. Traffic spikes | Built | The WebSocket backoff (web app) and the Better Stack alert (ops) aren't done. |
 | 3. Party'o'meter | Built (API) | The row is seeded when the object starts. The odometer (web app) isn't done. |
-| 4.1 Lookup | Partly | `POST /v1/parties/lookup` is built, but `GET /v1/parties?code=` is still served. The party's live socket (`GET /v1/parties/live?code=`) still has the code in its URL; moving it into the live ticket, and reusing tickets, isn't built. |
-| 4.2 JWE | Not built | What's built is the sealed `em` claim (`src/utils/tokenEmail.ts`, `SEAL_TOKEN_EMAIL`), which 4.2 replaces. |
+| 4.1 Lookup | Built (API) | `GET /v1/parties?code=` is gone. The party's live socket takes its code from the ticket (`POST /v1/live/ticket {code}`), and tickets last 5 minutes. Keeping tickets in `sessionStorage` is web app work. |
+| 4.2 JWE | Built (API) | The sealed `em` claim and `SEAL_TOKEN_EMAIL` are gone. Two details the plan didn't name: the bearer check now expects a five-part `dir` JWE, and the key derivation reads `JWT_PRIVATE_KEY` with escaped line breaks as real ones, so it doesn't matter how the secret was stored. The web app changes aren't done. |
 | 4.3 DPoP | Built (API) | Each proof also works only once (Review fixes, item 3). Launch condition 1: the integration helper signs in with a key and sends a proof on every request; the deployed-host check is planned (round 2, item 3). Conditions 2 and 3 (web app) aren't done. |
-| 5. Auto-prune | Not built | |
-| 6. Nothing stored before the click | Not built | |
+| 5. Auto-prune | Built | `AUTO_PRUNE_SINCE` is 2026-10-27 and must not be later than the deploy day. The host's party list also keeps each party's `restorable_until` (a new `UserDO.parties` column), so the list shows the 7-day deadline too. The email's subject is "‹name› was put away". `scripts/data.ts wake` is written, not yet run. |
+| 6. Nothing stored before the click | Built | `ENTER_RATE_LIMIT_EMAIL` is renamed `MAIL_RATE_LIMIT_ADDRESS`, keyed by `mailRef`. The in-memory record of repeat sign-in requests is keyed per address and claimed before the email goes out (released if it fails), so simultaneous repeats send one email. A repeated email-change request is still answered from the requester's own `mail_requests`, which stores nothing for the new address. `mail_sent` is dropped when an object starts. |
 | Review fixes 1–6 | Built | |
-| Review fixes, round 2 | Built, except item 1 | Item 1 comes with section 6. The new smoke checks haven't run against a deployed host. |
+| Review fixes, round 2 | Built | Item 1 is settled by section 6. The new smoke checks haven't run against a deployed host. |
 
-**Open from the review of the built code:** only round 2's item 1 (a cap refusal uses up the address's allowance), which section 6 settles.
+**Open from the review of the built code:** nothing.
+
+**Still to do:**
+- **Web app (santa-barbara), in the same release:**
+  - stop reading tokens (4.2) and switch to the lookup;
+  - put the party code in the live ticket and keep tickets in `sessionStorage` (4.1);
+  - bind sessions with DPoP and recover from a lost key (4.3, launch conditions 2 and 3);
+  - the odometer (3), and WebSocket backoff (2).
+- **Deploy steps:**
+  - recount the rolled parties first (`scripts/data.ts count`);
+  - after the deploy: `tidy --apply` and `wake` once;
+  - the manual sign-in check, then `REQUIRE_BOUND_SESSIONS` on.
+- **Ops:** the Better Stack alert on Durable Object `overloaded` errors.
 
 **Confirmed by integration tests** (`test/integration/`, through the Worker's own entry point with real Durable Objects):
 
@@ -24,13 +36,14 @@ Status, checked against branch `keep-less-meter-sessions` on 2026-10-27 (uncommi
 | 1. Keep less | `keepLess.test.ts` | Invites kept for a day, then deleted by the next invite or by the alarm. A repeat within a day is skipped, but every invite counts towards the cap, which reads the counter. A draw deletes all invites. Members' emails are cleared once the outbox is empty and kept while anything waits in it, and views, lists, an email change and an account deletion still work by member id. A deleted account keeps no email, and the address signs up again. Expired link records are deleted. |
 | 2. Spikes, review fixes 1, 2, 5 | `spikes.test.ts` | Signed-out views are kept, signed-in ones and 404s never are, and they expire. Every party write and an account deletion forget the kept view. The all-emails limit refuses requested emails with 429 and sends nothing. It's taken only for an email about to go out, and invites wait under it without counting against their address twice. |
 | 3. Party'o'meter, review fix 4 | `meter.test.ts` | The public count and its headers. A first draw counts once; repeats and refused draws don't. The count is kept in the Worker. Sockets get the count on connect and after a roll, and pings are answered. Only upgrades from the app are accepted, 30 a minute per client. A counter that fails or never answers doesn't hold up or fail a draw. |
-| 4.1, 4.3, review fix 3 | `sessions.test.ts` | `POST /lookup` answers like the GET for anyone, a member and the host, with its limits. A bound session works only with a proof for that key, method, URL (any trailing slash), origin and token, through a whole party, live socket included. A wrong clock gives a 400 with `DPoP-Time`, readable across origins. An optional route treats a missing or bad proof as signed out. An email change binds too, and a malformed key is refused. `REQUIRE_BOUND_SESSIONS` refuses unbound tokens. A proof works once on every route that changes something, a repeat join included, and again on reads, while a fresh proof always works. |
-| Not built yet | `planned.test.ts` | The cases of 4.1 (code in the ticket, 5-minute tickets, GET removed), 4.2, 5 and 6, as to-dos. |
+| 4.1, 4.2, 4.3, review fix 3 | `sessions.test.ts` | The lookup answers anyone, a member and the host, with its limits, and the GET is gone. A party's socket opens only from a ticket with its code, only for a member; a ticket opens only the socket it's for, is limited like a lookup, and lasts 5 minutes. Tokens are JWE with nothing readable, refused with another type, a changed byte, another key or past expiry; sign-in answers `expiresAt` and `party`; an expired link gives `link_expired` and a fresh one through `magic-link/again`, not past 7 days. A bound session works only with a proof for that key, method, URL (any trailing slash), origin and token, through a whole party, live socket included. A wrong clock gives a 400 with `DPoP-Time`, readable across origins. An optional route treats a missing or bad proof as signed out. An email change binds too, and a malformed key is refused. `REQUIRE_BOUND_SESSIONS` refuses unbound tokens. A proof works once on every route that changes something, a repeat join included, and again on reads, while a fresh proof always works. |
+| 5. Auto-prune | `prune.test.ts` | 45 days counted from the last write by a person (create, join, leave, invite, restore; not a lookup). A quiet party is deleted, its host mailed once, the guests' lists drop it, and the host sees the 7-day deadline. It can be restored within the week with 45 fresh days, and is erased after. A host's own delete keeps 24 hours; a drawn party is never pruned. One that went quiet before `AUTO_PRUNE_SINCE` is erased with no email, and an old party nobody opens is erased once the `wake` lookup starts it. |
+| 6. Nothing stored before the click | `noStorage.test.ts`, `auth.test.ts` | A magic-link request, an invite and an email-change request to a new address leave no stored object; the account appears when the link is used. About 3 emails a minute per address, by its hash, across sign-in links, invites and email-change links. The email-change notice is never held back. A repeated sign-in request sends one email; a repeated account request is answered from what the account keeps. |
 
 **What the integration tests can't reach, and how they get around it:**
 - **Settings are fixed for the whole run** (view cache off, all-emails limit wide open, bound sessions not required). The `settings` option on `call` sends a request through the same app with chosen settings changed. Durable Objects keep the run's own, so a Durable Object setting (the all-emails limit for invites) is swapped on the instance through `runInDurableObject`.
 - **Time can't move forward.** Stored times are moved back instead (`ageRows`): invites a day old, expired links.
-- **Objects can't be restarted.** The start-up clean-up (`forgetExpired`) is called directly.
+- **Restarting an object** is done with `evictDurableObject` where a test needs an old object to start again (auto-prune's backfill); the start-up clean-up (`forgetExpired`) is called directly.
 - **Worker memory is shared by the whole run,** so a kept view or count outlives a change of settings. Fresh values are read from the objects, and `forgetStats()` clears the kept count.
 - **There's no real network.** Requests reach the Worker in-process at `https://api.test`, so the `htu` check is proven against the URL the Worker sees here. Only a smoke run against the deployed hostname covers that hostname.
 - **Out of reach:** `scripts/data.ts` (it talks to the Cloudflare API) and the web app's launch conditions 2 and 3.

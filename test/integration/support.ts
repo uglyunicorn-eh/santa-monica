@@ -115,7 +115,7 @@ export async function mailbox(email: string): Promise<Mail[]> {
  * it after a `#`, which keeps it out of the URL path (and so out of logs and the Referer header).
  */
 export function linkToken(mail: Mail, path: string): string {
-  const match = new RegExp(`${FRONTEND.replace(/[.]/g, '\\.')}/${path}#([\\w-]+\\.[\\w-]+\\.[\\w-]+)`).exec(mail.text ?? '');
+  const match = new RegExp(`${FRONTEND.replace(/[.]/g, '\\.')}/${path}#([\\w-]+(?:\\.[\\w-]*){4})`).exec(mail.text ?? '');
   if (!match) {
     throw new Error(`No ${path} link in the email`);
   }
@@ -213,7 +213,7 @@ export async function createParty(host: Person, name = 'Office party', password:
   return res.body;
 }
 
-export const viewParty = (code: string, person?: { token: string }) => call<PartyJson>('GET', `/v1/parties?code=${code}`, { token: person?.token });
+export const viewParty = (code: string, person?: { token: string }) => call<PartyJson>('POST', '/v1/parties/lookup', { body: { code }, token: person?.token });
 
 export const joinParty = (person: { token: string }, party: { code: string }, name: string, password: string | null = null) =>
   call<PartyJson>('POST', '/v1/parties/join', { token: person.token, body: { code: party.code, name, ...(password === null ? {} : { password }) } });

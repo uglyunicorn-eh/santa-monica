@@ -21,7 +21,7 @@ export const denied = { limit: async () => ({ success: false }) } as unknown as 
 export const testEnv = (overrides: Partial<typeof env> = {}) => ({
   ...env,
   ENTER_RATE_LIMIT_IP: allowed,
-  ENTER_RATE_LIMIT_EMAIL: allowed,
+  MAIL_RATE_LIMIT_ADDRESS: allowed,
   PARTY_LOOKUP_RATE_LIMIT_IP: allowed,
   LEGACY_CODE_LOOKUP_RATE_LIMIT_IP: allowed,
   JOIN_RATE_LIMIT_USER: allowed,

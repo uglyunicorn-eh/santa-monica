@@ -7,7 +7,6 @@ import { headers, tokens } from 'src/api/schemas';
 import { Env } from 'src/env';
 import { checkProof, proofId } from 'src/utils/dpop';
 import { SessionProof } from 'src/utils/session';
-import { tokenEmail } from 'src/utils/tokenEmail';
 
 /** The response header that gives the Worker's time (seconds since the epoch) when a proof's clock is off. */
 export const DPOP_TIME_HEADER = 'DPoP-Time';
@@ -31,7 +30,7 @@ export const requiresBoundSessions = (env: Env) => env.REQUIRE_BOUND_SESSIONS ==
 
 /**
  * The session the bearer token claims: the header must be a well-formed, length-limited `Bearer` token, its signature
- * must check out, its payload must fit the session token schema, and its email must open (no DO call). A token bound
+ * must check out, and its payload must fit the session token schema (no DO call). A token bound
  * to a key (`cnf.jkt`) also needs a valid DPoP proof for this request (src/utils/dpop.ts), and once
  * REQUIRE_BOUND_SESSIONS is on, only bound tokens count. Undefined for anything else, and `skewed` when the only thing
  * wrong is the proof's clock. On a write (`request.records`), a bound session carries its proof's id, so the UserDO
@@ -69,8 +68,7 @@ export async function authenticate(env: Env, header: string | undefined, request
   } else if (requiresBoundSessions(env)) {
     return undefined;
   }
-  const email = await tokenEmail(env, claims.output);
-  return email ? makeSession(env, claims.output.sub, email, claims.output.ver, proof) : undefined;
+  return makeSession(env, claims.output.sub, claims.output.email, claims.output.ver, proof);
 }
 
 /**

@@ -2,7 +2,7 @@ import * as v from 'valibot';
 
 import { ApiContext } from 'src/api/context';
 import { ErrorCode, fail } from 'src/api/errors';
-import { headers, partyQuery } from 'src/api/schemas';
+import { headers } from 'src/api/schemas';
 
 /** Runs a schema over client input. The first problem becomes the error, naming the field it is about. */
 function check<S extends v.GenericSchema>(schema: S, value: unknown, code: ErrorCode = 'invalid', message?: string, field?: string): v.InferOutput<S> {
@@ -36,10 +36,6 @@ export async function readBody<S extends v.GenericSchema>(c: ApiContext, schema:
 
 /** The query string, read against a query schema. */
 export const readQuery = <S extends v.GenericSchema>(c: ApiContext, schema: S): v.InferOutput<S> => check(schema, c.req.query());
-
-/** The party `GET /v1/parties` is about, from `?code=`. A missing or malformed code names a party that doesn't exist. */
-export const readPartyCode = (c: ApiContext): string =>
-  check(partyQuery, c.req.query(), 'not_found', 'Party does not exist.', 'party').code;
 
 /**
  * The request's `Idempotency-Key`, if it sent one. Repeating a request with the same key (for ten minutes) gives the

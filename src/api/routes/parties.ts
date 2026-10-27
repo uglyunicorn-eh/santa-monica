@@ -4,9 +4,9 @@ import * as v from 'valibot';
 import { action } from 'src/api/action';
 import { ApiContext, ApiEnv, RequestSession, clientIp } from 'src/api/context';
 import { fail, notSignedIn } from 'src/api/errors';
-import { idempotencyKey, readBody, readPartyCode, send } from 'src/api/input';
-import { liveRequest, passUpgrade } from 'src/api/live';
-import { admitLegacyCode } from 'src/api/rateLimit';
+import { idempotencyKey, readBody, send } from 'src/api/input';
+import { invalidTicket, liveRequest, passUpgrade } from 'src/api/live';
+import { admitPartyCode } from 'src/api/rateLimit';
 import { PARTY_CODE_ALPHABET, PARTY_CODE_LENGTH, bodies, invites, party as partyJson } from 'src/api/schemas';
 import { canonicalEmail } from 'src/utils/email';
 import { optionalSession, requireSession } from 'src/api/session';
@@ -48,20 +48,8 @@ function anonymousView(view: PartyView): PartyView | null {
 
 const session = (c: ApiContext): RequestSession => c.get('session')!;
 
-/**
- * Party codes are how a party without a secret phrase is reached, and any route that takes one tells whether it
- * exists. So every one of them is limited per client: 60 codes a minute, 10 for old 5-letter codes.
- */
-async function admitCode(c: ApiContext, code: string): Promise<string> {
-  const ref = await partyRef(c.env, code);
-  annotate({ 'party.ref': ref });
-  const { success } = await c.env.PARTY_LOOKUP_RATE_LIMIT_IP.limit({ key: clientIp(c) });
-  if (!success) {
-    throw fail('rate_limited', 'Too many party lookups. Please wait a minute and try again.', 'party');
-  }
-  await admitLegacyCode(c.env, clientIp(c), code, 'party');
-  return ref;
-}
+/** Admits a party code for this client (`admitPartyCode`). Returns its log ref. */
+const admitCode = (c: ApiContext, code: string) => admitPartyCode(c.env, clientIp(c), code);
 
 /** A party write's body, after the code passed `admitCode`. The kept signed-out view of the party is forgotten after. */
 async function readPartyWrite<S extends typeof bodies.partyAction | typeof bodies.joinParty | typeof bodies.invite>(c: ApiContext, schema: S) {
@@ -118,13 +106,7 @@ async function lookUp(c: ApiContext, span: Span, code: string) {
   return send(c, partyJson, seen);
 }
 
-/** Looks up a party by its code in the query string (`?code=`). Being replaced by `POST /lookup`. */
-parties.get('/', optionalSession, action('party', async (c, span) => lookUp(c, span, readPartyCode(c))));
-
-/**
- * Looks up a party by its code in the body, so the code stays out of URLs: browser history, proxy logs, HAR files.
- * Answers like `GET /?code=`.
- */
+/** Looks up a party by its code, in the body, so the code stays out of URLs: browser history, proxy logs, HAR files. */
 parties.post('/lookup', optionalSession, action('lookUpParty', async (c, span) => {
   const { code } = await readBody(c, bodies.partyAction);
   return lookUp(c, span, code);
@@ -299,8 +281,11 @@ parties.post('/restore', requireSession, action('restoreParty', async c => {
  * watch; anyone else, and a party that doesn't exist, is refused alike.
  */
 parties.get('/live', action('watchParty', async c => {
-  const code = readPartyCode(c);
-  const { request } = await liveRequest(c);
-  const answer = await c.env.PARTY.getByName(code).fetch(request);
+  // The party comes from the ticket (POST /v1/live/ticket with its code), never from the URL.
+  const { party, request } = await liveRequest(c);
+  if (!party) {
+    throw invalidTicket();
+  }
+  const answer = await c.env.PARTY.getByName(party).fetch(request);
   return passUpgrade(answer, () => fail('forbidden', 'Only the party\'s members can watch it.', 'party'));
 }));

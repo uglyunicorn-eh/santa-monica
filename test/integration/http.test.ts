@@ -55,8 +55,10 @@ describe('HTTP surface', () => {
   it('never takes the party code from the path, so request logs never record it: writes take it in the body', async () => {
     const host = await signIn(uniqueEmail('host'));
     const party = (await call('POST', '/v1/parties', { token: host.token, body: { name: 'Query' } })).body;
-    expect((await call('GET', `/v1/parties?code=${party.code.toLowerCase()}`)).body).toMatchObject({ code: party.code });
-    expect(await call('GET', '/v1/parties')).toEqual({ status: 404, body: apiError('not_found', 'Party does not exist.', 'party') });
+    expect((await call('POST', '/v1/parties/lookup', { body: { code: party.code.toLowerCase() } })).body).toMatchObject({ code: party.code });
+    // The lookup by query string is gone too: no URL carries a party code.
+    expect((await call('GET', `/v1/parties?code=${party.code}`)).status).toBe(404);
+    expect((await call('GET', '/v1/parties')).status).toBe(404);
     // The old routes with the code in the path are gone.
     for (const [method, path] of [['GET', ''], ['POST', '/join'], ['POST', '/draw'], ['DELETE', '']]) {
       const res = await call(method, `/v1/parties/${party.code}${path}`, { token: host.token, body: method === 'POST' ? {} : undefined });
@@ -129,8 +131,8 @@ describe('HTTP surface', () => {
     for (const query of ['?first=0', '?first=101', '?first=abc', '?first=1000', `?after=${'x'.repeat(101)}`, '?after=', '?after=bm9wZQ']) {
       expect((await call('GET', `/v1/me/parties${query}`, { token: person.token })).status).toBe(400);
     }
-    expect((await call('GET', `/v1/parties?code=${'Q'.repeat(500)}`)).status).toBe(404);
-    expect((await call('GET', '/v1/me', { headers: { authorization: `Bearer ${'a'.repeat(3000)}.b.c` } })).status).toBe(401);
+    expect((await call('POST', '/v1/parties/lookup', { body: { code: 'Q'.repeat(500) } })).status).toBe(400);
+    expect((await call('GET', '/v1/me', { headers: { authorization: `Bearer ${'a'.repeat(3000)}..b.c.d` } })).status).toBe(401);
     expect((await call('GET', '/v1/me', { headers: { authorization: 'Basic abc' } })).status).toBe(401);
   });
 
@@ -145,10 +147,10 @@ describe('HTTP surface', () => {
   it('allows ten lookups of old 5-letter codes a minute from one address; 8-letter codes have their own limit', async () => {
     const ip = uniqueIp();
     for (let i = 0; i < 10; i++) {
-      expect((await call('GET', '/v1/parties?code=QWERT', { ip })).status).toBe(404);
+      expect((await call('POST', '/v1/parties/lookup', { body: { code: 'QWERT' }, ip })).status).toBe(404);
     }
-    expect(await call('GET', '/v1/parties?code=QWERT', { ip })).toEqual({ status: 429, body: apiError('rate_limited', expect.any(String), 'party') });
-    expect((await call('GET', '/v1/parties?code=QWERTYUI', { ip })).status).toBe(404);
+    expect(await call('POST', '/v1/parties/lookup', { body: { code: 'QWERT' }, ip })).toEqual({ status: 429, body: apiError('rate_limited', expect.any(String), 'party') });
+    expect((await call('POST', '/v1/parties/lookup', { body: { code: 'QWERTYUI' }, ip })).status).toBe(404);
   });
 
   it('limits code checks through party writes per client, as for lookups: no way around the lookup limit', async () => {

@@ -7,7 +7,6 @@ import { MailMessage, sendMail } from 'src/mail';
 import { JwtHelpers } from 'src/utils/jwt';
 import { nodeIdToStr } from 'src/utils/strings/nodeId';
 import { PublicJwk, thumbprint } from 'src/utils/dpop';
-import { emailClaim } from 'src/utils/tokenEmail';
 import { annotate } from 'src/utils/tracing';
 
 /** Session tokens last 30 days. */
@@ -21,11 +20,11 @@ export async function issueSession(env: Env, jwt: JwtHelpers, user: UserRecord, 
   annotate({ 'session.bound': Boolean(key) });
   const userToken = await jwt.issueToken<UserToken>('UserToken', {
     sub: nodeIdToStr({ kind: 'User', id: user.id }),
-    ...await emailClaim(env, user.email),
+    email: user.email,
     ver: user.tokenVersion,
     ...(key ? { cnf: { jkt: await thumbprint(key) } } : {}),
   }, { ttl: SESSION_TTL });
-  return { userToken, user };
+  return { userToken, user, expiresAt: new Date(Date.now() + SESSION_TTL * 1000).toISOString() };
 }
 
 /**

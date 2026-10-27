@@ -9,7 +9,8 @@ export interface Env {
   STATS: DurableObjectNamespace<StatsDO>;
   EMAIL: SendEmail;
   ENTER_RATE_LIMIT_IP: RateLimit;
-  ENTER_RATE_LIMIT_EMAIL: RateLimit;
+  /** Emails to one address, about 3 a minute, keyed by its hash (`mailRef`): the only per-address limit. */
+  MAIL_RATE_LIMIT_ADDRESS: RateLimit;
   /** Distinct party codes looked up, per client IP. */
   PARTY_LOOKUP_RATE_LIMIT_IP: RateLimit;
   /** Lookups and joins of old 5-letter party codes, per client IP: stricter, as they're far easier to guess. */
@@ -35,13 +36,8 @@ export interface Env {
   /** How long public answers (signed-out party views, the stats) are kept in memory, in ms. Unset: 3 s for views, 10 s for the stats. Tests set 0. */
   PUBLIC_CACHE_MS?: string;
   /**
-   * "true": new session tokens and live tickets carry the email sealed (`em`) instead of readable (`email`). Tokens
-   * are read either way, so turn it on one release after the code that reads `em` is out (src/utils/tokenEmail.ts).
-   */
-  SEAL_TOKEN_EMAIL?: string;
-  /**
-   * "true": only session tokens bound to a browser's key count (src/utils/dpop.ts); unbound ones are refused. Turn on
-   * 30 days after the app starts binding at sign-in, when every unbound token has expired.
+   * "true": only session tokens bound to a browser's key count (src/utils/dpop.ts); unbound ones are refused. Turned on
+   * with the web app release that binds at sign-in (see wrangler.jsonc).
    */
   REQUIRE_BOUND_SESSIONS?: string;
   /** P-256 private key (PKCS#8 PEM) for ES256 tokens. The frontend verifies tokens with the matching public key. */

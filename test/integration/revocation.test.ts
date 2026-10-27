@@ -18,6 +18,7 @@ type Fixture = { host: Person; party: { code: string }; drawn: { code: string };
 const ROUTES: Record<string, { revoked: 'unauthenticated' | 'anonymous' | 'no session'; call?: (f: Fixture, token: string) => Promise<{ status: number; body: any }> }> = {
   'POST /auth/magic-link': { revoked: 'no session' },
   'POST /auth/session': { revoked: 'no session' },
+  'POST /auth/magic-link/again': { revoked: 'no session' },
   'POST /me/deletion/check': { revoked: 'no session' },
   'GET /parties/live': { revoked: 'no session' },
   'GET /me/live': { revoked: 'no session' },
@@ -32,8 +33,7 @@ const ROUTES: Record<string, { revoked: 'unauthenticated' | 'anonymous' | 'no se
   'POST /me/sign-out': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/me/sign-out', { token }) },
   'POST /me/deletion': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/me/deletion', { token }) },
   'POST /me/email-change': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/me/email-change', { token, body: { email: uniqueEmail('ghost') } }) },
-  'GET /parties': { revoked: 'anonymous', call: (f, token) => viewParty(f.drawn.code, { token }) },
-  'POST /parties/lookup': { revoked: 'anonymous', call: (f, token) => call('POST', '/v1/parties/lookup', { token, body: { code: f.drawn.code } }) },
+  'POST /parties/lookup': { revoked: 'anonymous', call: (f, token) => viewParty(f.drawn.code, { token }) },
   'POST /parties': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/parties', { token, body: { name: 'Ghost party' } }) },
   'POST /parties/join': { revoked: 'unauthenticated', call: (f, token) => joinParty({ token }, f.open, 'Ghost') },
   'POST /parties/leave': { revoked: 'unauthenticated', call: (f, token) => call('POST', '/v1/parties/leave', { body: { code: f.party.code }, token }) },

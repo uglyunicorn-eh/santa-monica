@@ -179,10 +179,10 @@ describe('old 5-letter party codes', () => {
     const host = await signIn();
     const { code } = await create(host.token);
     const guest = await signIn();
-    expect(await request('GET', '/v1/parties?code=QWERT', { env: legacy })).toMatchObject({ status: 429, body: { error: { code: 'rate_limited' } } });
+    expect(await request('POST', '/v1/parties/lookup', { body: { code: 'QWERT' }, env: legacy })).toMatchObject({ status: 429, body: { error: { code: 'rate_limited' } } });
     expect(await join(guest.token, 'QWERT', undefined, legacy)).toMatchObject({ status: 429, body: { error: { field: 'party' } } });
     expect(await request('POST', '/v1/auth/magic-link', { body: { email: uniqueEmail(), party: 'QWERT' }, env: legacy })).toMatchObject({ status: 429, body: { error: { field: 'party' } } });
-    expect((await request('GET', `/v1/parties?code=${code}`, { env: legacy })).status).toBe(200);
+    expect((await request('POST', '/v1/parties/lookup', { body: { code: code }, env: legacy })).status).toBe(200);
     expect((await join(guest.token, code, undefined, legacy)).status).toBe(200);
   });
 });
@@ -201,7 +201,7 @@ describe('party codes in writes', () => {
       }]);
     }
     // Nothing happened: the party is still open, with its host.
-    expect((await request('GET', `/v1/parties?code=${code}`, { token: host.token })).body).toMatchObject({ isHost: true, deletedAt: null, isClosed: false });
+    expect((await request('POST', '/v1/parties/lookup', { body: { code: code }, token: host.token })).body).toMatchObject({ isHost: true, deletedAt: null, isClosed: false });
   });
 
   it('count old 5-letter codes against the stricter limit too', async () => {

@@ -1,12 +1,15 @@
+import { env } from 'cloudflare:test';
+import * as jose from 'jose';
 import { describe, expect, it } from 'vitest';
 
 import { DPOP_TIME_HEADER } from 'src/api/session';
 import { UserToken } from 'src/api/types';
 import { thumbprint } from 'src/utils/dpop';
+import { nodeIdToStr, strToNodeId } from 'src/utils/strings/nodeId';
 
 import {
-  api, browserKey, call, createParty, joinParty, jwt, mailbox, magicLinkToken, proof, requestEmailChange, requestMagicLink, signIn,
-  signInBound, uniqueEmail, uniqueIp,
+  api, browserKey, call, createParty, joinParty, jwt, mailbox, magicLinkToken, mintEnterRequestToken, mintUserToken, proof, redeem,
+  requestEmailChange, requestMagicLink, signIn, signInBound, uniqueEmail, uniqueIp,
 } from './support';
 
 // Plan sections 4.1 (the party code out of the URL) and 4.3 (bound sessions, DPoP), with review fix 3 (a proof works
@@ -15,16 +18,17 @@ import {
 const APP = 'https://gnomik.me';
 
 describe('POST /v1/parties/lookup', () => {
-  it('answers like GET /v1/parties?code= for anyone, a member and the host, with the code in any case', async () => {
+  it('shows anyone the limited view, a member more and the host everything, with the code in any case', async () => {
     const host = await signIn(uniqueEmail('host'));
     const guest = await signIn(uniqueEmail('guest'));
     const party = await createParty(host, 'Looked up');
     await joinParty(guest, party, 'Guest');
-    for (const who of [undefined, guest, host]) {
-      const byQuery = await call('GET', `/v1/parties?code=${party.code}`, { token: who?.token });
-      const byBody = await call('POST', '/v1/parties/lookup', { token: who?.token, body: { code: party.code.toLowerCase() } });
-      expect(byBody).toMatchObject({ status: 200, body: byQuery.body });
-    }
+    const look = async (who?: { token: string }) => (await call('POST', '/v1/parties/lookup', { token: who?.token, body: { code: party.code.toLowerCase() } })).body;
+    expect(await look()).toMatchObject({ code: party.code, isJoined: false, participants: null, password: null });
+    expect(await look(guest)).toMatchObject({ isJoined: true, isHost: false, participantCount: 2 });
+    expect(await look(host)).toMatchObject({ isHost: true, participants: ['Guest', expect.any(String)].sort() });
+    // The lookup by query string is gone.
+    expect((await call('GET', `/v1/parties?code=${party.code}`)).status).toBe(404);
   });
 
   it('refuses a malformed code, answers 404 for an unknown one, and is limited per client like other lookups', async () => {
@@ -67,8 +71,8 @@ describe('bound sessions', () => {
       expect((await call('GET', '/v1/me/parties', who)).body.items.map((p: { code: string }) => p.code)).toContain(code);
     }
     // A live-updates ticket, and the party's socket with it.
-    const { ticket } = (await call('POST', '/v1/live/ticket', guest)).body;
-    const socket = await api(`/v1/parties/live?code=${code}&ticket=${ticket}`, { headers: { upgrade: 'websocket', origin: APP } });
+    const { ticket } = (await call('POST', '/v1/live/ticket', { ...guest, body: { code } })).body;
+    const socket = await api(`/v1/parties/live?ticket=${ticket}`, { headers: { upgrade: 'websocket', origin: APP } });
     expect(socket.status).toBe(101);
     socket.webSocket!.accept();
     socket.webSocket!.close();
@@ -176,5 +180,81 @@ describe('a DPoP proof', () => {
     expect((await rename({ dpop })).status).toBe(200);
     expect((await rename({ dpop })).status).toBe(401);
     expect((await rename()).status).toBe(200);
+  });
+});
+
+describe("a party's live socket", () => {
+  it("opens from a ticket that carries the party's code, never a code in the URL, and only for a member", async () => {
+    const host = await signIn(uniqueEmail('host'));
+    const stranger = await signIn(uniqueEmail('stranger'));
+    const party = await createParty(host, 'Live');
+    const ticket = async (who: { token: string }, code?: string) =>
+      (await call('POST', '/v1/live/ticket', { token: who.token, body: code ? { code } : undefined })).body.ticket as string;
+    const open = (path: string) => api(path, { headers: { upgrade: 'websocket', origin: APP } });
+    const socket = await open(`/v1/parties/live?ticket=${await ticket(host, party.code)}`);
+    expect(socket.status).toBe(101);
+    socket.webSocket!.accept();
+    socket.webSocket!.close();
+    expect((await open(`/v1/parties/live?ticket=${await ticket(stranger, party.code)}`)).status).toBe(403);
+    // A ticket without a party opens no party's socket; a party's ticket opens no account socket.
+    expect((await open(`/v1/parties/live?code=${party.code}&ticket=${await ticket(host)}`)).status).toBe(401);
+    expect((await open(`/v1/me/live?ticket=${await ticket(host, party.code)}`)).status).toBe(401);
+  });
+
+  it('gets its ticket under the lookup limit, and the ticket works for five minutes', async () => {
+    const host = await signIn(uniqueEmail('host'));
+    const ip = uniqueIp();
+    for (let i = 0; i < 60; i++) {
+      await call('POST', '/v1/parties/lookup', { body: { code: 'QQQQQQQQ' }, ip });
+    }
+    expect((await call('POST', '/v1/live/ticket', { token: host.token, body: { code: 'QQQQQQQQ' }, ip })).status).toBe(429);
+    const { ticket } = (await call('POST', '/v1/live/ticket', { token: host.token })).body;
+    const { iat, exp } = await jwt().jwtVerify<{ iat: number; exp: number }>(ticket, 'LiveTicket');
+    expect(exp - iat).toBe(5 * 60);
+  });
+});
+
+describe('encrypted tokens', () => {
+  it('are JWE, and nothing in them can be read without the key', async () => {
+    const who = await signIn(uniqueEmail('reader'));
+    for (const token of [who.token, (await call('POST', '/v1/live/ticket', { token: who.token })).body.ticket as string]) {
+      expect(jose.decodeProtectedHeader(token)).toMatchObject({ alg: 'dir', enc: 'A256GCM' });
+      const readable = token.split('.').map(part => { try { return atob(part.replace(/-/g, '+').replace(/_/g, '/')); } catch { return ''; } }).join('');
+      expect(readable).not.toContain(who.email.split('@')[0]);
+    }
+  });
+
+  it('are refused with another type, a changed byte, another key, or past their expiry', async () => {
+    const who = await signIn(uniqueEmail('forger'));
+    const parts = who.token.split('.');
+    parts[3] = (parts[3][0] === 'A' ? 'B' : 'A') + parts[3].slice(1);
+    const other = await mintUserToken({ sub: nodeIdToStr({ kind: 'User', id: strToNodeId(who.id).id }), email: who.email }, 3600, env.TEST_OTHER_PRIVATE_KEY);
+    const expired = await mintUserToken({ sub: nodeIdToStr({ kind: 'User', id: strToNodeId(who.id).id }), email: who.email }, -60);
+    const link = await mintEnterRequestToken({ email: who.email, jti: 'x' });
+    for (const token of [parts.join('.'), other, expired, link]) {
+      expect((await call('GET', '/v1/me', { token })).status).toBe(401);
+    }
+  });
+
+  it('come with what the app used to read from them: when the session ends, and the link\'s party', async () => {
+    const host = await signIn(uniqueEmail('host'));
+    const party = await createParty(host, 'Linked');
+    const email = uniqueEmail('linked');
+    await requestMagicLink(email, { party: party.code });
+    const entered = await redeem(magicLinkToken((await mailbox(email)).at(-1)!));
+    expect(entered.body).toMatchObject({ party: party.code, expiresAt: expect.any(String) });
+  });
+
+  it('give a fresh link for an expired one, to the same address and party, and refuse one a week too old', async () => {
+    const host = await signIn(uniqueEmail('host'));
+    const party = await createParty(host, 'Again');
+    const email = uniqueEmail('again');
+    const expired = await mintEnterRequestToken({ email, jti: crypto.randomUUID(), party: party.code }, -3600);
+    expect(await redeem(expired)).toMatchObject({ status: 400, body: { error: { code: 'link_expired' } } });
+    expect((await call('POST', '/v1/auth/magic-link/again', { body: { token: expired } })).status).toBe(202);
+    const fresh = magicLinkToken((await mailbox(email)).at(-1)!);
+    expect((await redeem(fresh)).body).toMatchObject({ party: party.code, user: { email } });
+    const ancient = await mintEnterRequestToken({ email, jti: crypto.randomUUID() }, -8 * 24 * 60 * 60);
+    expect(await call('POST', '/v1/auth/magic-link/again', { body: { token: ancient } })).toMatchObject({ status: 400, body: { error: { code: 'invalid_link' } } });
   });
 });

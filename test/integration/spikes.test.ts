@@ -33,6 +33,8 @@ describe('signed-out party views', () => {
     const guest = await signIn(uniqueEmail('guest'));
     const party = await createParty(host, 'Before');
     await joinParty(guest, party, 'Guest');
+    // A lookup that starts in the same millisecond as a write keeps nothing (it may have read before the write).
+    await new Promise(resolve => setTimeout(resolve, 5));
     expect((await lookUp(party.code)).body).toMatchObject({ name: 'Before', isClosed: false });
     // Drawn straight in the object, not through the Worker: the kept view doesn't know.
     await env.PARTY.getByName(party.code).close(userId(host));
@@ -132,9 +134,12 @@ describe('the limit on all emails together', () => {
         kind: 'mail.partyInvite', email: invited, hostName: 'Host', partyName: 'Invites', slug: party.code, isProtected: false,
       }));
     });
+    // What the invite counted against its address's limit.
+    const counted: string[] = [];
+    const address = { limit: async ({ key }: { key: string }) => { counted.push(key); return { success: true }; } } as unknown as RateLimit;
     const deliverWith = (limit: RateLimit) => runInDurableObject(env.PARTY.getByName(party.code), async (instance: PartyDO, state) => {
       const original = (instance as any).env;
-      (instance as any).env = { ...original, MAIL_RATE_LIMIT_ALL: limit };
+      (instance as any).env = { ...original, MAIL_RATE_LIMIT_ALL: limit, MAIL_RATE_LIMIT_ADDRESS: address };
       try {
         await (instance as any).runOutbox(() => true, true);
       } finally {
@@ -142,8 +147,7 @@ describe('the limit on all emails together', () => {
       }
       return state.storage.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM outbox').one().n;
     });
-    const sent = () => runInDurableObject(env.USER.getByName(invited), async (_i, state) =>
-      state.storage.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM mail_sent').one().n);
+    const sent = async () => counted.length;
     expect(await deliverWith(denied)).toBe(1);
     expect(await mailbox(invited)).toEqual([]);
     expect(await deliverWith(allowed)).toBe(0);

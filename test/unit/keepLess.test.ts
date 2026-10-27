@@ -40,7 +40,7 @@ describe('a drawn party lets go of emails', () => {
     expect(await rows(code, 'SELECT member_email FROM memberships')).toEqual([{ member_email: null }, { member_email: null }]);
 
     // Members still see their target, and their lists still have the party.
-    expect((await request('GET', `/v1/parties?code=${code}`, { token: guest.token })).body.target).toEqual({ name: 'Host' });
+    expect((await request('POST', '/v1/parties/lookup', { body: { code: code }, token: guest.token })).body.target).toEqual({ name: 'Host' });
     expect((await request('GET', '/v1/me/parties', { token: guest.token })).body.items).toMatchObject([{ code, isClosed: true }]);
     // Deleting an account still anonymizes the member, by id.
     expect(await env.PARTY.getByName(code).forgetMember(guest.id, guest.email)).toBe('anonymized');
