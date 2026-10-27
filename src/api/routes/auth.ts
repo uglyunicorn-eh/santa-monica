@@ -80,7 +80,7 @@ auth.post('/magic-link', action('enterRequest', async c => {
  */
 auth.post('/session', action('enter', async c => {
   const { env } = c;
-  const { token } = await readBody(c, bodies.session);
+  const { token, key: publicKey } = await readBody(c, bodies.session);
   const key = await keyHash(idempotencyKey(c));
   const jwt = jwtFor(env);
 
@@ -108,5 +108,5 @@ auth.post('/session', action('enter', async c => {
   if (!user) {
     throw fail('link_used', 'This magic link has already been used. Please request a new one.', 'token');
   }
-  return send(c, session, await issueSession(jwt, user));
+  return send(c, session, await issueSession(c.env, jwt, user, publicKey));
 }));

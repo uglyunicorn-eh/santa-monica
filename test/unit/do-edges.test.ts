@@ -272,7 +272,7 @@ describe('UserDO', () => {
     const party = { slug: 'QQQQD', name: 'P', createdAt: 1, isHost: false, isProtected: false, isClosed: false, closedAt: null };
     const updates = [{ type: 'addParty' as const, party }, { type: 'setNameIfEmpty' as const, name: 'Intruder' }];
     for (const session of [{ userId: newObjectId() }, { userId: user.id, tokenVersion: 1 }]) {
-      expect(await stub.apply(updates, session)).toEqual(user);
+      expect(await stub.apply(updates, session)).toBeNull();
     }
     expect(await stub.listParties(10)).toEqual([]);
     expect(await env.USER.getByName(`nobody-${++counter}@example.com`).apply(updates, { userId: user.id })).toBeNull();

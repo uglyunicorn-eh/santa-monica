@@ -19,7 +19,7 @@ describe('HTTP surface', () => {
     expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff');
   });
 
-  it('answers CORS preflight for the frontend, including the Idempotency-Key header', async () => {
+  it('answers CORS preflight for the frontend, including the Idempotency-Key and DPoP headers', async () => {
     const res = await api('/v1/parties', {
       method: 'OPTIONS',
       headers: {
@@ -31,7 +31,7 @@ describe('HTTP surface', () => {
     expect(res.status).toBe(204);
     expect(res.headers.get('access-control-allow-origin')).toBe('https://gnomik.me');
     expect(res.headers.get('access-control-allow-methods')).toContain('PATCH');
-    expect(res.headers.get('access-control-allow-headers')).toBe('authorization,content-type,idempotency-key');
+    expect(res.headers.get('access-control-allow-headers')).toBe('authorization,content-type,idempotency-key,dpop');
   });
 
   it('lets only the listed origins read the answers', async () => {

@@ -31,6 +31,13 @@ const checks: Check[] = [
     },
   },
   {
+    name: "Party'o'meter answers a count",
+    run: async () => {
+      const { status, body } = await api('/v1/stats');
+      assert(status === 200 && Number.isInteger(body?.rolled), `unexpected response ${status} ${JSON.stringify(body)}`);
+    },
+  },
+  {
     name: 'unknown party is 404',
     run: async () => {
       const { status, body } = await api('/v1/parties?code=QQQQQ');
@@ -71,6 +78,27 @@ const checks: Check[] = [
       assert(res.status === 204 && origin === 'https://gnomik.me' && allowed.includes('idempotency-key'), `preflight answered HTTP ${res.status} (${origin}; ${allowed})`);
       const other = (await preflight('https://evil.example')).headers.get('access-control-allow-origin');
       assert(other === null, `another origin was allowed (${other})`);
+    },
+  },
+  {
+    name: 'bound sessions: the app may send DPoP proofs and read the clock header',
+    run: async () => {
+      const preflight = await fetch(new URL('/v1/me', base), {
+        method: 'OPTIONS',
+        headers: { origin: 'https://gnomik.me', 'access-control-request-method': 'GET', 'access-control-request-headers': 'authorization,dpop' },
+      });
+      const allowed = preflight.headers.get('access-control-allow-headers') ?? '';
+      assert(preflight.status === 204 && allowed.includes('dpop'), `preflight answered HTTP ${preflight.status} (${allowed})`);
+      const res = await fetch(new URL('/v1/stats', base), { headers: { origin: 'https://gnomik.me' } });
+      const exposed = res.headers.get('access-control-expose-headers') ?? '';
+      assert(exposed.includes('dpop-time'), `DPoP-Time is not readable across origins (${exposed})`);
+    },
+  },
+  {
+    name: 'a token with a proof that does not hold is 401, not an error',
+    run: async () => {
+      const { status, body } = await api('/v1/me', { headers: { authorization: 'Bearer not.a.token', dpop: 'not.a.proof' } });
+      assert(status === 401 && body?.error?.code === 'unauthenticated', `unexpected response ${status} ${JSON.stringify(body)}`);
     },
   },
   {

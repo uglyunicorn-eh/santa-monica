@@ -5,7 +5,7 @@ import { renderAccountDeleted, sendMail } from 'src/mail';
 import { newObjectId } from 'src/utils/ids';
 import { Session, sessionMatches } from 'src/utils/session';
 
-import { LIVE_USER_HEADER, LIVE_VERSION_HEADER } from 'src/api/live';
+import { LIVE_USER_HEADER, LIVE_VERSION_HEADER } from 'src/utils/liveHeaders';
 import { Outbox } from './outbox';
 import { HostingStart, PartyListCursor, UserPartyListItem, UserPartyRecord, UserRecord, UserUpdate } from './types';
 
@@ -179,6 +179,11 @@ export class UserDO extends DurableObject<Env> {
           request_key TEXT,
           outcome TEXT
         );
+        CREATE TABLE IF NOT EXISTS used_proofs (
+          jti TEXT PRIMARY KEY,
+          request TEXT NOT NULL,
+          expires_at INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS outbox (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           payload TEXT NOT NULL,
@@ -199,7 +204,38 @@ export class UserDO extends DurableObject<Env> {
           }
         }
       }
+      this.forgetExpired();
     });
+  }
+
+  /**
+   * Whether `session` still belongs to `user` (`sessionMatches`), and for a bound session, whether its proof is new:
+   * a proof works for one request only, so one copied along with its token can't be sent again. Every session check
+   * in this object goes through here.
+   */
+  private holds(user: { id: string; tokenVersion: number } | null | undefined, session: Session): boolean {
+    if (!sessionMatches(user, session)) {
+      return false;
+    }
+    const { proof } = session;
+    if (!proof) {
+      return true;
+    }
+    this.sql.exec('DELETE FROM used_proofs WHERE expires_at < ?', Date.now());
+    this.sql.exec('INSERT OR IGNORE INTO used_proofs (jti, request, expires_at) VALUES (?, ?, ?)', proof.jti, proof.request, proof.until);
+    return this.sql.exec<{ request: string }>('SELECT request FROM used_proofs WHERE jti = ?', proof.jti).one().request === proof.request;
+  }
+
+  /**
+   * Deletes records past their expiry: used links (which can hold a new email), mail and create requests (which can
+   * hold an email or a party name), slot reservations and used proofs. Each is also cleaned up when it's next used,
+   * but an address used once would otherwise keep them for good. Runs when the object starts.
+   */
+  private forgetExpired() {
+    const now = Date.now();
+    for (const table of ['used_magic_links', 'mail_requests', 'create_requests', 'host_reservations', 'used_proofs']) {
+      this.sql.exec(`DELETE FROM ${table} WHERE expires_at < ?`, now);
+    }
   }
 
   private row(): UserRow | null {
@@ -390,6 +426,15 @@ export class UserDO extends DurableObject<Env> {
   }
 
   /** The user, or null when there is none, the account was deleted, or it is being deleted or moved right now. */
+  /**
+   * The user, when `session` still belongs to them (see `holds`); null otherwise. The check behind
+   * `RequestSession.verify()`.
+   */
+  check(session: Session): UserRecord | null {
+    const user = this.get();
+    return this.holds(user, session) ? user : null;
+  }
+
   get(): UserRecord | null {
     const row = this.row();
     return row && row.deleted_at === null && !isChanging(row) ? toRecord(row) : null;
@@ -401,7 +446,7 @@ export class UserDO extends DurableObject<Env> {
    */
   updateName(name: string, session: Session): UserRecord | null {
     const user = this.get();
-    if (!sessionMatches(user, session)) {
+    if (!this.holds(user, session)) {
       return null;
     }
     this.sql.exec('UPDATE user SET name = ?', name);
@@ -413,7 +458,7 @@ export class UserDO extends DurableObject<Env> {
    * pending account link. Changes nothing, and answers false, for a session that no longer belongs to this user.
    */
   signOutEverywhere(session: Session): boolean {
-    if (!sessionMatches(this.get(), session)) {
+    if (!this.holds(this.get(), session)) {
       return false;
     }
     this.sql.exec('UPDATE user SET token_version = token_version + 1');
@@ -437,7 +482,8 @@ export class UserDO extends DurableObject<Env> {
         if (notify && row.deleted_at === null) {
           this.outbox.add({ kind: 'mail.accountDeleted', email: row.email });
         }
-        this.sql.exec("UPDATE user SET name = '', deleted_at = ?, token_version = token_version + 1", now);
+        // The email goes too: the goodbye email above has its own copy, and a new sign-in replaces the row.
+        this.sql.exec("UPDATE user SET name = '', email = '', deleted_at = ?, token_version = token_version + 1", now);
       } else {
         this.sql.exec("INSERT INTO user (id, email, name, joined, token_version, deleted_at) VALUES (?, '', '', ?, 1, ?)", newObjectId(), now, now);
       }
@@ -481,7 +527,7 @@ export class UserDO extends DurableObject<Env> {
     newParties?: number,
   ): HostingStart | null {
     const user = this.get();
-    if (!sessionMatches(user, session)) {
+    if (!this.holds(user, session)) {
       return null;
     }
     const now = Date.now();
@@ -593,7 +639,7 @@ export class UserDO extends DurableObject<Env> {
    */
   beginMailRequest(session: Session, key: string | undefined, detail: string, quota: MailQuota): UserRecord | 'repeat' | 'capped' | null {
     const user = this.get();
-    if (!sessionMatches(user, session)) {
+    if (!this.holds(user, session)) {
       return null;
     }
     const started = key ? this.claimMailRequest(key, detail, quota) : (this.takeMailQuota(quota, null) ? 'claimed' : 'capped');
@@ -613,9 +659,9 @@ export class UserDO extends DurableObject<Env> {
 
   /**
    * Applies a batch of changes from a party, in order, in one transaction. Safe to retry.
-   * Writes nothing to a deleted account, and nothing when `session` is given and no longer belongs to this user (or
-   * the account is held by an account change), so a party can verify a joining session in the call it makes anyway. Returns the user as it is afterwards (null if
-   * there is none or it was deleted).
+   * Writes nothing to a deleted account, and nothing when `session` is given and no longer holds (`holds`) or the
+   * account is held by an account change, so a party can verify a joining session in the call it makes anyway. Returns
+   * the user as it is afterwards, or null when there is none, it was deleted, or `session` doesn't hold.
    */
   apply(updates: UserUpdate[], session?: Session): UserRecord | null {
     const row = this.row();
@@ -623,8 +669,8 @@ export class UserDO extends DurableObject<Env> {
       return null;
     }
     const user = row && toRecord(row);
-    if (session && !sessionMatches(user, session)) {
-      return user;
+    if (session && !this.holds(user, session)) {
+      return null;
     }
     if (session && isChanging(row!)) {
       // Held by an account change: a join now would be missed by it.
@@ -669,7 +715,7 @@ export class UserDO extends DurableObject<Env> {
    * newest roll first (at most 10). Null when the session no longer belongs to this user.
    */
   unrevealed(session: Session): { slug: string; name: string; closedAt: number }[] | null {
-    if (!sessionMatches(this.get(), session)) {
+    if (!this.holds(this.get(), session)) {
       return null;
     }
     return this.sql.exec<{ slug: string; name: string; closed_at: number }>(
@@ -686,7 +732,7 @@ export class UserDO extends DurableObject<Env> {
    * the session no longer belongs to this user.
    */
   markRevealed(slug: string, session: Session): boolean | null {
-    if (!sessionMatches(this.get(), session)) {
+    if (!this.holds(this.get(), session)) {
       return null;
     }
     const party = this.sql.exec<{ revealed_at: number | null }>('SELECT revealed_at FROM parties WHERE slug = ? AND is_closed = 1', slug).toArray()[0];
@@ -750,7 +796,7 @@ export class UserDO extends DurableObject<Env> {
    */
   listParties(first: number, after?: PartyListCursor | null, session?: Session): UserPartyListItem[] | null {
     // With a session, the list is only for the account the session belongs to (not a newer one on the same email).
-    if (session && !sessionMatches(this.get(), session)) {
+    if (session && !this.holds(this.get(), session)) {
       return null;
     }
     const columns = 'slug, name, created_at, is_host, is_protected, is_closed, closed_at, deleted_at';

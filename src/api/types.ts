@@ -43,19 +43,26 @@ export interface EmailChangeCancelToken extends TokenPayload {
   jti: string;
 }
 
-export interface UserToken extends TokenPayload {
+/**
+ * Session tokens and live tickets name the user's email in one of two ways: `email`, readable by anyone holding the
+ * token, or `em`, the email sealed so only the Worker can read it (src/utils/tokenEmail.ts). New tokens carry `em` once
+ * `SEAL_TOKEN_EMAIL` is on; tokens issued before keep `email` until they expire.
+ */
+type TokenEmail = { email: string; em?: never } | { em: string; email?: never };
+
+export type UserToken = TokenPayload & TokenEmail & {
   sub: string;
-  email: string;
+  /** Set when the session is bound to a browser's key: its thumbprint (src/utils/dpop.ts). */
+  cnf?: { jkt: string };
   /** The user's token version when this token was issued. Tokens issued before versions existed have none. */
   ver?: number;
-}
+};
 
 /**
  * A short-lived ticket for opening a live-updates WebSocket (`/v1/parties/live`, `/v1/me/live`): browsers can't send an
  * Authorization header on a WebSocket, so a signed-in request trades its session for one first. Valid for a minute.
  */
-export interface LiveTicket extends TokenPayload {
+export type LiveTicket = TokenPayload & TokenEmail & {
   sub: string;
-  email: string;
   ver?: number;
-}
+};

@@ -64,6 +64,18 @@ const token = v.pipe(
 /** A party code, in either case. */
 const partyCode = v.pipe(v.string(NOT_TEXT), v.trim(), v.toUpperCase(), v.regex(PARTY_CODE_RE, 'Invalid party code'));
 
+/** A P-256 key coordinate in a JWK: 32 bytes, base64url. */
+const jwkCoordinate = v.pipe(v.string('Invalid key.'), v.regex(/^[A-Za-z0-9_-]{43}$/, 'Invalid key.'));
+
+/**
+ * The public key a browser binds its session to (src/utils/dpop.ts): a P-256 JWK with only its key fields, so
+ * `exportKey('jwk')` output needs `ext` and `key_ops` taken off. Optional; left out or null reads as not given.
+ */
+const publicKey = v.pipe(
+  v.nullish(v.strictObject({ kty: v.literal('EC', 'Invalid key.'), crv: v.literal('P-256', 'Invalid key.'), x: jwkCoordinate, y: jwkCoordinate }, 'Invalid key.')),
+  v.transform(value => value ?? undefined),
+);
+
 /** A required field: left out or null reads as empty, so the field's own "is required" message answers. */
 const required = <S extends v.GenericSchema<string, unknown>>(schema: S) => v.nullish(schema, '');
 
@@ -86,8 +98,11 @@ const normalizeEmail = <T extends { email: string }>(input: T) => ({ ...input, e
 
 export const bodies = {
   magicLink: v.pipe(body({ email: required(typedEmail), party: optional(partyCode) }), v.transform(normalizeEmail)),
-  session: body({ token: required(token) }),
+  // Sign-ins: the link, and the key to bind the new session to (optional until bound sessions are required).
+  session: body({ token: required(token), key: publicKey }),
   link: body({ token: required(token) }),
+  /** The email-change link, which signs in at the new address: it can bind the new session too. */
+  signInLink: body({ token: required(token), key: publicKey }),
   profile: body({ name: required(words('Name', MAX_PERSON_NAME_LENGTH)) }),
   emailChange: v.pipe(body({ email: required(typedEmail) }), v.transform(normalizeEmail)),
   createParty: body({ name: required(words('Party name', MAX_PARTY_NAME_LENGTH)), password: optional(phrase) }),
@@ -195,15 +210,24 @@ const userNodeId = v.pipe(
 
 const linkId = v.pipe(v.string(), v.nonEmpty());
 
+/** The email claim of a session token or live ticket: readable `email` or sealed `em`, never both or neither. */
+const tokenEmail = v.union([
+  v.object({ email: v.pipe(v.string(), v.nonEmpty()), em: v.optional(v.undefined()) }),
+  v.object({ em: v.pipe(v.string(), v.nonEmpty()), email: v.optional(v.undefined()) }),
+]);
+
 export const tokens = {
-  user: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), ver: v.optional(v.number()) }),
+  user: v.intersect([
+    v.object({ sub: userNodeId, ver: v.optional(v.number()), cnf: v.optional(v.object({ jkt: v.pipe(v.string(), v.nonEmpty()) })) }),
+    tokenEmail,
+  ]),
   enterRequest: v.object({ email: v.pipe(v.string(), v.nonEmpty(), v.toLowerCase()), typed: v.optional(v.string()), jti: linkId, exp: v.number(), party: v.optional(v.string()) }),
   accountDeletion: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number(), ver: v.number() }),
   emailChange: v.object({
     sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), newEmail: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number(), ver: v.number(),
   }),
   emailChangeCancel: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number() }),
-  liveTicket: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), ver: v.optional(v.number()), exp: v.number() }),
+  liveTicket: v.intersect([v.object({ sub: userNodeId, ver: v.optional(v.number()), exp: v.number() }), tokenEmail]),
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -324,6 +348,9 @@ export const unrevealedParties = v.object({
 
 /** A ticket for opening a live-updates WebSocket. */
 export const liveTicket = v.object({ ticket: v.string() });
+
+/** The Party'o'meter: how many parties have rolled their dice. */
+export const stats = v.object({ rolled: v.number() });
 
 /** `?ticket=` on a live-updates WebSocket request, length-limited before anything verifies it. */
 export const liveQuery = v.object({ ticket: token });

@@ -1,6 +1,11 @@
-import { env, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
+import { createExecutionContext, env, runDurableObjectAlarm, runInDurableObject, waitOnExecutionContext } from 'cloudflare:test';
 import { exports } from 'cloudflare:workers';
+import * as jose from 'jose';
 import { expect } from 'vitest';
+
+import { Env } from 'src/env';
+import { app } from 'src/index';
+import { PublicJwk } from 'src/utils/dpop';
 
 import { EnterRequestToken, UserToken } from 'src/api/types';
 import { createJwtHelpers } from 'src/utils/jwt';
@@ -31,15 +36,49 @@ export const uniqueIp = () => `10.${(counter >> 16) & 255}.${(counter >> 8) & 25
 /** A fresh Idempotency-Key. */
 export const newKey = () => crypto.randomUUID();
 
-/** Sends a request through the Worker's real entry point (Hono app, Durable Objects). */
-export async function api(path: string, init: RequestInit = {}): Promise<Response> {
-  return await (exports as any).default.fetch(new Request(new URL(path, ORIGIN), init));
+/**
+ * Sends a request through the Worker's real entry point (Hono app, Durable Objects). With `settings`, the same app
+ * runs with those bindings or variables changed (say, the view cache on, or bound sessions required): the run's
+ * configuration is fixed, so this is how a test reaches the other settings. Durable Objects keep the run's own.
+ */
+export async function api(path: string, init: RequestInit = {}, settings?: Partial<Env>): Promise<Response> {
+  const request = new Request(new URL(path, ORIGIN), init);
+  if (!settings) {
+    return await (exports as any).default.fetch(request);
+  }
+  const ctx = createExecutionContext();
+  const res = await app.fetch(request, { ...env, ...settings }, ctx);
+  await waitOnExecutionContext(ctx);
+  return res;
 }
 
-export type CallOptions = { body?: unknown; token?: string; key?: string; ip?: string; headers?: Record<string, string> };
+/** A browser's key pair for bound sessions (DPoP), and its public key as the app sends it at sign-in. */
+export async function browserKey() {
+  const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']) as CryptoKeyPair;
+  const { kty, crv, x, y } = await crypto.subtle.exportKey('jwk', pair.publicKey) as JsonWebKey;
+  return { pair, jwk: { kty, crv, x, y } as PublicJwk };
+}
+
+export type BrowserKey = Awaited<ReturnType<typeof browserKey>>;
+
+/** A DPoP proof the way the app makes one, for `method` and `url` with `token`. `claims` change its parts. */
+export async function proof(key: BrowserKey, method: string, url: string, token: string, claims: Record<string, unknown> = {}) {
+  const ath = jose.base64url.encode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))));
+  return await new jose.SignJWT({ htm: method, htu: new URL(url, ORIGIN).href, iat: Math.floor(Date.now() / 1000), jti: crypto.randomUUID(), ath, ...claims })
+    .setProtectedHeader({ typ: 'dpop+jwt', alg: 'ES256', jwk: key.jwk })
+    .sign(key.pair.privateKey);
+}
+
+/**
+ * `browserKey`: sign every request made with `token` with a fresh proof from this key, as the app does. `settings`:
+ * see `api`.
+ */
+export type CallOptions = {
+  body?: unknown; token?: string; key?: string; ip?: string; headers?: Record<string, string>; browserKey?: BrowserKey; settings?: Partial<Env>;
+};
 
 /** Calls the API the way the frontend does and returns the status with the parsed JSON body. */
-export async function call<T = any>(method: string, path: string, options: CallOptions = {}): Promise<{ status: number; body: T }> {
+export async function call<T = any>(method: string, path: string, options: CallOptions = {}): Promise<{ status: number; body: T; headers: Headers }> {
   const res = await api(path, {
     method,
     headers: {
@@ -47,11 +86,15 @@ export async function call<T = any>(method: string, path: string, options: CallO
       ...(options.body === undefined ? {} : { 'content-type': 'application/json' }),
       ...(options.token ? { authorization: `Bearer ${options.token}` } : {}),
       ...(options.key ? { 'idempotency-key': options.key } : {}),
+      ...(options.token && options.browserKey ? { dpop: await proof(options.browserKey, method, path, options.token) } : {}),
       ...options.headers,
     },
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
-  });
-  return { status: res.status, body: await res.json() as T };
+  }, options.settings);
+  const answer = { status: res.status, body: await res.json() as T } as { status: number; body: T; headers: Headers };
+  // Readable, but left out of comparisons such as `toEqual({ status, body })`.
+  Object.defineProperty(answer, 'headers', { value: res.headers, enumerable: false });
+  return answer;
 }
 
 /** The error body an expected failure answers with. */
@@ -106,6 +149,23 @@ export async function signIn(email: string, party?: string) {
 }
 
 export type Person = Awaited<ReturnType<typeof signIn>>;
+
+/**
+ * Signs in the way the app does with bound sessions: the magic link is redeemed with a new browser key, so the session
+ * only works with proofs from that key. Pass the person as `{ token, browserKey }` to `call`.
+ */
+export async function signInBound(email: string = uniqueEmail('bound')) {
+  const requested = await requestMagicLink(email);
+  if (requested.status !== 202) {
+    throw new Error(`magic link failed: ${JSON.stringify(requested.body)}`);
+  }
+  const key = await browserKey();
+  const entered = await call('POST', '/v1/auth/session', { body: { token: magicLinkToken((await mailbox(email)).at(-1)!), key: key.jwk } });
+  if (entered.status !== 200) {
+    throw new Error(`sign-in failed: ${JSON.stringify(entered.body)}`);
+  }
+  return { email: email.toLowerCase(), token: entered.body.userToken as string, id: entered.body.user.id as string, browserKey: key };
+}
 
 export const jwt = (privateKey: string = env.JWT_PRIVATE_KEY) => createJwtHelpers({ privateKey, issuer: domain });
 

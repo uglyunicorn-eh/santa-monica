@@ -3,7 +3,7 @@ import { Context } from 'hono';
 import { UserRecord } from 'src/do/types';
 import { Env } from 'src/env';
 import { JwtHelpers, createJwtHelpers } from 'src/utils/jwt';
-import { Session, sessionMatches } from 'src/utils/session';
+import { Session, SessionProof } from 'src/utils/session';
 
 import { domain } from 'src/config.json';
 
@@ -19,6 +19,8 @@ export type ApiEnv = {
   Bindings: Env;
   Variables: {
     session?: RequestSession;
+    /** The log ref of the party a write is for, so the kept signed-out view of it is forgotten after (viewCache). */
+    changedParty?: string;
   };
 };
 
@@ -28,14 +30,15 @@ export const jwtFor = (env: Env): JwtHelpers => createJwtHelpers({ privateKey: e
 
 export const clientIp = (c: ApiContext) => c.req.header('cf-connecting-ip') ?? 'unknown';
 
-export function makeSession(env: Env, userId: string, email: string, tokenVersion?: number): RequestSession {
+export function makeSession(env: Env, userId: string, email: string, tokenVersion?: number, proof?: SessionProof): RequestSession {
   let verified: Promise<UserRecord | null> | undefined;
   return {
     userId,
     email,
     tokenVersion,
+    ...(proof ? { proof } : {}),
     verify: () => {
-      verified ??= env.USER.getByName(email).get().then(user => (sessionMatches(user, { userId, tokenVersion }) ? user : null));
+      verified ??= env.USER.getByName(email).check({ userId, tokenVersion, proof });
       return verified;
     },
   };

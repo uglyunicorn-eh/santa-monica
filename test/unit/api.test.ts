@@ -7,6 +7,7 @@ import { ApiError, fail } from 'src/api/errors';
 import { keyHash, readBody } from 'src/api/input';
 import { bodies, encodeCursor, headers, party as partyJson, partyQuery, partyPage, queries, tokens, user as userJson } from 'src/api/schemas';
 import { authenticate } from 'src/api/session';
+import { Session } from 'src/utils/session';
 import { EnterRequestToken, UserToken } from 'src/api/types';
 import { MAX_PARTY_MEMBERS, PartyDO } from 'src/do/PartyDO';
 import { nodeIdToStr, strToNodeId } from 'src/utils/strings/nodeId';
@@ -785,12 +786,12 @@ describe('sessions', () => {
   it('check the token against the user once per request', async () => {
     const email = uniqueEmail();
     const stored = await env.USER.getByName(email).ensure(email);
-    const get = vi.fn(() => env.USER.getByName(email).get());
-    const counting = { ...env, USER: { getByName: () => ({ get }) } } as unknown as typeof env;
+    const check = vi.fn((session: Session) => env.USER.getByName(email).check(session));
+    const counting = { ...env, USER: { getByName: () => ({ check }) } } as unknown as typeof env;
     const session = makeSession(counting, stored.id, email, 0);
     expect(await session.verify()).toMatchObject({ id: stored.id });
     await session.verify();
-    expect(get).toHaveBeenCalledTimes(1);
+    expect(check).toHaveBeenCalledTimes(1);
     expect(await makeSession(env, stored.id, email, 5).verify()).toBeNull();
   });
 });
@@ -819,7 +820,7 @@ describe('PartyDO joins that must check the session on their own', () => {
     const host = await signIn();
     const { body: party } = await createParty(host.token);
     const guest = await signIn();
-    const unreachable = { getByName: () => ({ apply: async () => { throw new Error('down'); }, get: async () => { throw new Error('down'); } }) };
+    const unreachable = { getByName: () => ({ apply: async () => { throw new Error('down'); }, check: async () => { throw new Error('down'); } }) };
     for (const queued of [false, true]) {
       if (queued) {
         await queueFor(party.code, guest.email);
@@ -837,6 +838,62 @@ describe('PartyDO joins that must check the session on their own', () => {
     }
     expect((await request('GET', `/v1/parties?code=${party.code}`, { token: host.token })).body.participantCount).toBe(1);
     warn.mockRestore();
+  });
+
+  it('check the session of a member who joins again, before answering with their view', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const host = await signIn();
+    const { body: party } = await createParty(host.token);
+    const guest = await signIn();
+    expect((await join(guest.token, party.code)).status).toBe(200);
+    expect(await join(guest.token, party.code)).toMatchObject({ status: 200, body: { isJoined: true } });
+    const rejoin = (USER: unknown) => runInDurableObject(env.PARTY.getByName(party.code), async (instance: PartyDO) => {
+      const original = (instance as any).env;
+      (instance as any).env = { ...original, USER: { getByName: () => USER } };
+      try {
+        return await instance.join({ id: guest.id, email: guest.email, name: '' }, 'Guest', null, { tokenVersion: 0 });
+      } finally {
+        (instance as any).env = original;
+      }
+    });
+    expect(await rejoin({ check: async () => { throw new Error('down'); } })).toMatchObject({ ok: false, error: { code: 'unavailable' } });
+    // A token that no longer holds (here, one for a newer token version) doesn't get the view.
+    expect((await join(await sessionToken(guest.id, guest.email, 1), party.code)).status).toBe(401);
+    // The party was deleted while the session was being checked.
+    const deleting = await runInDurableObject(env.PARTY.getByName(party.code), async (instance: PartyDO, state) => {
+      const original = (instance as any).env;
+      (instance as any).env = { ...original, USER: { getByName: () => ({ check: async (session: Session) => {
+        state.storage.sql.exec('UPDATE party SET deleted_at = ?', Date.now());
+        return await env.USER.getByName(guest.email).check(session);
+      } }) } };
+      try {
+        return await instance.join({ id: guest.id, email: guest.email, name: '' }, 'Guest', null, { tokenVersion: 0 });
+      } finally {
+        (instance as any).env = original;
+      }
+    });
+    expect(deleting).toMatchObject({ ok: false, error: { code: 'not_found' } });
+    warn.mockRestore();
+  });
+
+  it('answer a member who left during the check with the party as they now see it, not as gone', async () => {
+    const host = await signIn();
+    const { body: party } = await createParty(host.token);
+    const guest = await signIn();
+    expect((await join(guest.token, party.code)).status).toBe(200);
+    const result = await runInDurableObject(env.PARTY.getByName(party.code), async (instance: PartyDO, state) => {
+      const original = (instance as any).env;
+      (instance as any).env = { ...original, USER: { getByName: () => ({ check: async (session: Session) => {
+        state.storage.sql.exec('DELETE FROM memberships WHERE member_id = ?', guest.id);
+        return await env.USER.getByName(guest.email).check(session);
+      } }) } };
+      try {
+        return await instance.join({ id: guest.id, email: guest.email, name: '' }, 'Guest', null, { tokenVersion: 0 });
+      } finally {
+        (instance as any).env = original;
+      }
+    });
+    expect(result).toMatchObject({ ok: true, view: { isJoined: false, name: 'Party' } });
   });
 
   it('look again after the check: the party may be gone, closed, full, or already joined by then', async () => {
@@ -857,7 +914,7 @@ describe('PartyDO joins that must check the session on their own', () => {
           ...original,
           USER: {
             getByName: (email: string) => ({
-              get: async () => {
+              check: async (session: Session) => {
                 if (change === 'deleted') state.storage.sql.exec('UPDATE party SET deleted_at = ?', Date.now());
                 if (change === 'closed') state.storage.sql.exec('UPDATE party SET is_closed = 1');
                 if (change === 'filled') {
@@ -866,7 +923,7 @@ describe('PartyDO joins that must check the session on their own', () => {
                   }
                 }
                 if (change === 'joined') state.storage.sql.exec("INSERT INTO memberships (member_id, member_email, name, joined_at) VALUES (?, ?, 'Guest', 1)", guest.id, guest.email);
-                return await env.USER.getByName(email).get();
+                return await env.USER.getByName(email).check(session);
               },
             }),
           },

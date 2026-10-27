@@ -17,9 +17,13 @@ export const NOTICE_QUOTA: MailQuota = { limit: EMAILS_PER_ADDRESS_PER_HOUR, alw
 export const tooManyForAddress = (field?: string) =>
   fail('rate_limited', "That's a lot of emails for this address. Please try again in an hour.", field);
 
+/** The key of the limit on all emails together (`MAIL_RATE_LIMIT_ALL`). */
+export const ALL_MAIL = 'all';
+
 /**
  * The limits for anything that sends an email (magic links, account confirmations): per client IP and per
- * recipient. Returns which one was hit, or undefined.
+ * recipient. Returns which one was hit, or undefined. The limit on all emails together is taken later, by
+ * `takeAllMail`, right before an email goes out.
  */
 export async function emailRateLimit(env: Env, clientIp: string, email: string): Promise<'ip' | 'email' | undefined> {
   const [byIp, byEmail] = await Promise.all([
@@ -27,6 +31,16 @@ export async function emailRateLimit(env: Env, clientIp: string, email: string):
     env.ENTER_RATE_LIMIT_EMAIL.limit({ key: email }),
   ]);
   return !byIp.success ? 'ip' : !byEmail.success ? 'email' : undefined;
+}
+
+/**
+ * Counts one email against the limit on all of them together, right before it is sent: requested emails
+ * (`sendRequestedMail`) and party invites (`PartyDO`). False when it's used up. A backstop against a spike or a spam
+ * run using up the sending quota, counted per Cloudflare location and roughly, like every Rate Limiting binding. It is
+ * taken only once every other check has passed, so requests refused for another reason don't use it up for everyone.
+ */
+export async function takeAllMail(env: Env): Promise<boolean> {
+  return (await env.MAIL_RATE_LIMIT_ALL.limit({ key: ALL_MAIL })).success;
 }
 
 /** Old parties kept their 5-letter codes. */

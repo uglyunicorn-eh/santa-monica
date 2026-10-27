@@ -1,8 +1,17 @@
+/**
+ * The DPoP proof a bound session came with (src/utils/dpop.ts), so the user's object can let each proof work only
+ * once: `jti` is the proof's id, `request` names the request it came with (one request may check its session more
+ * than once), and `until` is when the proof stops being accepted anyway, in ms.
+ */
+export type SessionProof = { jti: string; request: string; until: number };
+
 /** What a session token says about its user: the account id and the token version it was issued with. */
 export type Session = {
   userId: string;
   /** Missing on tokens issued before versions existed; they count as version 0. */
   tokenVersion?: number;
+  /** Set for a bound token: the proof it came with. */
+  proof?: SessionProof;
 };
 
 /**

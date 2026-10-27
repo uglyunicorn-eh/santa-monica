@@ -23,6 +23,9 @@ const bindings = {
   PUBLIC_URL: 'https://api.test',
   FRONTEND_URL: 'https://gnomik.me',
   ALLOWED_ORIGINS: 'https://gnomik.me,https://*.santa-57a.pages.dev',
+  // Public answers (signed-out party views, the stats) aren't cached in tests, so every request sees things as they are.
+  // Tests of the caches turn them on.
+  PUBLIC_CACHE_MS: '0',
 };
 
 export default defineConfig({
@@ -66,6 +69,8 @@ export default defineConfig({
               email: { send_email: [] },
               serviceBindings: { EMAIL: { name: 'mail-sink', entrypoint: 'MailSink' } },
               kvNamespaces: { TEST_MAILS: 'test-mails' },
+              // The limit on all emails together is one bucket for every test: open it up, or the suite would hit it.
+              ratelimits: { MAIL_RATE_LIMIT_ALL: { namespace_id: '1007', simple: { limit: 1_000_000, period: 60 } } },
               workers: [{
                 name: 'mail-sink',
                 modules: true,

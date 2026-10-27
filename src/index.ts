@@ -10,6 +10,7 @@ import { ApiError, fail } from 'src/api/errors';
 import { homepage, name, version } from 'package.json';
 
 export { PartyDO } from 'src/do/PartyDO';
+export { StatsDO } from 'src/do/StatsDO';
 export { UserDO } from 'src/do/UserDO';
 
 export const app = new Hono<ApiEnv>({ strict: false });
@@ -20,7 +21,9 @@ app.use(cors({
   origin: (origin, c) => (originAllowed(origin, c.env.ALLOWED_ORIGINS) ? origin : null),
   allowMethods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
   // Browsers only send these after a preflight that lists them.
-  allowHeaders: ['authorization', 'content-type', 'idempotency-key'],
+  allowHeaders: ['authorization', 'content-type', 'idempotency-key', 'dpop'],
+  // The Worker's time, when a DPoP proof's clock is off (src/api/session.ts).
+  exposeHeaders: ['dpop-time'],
   maxAge: 86400,
 }));
 

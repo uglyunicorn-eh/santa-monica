@@ -9,7 +9,9 @@ import { readQuery, send } from 'src/api/input';
 import { liveQuery, liveTicket, tokens } from 'src/api/schemas';
 import { requireSession } from 'src/api/session';
 import { LiveTicket } from 'src/api/types';
+import { LIVE_USER_HEADER, LIVE_VERSION_HEADER } from 'src/utils/liveHeaders';
 import { nodeIdToStr } from 'src/utils/strings/nodeId';
+import { emailClaim, tokenEmail } from 'src/utils/tokenEmail';
 
 // Live updates over WebSockets. A browser can't send an Authorization header on a WebSocket, so a signed-in request
 // first trades its session for a ticket (POST /v1/live/ticket, valid a minute), and the socket carries the ticket in
@@ -21,12 +23,6 @@ import { nodeIdToStr } from 'src/utils/strings/nodeId';
 
 /** How long a live-updates ticket works, in seconds: just long enough to open the socket. */
 export const LIVE_TICKET_TTL = 60;
-
-/** The user a WebSocket upgrade is for, set by the Worker on the request it passes to a Durable Object. */
-export const LIVE_USER_HEADER = 'x-live-user';
-
-/** The token version the ticket was issued at, when it has one (the user's own updates refuse a stale one). */
-export const LIVE_VERSION_HEADER = 'x-live-version';
 
 const invalidTicket = () => fail('unauthenticated', 'This live-updates ticket is invalid or has expired.', 'ticket');
 
@@ -40,22 +36,27 @@ live.post('/ticket', requireSession, action('liveTicket', async c => {
     throw notSignedIn();
   }
   const ticket = await jwtFor(c.env).issueToken<LiveTicket>('LiveTicket', {
-    sub: nodeIdToStr({ kind: 'User', id: user.id }), email: user.email, ver: user.tokenVersion,
+    sub: nodeIdToStr({ kind: 'User', id: user.id }), ...await emailClaim(c.env, user.email), ver: user.tokenVersion,
   }, { ttl: LIVE_TICKET_TTL });
   return send(c, liveTicket, { ticket });
 }));
 
-/**
- * A live-updates WebSocket request, checked without any Durable Object call: a WebSocket upgrade, from an allowed
- * origin (no other site's page may open one), with a valid ticket. Returns the request to pass on, with the user set.
- */
-export async function liveRequest(c: ApiContext): Promise<{ userId: string; email: string; request: Request }> {
+/** Throws unless the request is a WebSocket upgrade from an allowed origin (no other site's page may open one). */
+export function checkUpgrade(c: ApiContext) {
   if (c.req.header('upgrade')?.toLowerCase() !== 'websocket') {
     throw fail('invalid', 'Expected a WebSocket upgrade.');
   }
   if (!originAllowed(c.req.header('origin') ?? '', c.env.ALLOWED_ORIGINS)) {
     throw fail('forbidden', 'Live updates are only for the app.');
   }
+}
+
+/**
+ * A live-updates WebSocket request, checked without any Durable Object call: a WebSocket upgrade, from an allowed
+ * origin (no other site's page may open one), with a valid ticket. Returns the request to pass on, with the user set.
+ */
+export async function liveRequest(c: ApiContext): Promise<{ userId: string; email: string; request: Request }> {
+  checkUpgrade(c);
   const { ticket } = readQuery(c, liveQuery);
   let payload: unknown;
   try {
@@ -64,7 +65,8 @@ export async function liveRequest(c: ApiContext): Promise<{ userId: string; emai
     payload = undefined;
   }
   const claims = v.safeParse(tokens.liveTicket, payload);
-  if (!claims.success) {
+  const email = claims.success ? await tokenEmail(c.env, claims.output) : undefined;
+  if (!claims.success || !email) {
     throw invalidTicket();
   }
   const headers = new Headers(c.req.raw.headers);
@@ -73,7 +75,7 @@ export async function liveRequest(c: ApiContext): Promise<{ userId: string; emai
   if (claims.output.ver !== undefined) {
     headers.set(LIVE_VERSION_HEADER, String(claims.output.ver));
   }
-  return { userId: claims.output.sub, email: claims.output.email, request: new Request(c.req.raw.url, { headers }) };
+  return { userId: claims.output.sub, email, request: new Request(c.req.raw.url, { headers }) };
 }
 
 /**

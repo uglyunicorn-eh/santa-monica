@@ -15,6 +15,7 @@ import { newObjectId } from 'src/utils/ids';
 import { randomString } from 'src/utils/strings/random';
 import { partyRef } from 'src/utils/logRef';
 import { annotate } from 'src/utils/tracing';
+import { cachedView, forgetView, keepView, viewTtl } from 'src/api/viewCache';
 
 const SLUG_ATTEMPTS = 10;
 
@@ -51,19 +52,21 @@ const session = (c: ApiContext): RequestSession => c.get('session')!;
  * Party codes are how a party without a secret phrase is reached, and any route that takes one tells whether it
  * exists. So every one of them is limited per client: 60 codes a minute, 10 for old 5-letter codes.
  */
-async function admitCode(c: ApiContext, code: string) {
-  annotate({ 'party.ref': await partyRef(c.env, code) });
+async function admitCode(c: ApiContext, code: string): Promise<string> {
+  const ref = await partyRef(c.env, code);
+  annotate({ 'party.ref': ref });
   const { success } = await c.env.PARTY_LOOKUP_RATE_LIMIT_IP.limit({ key: clientIp(c) });
   if (!success) {
     throw fail('rate_limited', 'Too many party lookups. Please wait a minute and try again.', 'party');
   }
   await admitLegacyCode(c.env, clientIp(c), code, 'party');
+  return ref;
 }
 
-/** A party write's body, after the code passed `admitCode`. */
+/** A party write's body, after the code passed `admitCode`. The kept signed-out view of the party is forgotten after. */
 async function readPartyWrite<S extends typeof bodies.partyAction | typeof bodies.joinParty | typeof bodies.invite>(c: ApiContext, schema: S) {
   const body = await readBody(c, schema);
-  await admitCode(c, body.code);
+  c.set('changedParty', await admitCode(c, body.code));
   return body as v.InferOutput<S>;
 }
 
@@ -78,22 +81,53 @@ async function verified(c: ApiContext) {
 
 export const parties = new Hono<ApiEnv>();
 
+// After a write (join, leave, draw, invite, delete, restore), this isolate's kept signed-out view of the party is out
+// of date: forget it, so the next lookup here sees the change. A lookup that started before the write and finishes
+// after it keeps nothing either (`keepView` checks when it started), so it can't put the old view back.
+parties.use(async (c, next) => {
+  await next();
+  const ref = c.get('changedParty');
+  if (ref) {
+    forgetView(ref);
+  }
+});
+
 /**
- * Looks up a party by code. Anyone gets a limited view; members see more. A signed-in lookup checks the session at
- * the same time as it reads the party (one call each, in parallel); a revoked token sees what anyone sees.
+ * A party as this person sees it. Anyone gets a limited view; members see more. A signed-in lookup checks the session
+ * at the same time as it reads the party (one call each, in parallel); a revoked token sees what anyone sees. Without
+ * a session, the view may come from the short-lived cache in `src/api/viewCache.ts`, with no call at all.
  */
-parties.get('/', optionalSession, action('party', async (c, span) => {
-  const code = readPartyCode(c);
-  await admitCode(c, code);
+async function lookUp(c: ApiContext, span: Span, code: string) {
+  const ref = await admitCode(c, code);
   const s = c.get('session');
-  const stub = c.env.PARTY.getByName(code);
-  const [view, user] = await Promise.all([stub.view(s?.userId), s ? s.verify() : null]);
-  const seen = view && (user ? view : anonymousView(view));
+  const kept = s ? undefined : cachedView(ref);
+  annotate({ 'party.cached': Boolean(kept) });
+  let seen = kept ?? null;
+  if (!kept) {
+    const startedAt = Date.now();
+    const [view, user] = await Promise.all([c.env.PARTY.getByName(code).view(s?.userId), s ? s.verify() : null]);
+    seen = view && (user ? view : anonymousView(view));
+    if (seen && !s) {
+      keepView(ref, seen, viewTtl(c.env), Date.now(), startedAt);
+    }
+  }
   span.setAttributes({ 'party.found': Boolean(seen), 'party.joined': seen?.isJoined });
   if (!seen) {
     throw fail('not_found', 'Party does not exist.', 'party');
   }
   return send(c, partyJson, seen);
+}
+
+/** Looks up a party by its code in the query string (`?code=`). Being replaced by `POST /lookup`. */
+parties.get('/', optionalSession, action('party', async (c, span) => lookUp(c, span, readPartyCode(c))));
+
+/**
+ * Looks up a party by its code in the body, so the code stays out of URLs: browser history, proxy logs, HAR files.
+ * Answers like `GET /?code=`.
+ */
+parties.post('/lookup', optionalSession, action('lookUpParty', async (c, span) => {
+  const { code } = await readBody(c, bodies.partyAction);
+  return lookUp(c, span, code);
 }));
 
 /**
@@ -173,7 +207,7 @@ parties.post('/join', requireSession, action('joinParty', async c => {
     { id: s.userId, email: s.email, name },
     name,
     password || null,
-    { tokenVersion: s.tokenVersion },
+    { tokenVersion: s.tokenVersion, proof: s.proof },
   ));
 }));
 

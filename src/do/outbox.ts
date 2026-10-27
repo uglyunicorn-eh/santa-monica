@@ -6,7 +6,13 @@ export type OutboxMessageBase = { kind: string; email: string };
 type OutboxRow = { id: number; payload: string; attempts: number; next_attempt_at: number };
 
 /** Messages dropped after this many failed deliveries (with backoff, that is about a day of retrying). */
-const MAX_ATTEMPTS = 15;
+export const MAX_ATTEMPTS = 15;
+
+/**
+ * Thrown by a delivery that was held back on purpose (an email over the limit on all emails together), not one that
+ * failed. It's retried the same way, but not logged as a failure; only dropping it, at the end, is logged.
+ */
+export class RetryLater extends Error {}
 const MAX_BACKOFF_MS = 60 * 60 * 1000;
 
 /**
@@ -109,12 +115,21 @@ export class Outbox<M extends OutboxMessageBase> {
       } catch (error) {
         const attempts = batch.rows[0].attempts + 1;
         const kind = batch.messages[0].kind;
+        const heldBack = error instanceof RetryLater;
         if (isPermanentMailError(error) || attempts >= MAX_ATTEMPTS) {
-          console.error('Dropping outbox messages', { kind, count: ids.length, attempts, error: String(error) });
+          if (heldBack) {
+            console.warn('Dropping a message held back too long', { kind, count: ids.length, attempts, reason: error.message });
+          } else {
+            console.error('Dropping outbox messages', { kind, count: ids.length, attempts, error: String(error) });
+          }
           this.sql.exec(`DELETE FROM outbox WHERE id IN (${placeholders})`, ...ids);
           return;
         }
-        console.warn('Outbox delivery failed, will retry', { kind, count: ids.length, attempts, error: String(error) });
+        if (heldBack) {
+          console.info('Outbox delivery held back, will retry', { kind, count: ids.length, attempts, reason: error.message });
+        } else {
+          console.warn('Outbox delivery failed, will retry', { kind, count: ids.length, attempts, error: String(error) });
+        }
         const retryAt = Date.now() + Math.min(1000 * 2 ** attempts, MAX_BACKOFF_MS);
         this.sql.exec(`UPDATE outbox SET attempts = ?, next_attempt_at = ? WHERE id IN (${placeholders})`, attempts, retryAt, ...ids);
       }

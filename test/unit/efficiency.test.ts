@@ -62,7 +62,8 @@ const BUDGETS: Record<string, { USER: number | string; PARTY: number | string }>
   'POST /me/deletion/confirm': { USER: 2, PARTY: '1 per party' },
   'POST /me/email-change/confirm': { USER: 4, PARTY: '1 per party' },
   'POST /me/email-change/cancel': { USER: 1, PARTY: 0 },
-  'GET /parties': { USER: '0 anonymous, 1 signed in', PARTY: 1 },
+  'GET /parties': { USER: '0 anonymous, 1 signed in', PARTY: '1, or 0 anonymous from the view cache' },
+  'POST /parties/lookup': { USER: '0 anonymous, 1 signed in', PARTY: '1, or 0 anonymous from the view cache' },
   'POST /parties': { USER: 1, PARTY: 1 },
   'POST /parties/join': { USER: 0, PARTY: 1 },
   'POST /parties/leave': { USER: 1, PARTY: 1 },
@@ -75,6 +76,9 @@ const BUDGETS: Record<string, { USER: number | string; PARTY: number | string }>
   'GET /me/parties/unrevealed': { USER: 1, PARTY: 0 },
   'POST /me/parties/revealed': { USER: 1, PARTY: 0 },
   'GET /me/live': { USER: 1, PARTY: 0 },
+  // The Party'o'meter talks only to StatsDO: one call, or none when the count is kept in memory.
+  'GET /stats': { USER: 0, PARTY: 0 },
+  'GET /stats/live': { USER: 0, PARTY: 0 },
 };
 
 describe('Durable Object call budgets', () => {
@@ -122,7 +126,7 @@ describe('Durable Object call budgets', () => {
     await request('GET', '/v1/me', { token: who.token, env: counting.env });
     await request('PATCH', '/v1/me', { token: who.token, body: { name: 'Renamed' }, env: counting.env });
     await request('GET', '/v1/me/parties', { token: who.token, env: counting.env });
-    expect(counting.methods()).toEqual(['USER.get', 'USER.updateName', 'USER.listParties']);
+    expect(counting.methods()).toEqual(['USER.check', 'USER.updateName', 'USER.listParties']);
 
     counting.reset();
     expect((await request('GET', '/v1/me', { env: counting.env })).status).toBe(401);
@@ -215,8 +219,22 @@ describe('Durable Object call budgets', () => {
       counting.reset();
       const { body } = await request('GET', `/v1/parties?code=${party.code}`, { token: host.token, env: counting.env });
       expect(body.participants).toHaveLength(members);
-      expect(counting.methods().sort()).toEqual(['PARTY.view', 'USER.get']);
+      expect(counting.methods().sort()).toEqual(['PARTY.view', 'USER.check']);
+      counting.reset();
+      await request('POST', '/v1/parties/lookup', { body: { code: party.code }, env: counting.env });
+      await request('POST', '/v1/parties/lookup', { body: { code: party.code }, token: host.token, env: counting.env });
+      expect(counting.methods().sort()).toEqual(['PARTY.view', 'PARTY.view', 'USER.check']);
     }
+  });
+
+  it('GET /parties and POST /parties/lookup: no call at all for a signed-out view kept in the cache', async () => {
+    const host = await person('Host');
+    const party = await create(host.token);
+    const counting = countingEnv({ PUBLIC_CACHE_MS: '10000' });
+    await request('GET', `/v1/parties?code=${party.code}`, { env: counting.env });
+    await request('POST', '/v1/parties/lookup', { body: { code: party.code }, env: counting.env });
+    await request('GET', `/v1/parties?code=${party.code}`, { env: counting.env });
+    expect(counting.methods()).toEqual(['PARTY.view']);
   });
 
   it('POST /parties: a held slot and the party; join: one call (the party checks the session itself)', async () => {
@@ -253,7 +271,7 @@ describe('Durable Object call budgets', () => {
       const other = await create(host.token, 'Other');
       counting.reset();
       await request('POST', '/v1/parties/delete', { body: { code: other.code }, token: host.token, env: counting.env });
-      expect(counting.methods()).toEqual(['USER.get', 'PARTY.delete']);
+      expect(counting.methods()).toEqual(['USER.check', 'PARTY.delete']);
     }
   });
 
@@ -276,7 +294,7 @@ describe('Durable Object call budgets', () => {
     expect(counting.methods()).toEqual(['PARTY.view', 'USER.startHosting', 'PARTY.restore']);
     counting.reset();
     expect((await request('POST', '/v1/parties/restore', { body: { code: closed.code }, token: host.token, env: counting.env })).status).toBe(200);
-    expect(counting.methods()).toEqual(['PARTY.view', 'USER.get', 'PARTY.restore']);
+    expect(counting.methods()).toEqual(['PARTY.view', 'USER.check', 'PARTY.restore']);
     // The slot held for the open party was released when it came back to the host's list.
     expect(await runInDurableObject(env.USER.getByName(host.email), async (_i, state) =>
       state.storage.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM host_reservations').one().n)).toBe(0);
