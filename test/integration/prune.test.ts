@@ -1,5 +1,5 @@
 import { env, evictDurableObject, runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { AUTO_PRUNE_SINCE, PRUNE_AFTER_MS, PRUNED_RESTORE_WINDOW_MS, RESTORE_WINDOW_MS } from 'src/do/PartyDO';
 
@@ -133,10 +133,11 @@ describe('auto-prune', () => {
     await evictDurableObject(env.PARTY.getByName(party.code));
     // The signed-out lookup the script sends starts it; it gets its date, and an alarm that's already due.
     await call('POST', '/v1/parties/lookup', { body: { code: party.code } });
-    expect(await pruneAt(party.code)).toBeLessThan(AUTO_PRUNE_SINCE);
-    expect(await runDurableObjectAlarm(env.PARTY.getByName(party.code))).toBe(true);
+    // Its alarm is due at once, so it may already have run on its own; run it if it's still waiting.
+    await runDurableObjectAlarm(env.PARTY.getByName(party.code));
+    await vi.waitFor(async () => expect(await partySql(party.code, 'SELECT * FROM party')).toEqual([]));
     await settleParty(party.code);
     expect((await viewParty(party.code)).status).toBe(404);
-    expect((await myParties(host)).body.items.map(p => p.code)).not.toContain(party.code);
+    await vi.waitFor(async () => expect((await myParties(host)).body.items.map(p => p.code)).not.toContain(party.code));
   });
 });
