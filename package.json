@@ -1,7 +1,7 @@
 {
   "name": "santa-monica",
   "description": "Backyard of the Anonymous Ded Morozes",
-  "version": "5.0.0-rc",
+  "version": "5.0.0-rc.4",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -26,19 +26,19 @@
   },
   "homepage": "https://github.com/uglyunicorn-eh/santa-monica",
   "dependencies": {
-    "hono": "^4.13.13",
+    "hono": "^4.13.14",
     "jose": "^6.2.13",
     "valibot": "1.5.0"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.4.8",
-    "@cloudflare/workers-types": "^5.20261024.1",
+    "@cloudflare/workers-types": "^5.20261026.1",
     "@types/node": "^26.6.5",
     "@vitest/coverage-istanbul": "^5.0.5",
     "typescript": "^7.0.2",
-    "vite": "^8.3.4",
+    "vite": "^8.3.5",
     "vitest": "^5.0.5",
-    "wrangler": "^4.152.0"
+    "wrangler": "^4.153.0"
   },
   "allowScripts": {
     "esbuild": true,
