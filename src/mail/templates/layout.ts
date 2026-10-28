@@ -22,7 +22,7 @@ export const actionTones = {
 type Options = {
   /** The line mail apps show beside the subject. */
   preheader: string;
-  /** "greeting": "Hola, Anonymous Ded Moroz!" beside the gnome. Otherwise, an image across the card. */
+  /** "greeting": "Hola, Anonymous Santa Claus!" beside the gnome. Otherwise, an image across the card. */
   header: 'greeting' | { image: string };
   title: string;
   titleAlign?: 'left' | 'center';
@@ -45,7 +45,7 @@ const greeting = `<tr>
               <td style="padding:0 0 8px;">
                 <table class="column" width="250" cellpadding="0" cellspacing="0" border="0" align="left" style="width:250px;">
                   <tr>
-                    <td style="padding:16px 0 0;"><h1 style="margin:0; font-family:${FONT}; font-size:32px; line-height:38px; font-weight:700; color:${color.text};">Hola, Anonymous Ded Moroz!</h1></td>
+                    <td style="padding:16px 0 0;"><h1 style="margin:0; font-family:${FONT}; font-size:32px; line-height:38px; font-weight:700; color:${color.text};">Hola, Anonymous Santa Claus!</h1></td>
                   </tr>
                 </table>
                 <table class="column" width="250" cellpadding="0" cellspacing="0" border="0" align="right" style="width:250px;">

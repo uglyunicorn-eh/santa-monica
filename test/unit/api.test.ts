@@ -274,7 +274,7 @@ describe('POST /v1/me/deletion/confirm', () => {
       await runDurableObjectAlarm(env.USER.getByName(who.email));
       await new Promise(resolve => setTimeout(resolve, 10));
     }
-    expect(sent).toEqual([{ to: who.email, subject: 'Your Anonymous Ded Morozes account is deleted' }]);
+    expect(sent).toEqual([{ to: who.email, subject: 'Your Anonymous Santa Clauses account is deleted' }]);
     expect(await env.USER.getByName(who.email).pendingOutbox()).toBe(0);
   });
 
@@ -370,8 +370,8 @@ describe('POST /v1/me/email-change to an address that has an account', () => {
     const [toTaken, toFree] = [await asked(taken.email), await asked(free)];
     expect(toTaken.res).toEqual(toFree.res);
     expect(toTaken.sent.map(m => [m.to, m.subject])).toEqual([
-      [taken.email, 'Someone tried to use your email on Anonymous Ded Morozes'],
-      [who.email, 'Your Anonymous Ded Morozes email is being changed'],
+      [taken.email, 'Someone tried to use your email on Anonymous Santa Clauses'],
+      [who.email, 'Your Anonymous Santa Clauses email is being changed'],
     ]);
     expect(toTaken.sent[0].text).not.toMatch(/https?:/);
     expect(tokenFrom(toFree.sent[0].text, 'profile/email')).toBeTruthy();

@@ -6,7 +6,7 @@ import { actionTones, layout, p } from './layout';
 export const subject = "You're invited to a Secret Santa party!";
 
 export const html = layout({
-  preheader: '{{host.name}} invites you to {{party.name}}. Join in, and a gnome will tell you whom you give a gift to.',
+  preheader: '{{host.name}} invites you to {{party.name}}. Join in, and Gnomik will tell you whom you give a gift to.',
   header: 'greeting',
   title: "You're invited!",
   body: p('<strong>{{host.name}}</strong> invites you to <strong>{{party.name}}</strong>, a Secret Santa party with Gnomik.')
@@ -16,7 +16,7 @@ export const html = layout({
   note: "You got this email because {{host.name}} typed your address. If you don't know them, just ignore it.",
 });
 
-export const text = `{{host.name}} invites you to {{party.name}}. Join in, and a gnome will tell you whom you give a gift to.
+export const text = `{{host.name}} invites you to {{party.name}}. Join in, and Gnomik will tell you whom you give a gift to.
 
 You're invited!
 

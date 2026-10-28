@@ -55,7 +55,7 @@ describe('deleting an account', () => {
     // And a last email says it's done (sent by the account's alarm).
     let farewell: string[] = [];
     for (let i = 0; i < 50 && farewell.length === 0; i++) {
-      farewell = (await mailbox(who.email)).map(m => m.subject).filter(s => s === 'Your Anonymous Ded Morozes account is deleted');
+      farewell = (await mailbox(who.email)).map(m => m.subject).filter(s => s === 'Your Anonymous Santa Clauses account is deleted');
       await new Promise(resolve => setTimeout(resolve, 20));
     }
     expect(farewell).toHaveLength(1);
@@ -153,7 +153,7 @@ describe('changing the email', () => {
 
   it('mails a link to the new address and a notice to the old one; confirming moves the account', async () => {
     const who = await person('me');
-    await call('PATCH', '/v1/me', { token: who.token, body: { name: 'Moroz' } });
+    await call('PATCH', '/v1/me', { token: who.token, body: { name: 'Claus' } });
     const newEmail = uniqueEmail('new');
     const token = await requestEmailChange(who, newEmail);
     const notice = (await mailbox(who.email)).at(-1)!;
@@ -163,10 +163,10 @@ describe('changing the email', () => {
     expect(linkToken(notice, 'profile/email/cancel')).toBeTruthy();
 
     const res = await confirmEmailChange(token);
-    expect(res).toMatchObject({ status: 200, body: { user: { id: who.id, name: 'Moroz', email: newEmail } } });
+    expect(res).toMatchObject({ status: 200, body: { user: { id: who.id, name: 'Claus', email: newEmail } } });
     expect(await jwt().jwtVerify<UserToken>(res.body.userToken, 'UserToken')).toMatchObject({ sub: who.id, email: newEmail, ver: 1 });
 
-    expect(await me({ token: res.body.userToken })).toEqual({ status: 200, body: { id: who.id, name: 'Moroz', email: newEmail } });
+    expect(await me({ token: res.body.userToken })).toEqual({ status: 200, body: { id: who.id, name: 'Claus', email: newEmail } });
     expect((await me(who)).status).toBe(401);
     // Signing in with the new address finds the same account.
     expect((await signIn(newEmail)).id).toBe(who.id);
@@ -259,7 +259,7 @@ describe('changing the email', () => {
     const before = (await mailbox(taken.email)).length;
     expect(await call('POST', '/v1/me/email-change', { token: who.token, body: { email: taken.email } })).toEqual({ status: 202, body: { ok: true } });
     const notice = (await mailbox(taken.email)).slice(before);
-    expect(notice.map(m => m.subject)).toEqual(['Someone tried to use your email on Anonymous Ded Morozes']);
+    expect(notice.map(m => m.subject)).toEqual(['Someone tried to use your email on Anonymous Santa Clauses']);
     expect(notice[0].text).not.toMatch(/https?:/);
     expect(await me(taken)).toMatchObject({ status: 200, body: { email: taken.email } });
 

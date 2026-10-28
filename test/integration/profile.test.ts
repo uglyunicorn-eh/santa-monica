@@ -50,10 +50,10 @@ describe('updating the profile name', () => {
 
   it('sets the name, cleaned up, and returns the user; repeating it changes nothing', async () => {
     const who = await person('me');
-    const res = await rename(who, '  Ded   Moroz ');
-    expect(res).toEqual({ status: 200, body: { id: who.id, name: 'Ded Moroz', email: who.email } });
-    expect(await rename(who, '  Ded   Moroz ')).toEqual(res);
-    expect((await me(who)).body.name).toBe('Ded Moroz');
+    const res = await rename(who, '  Santa   Claus ');
+    expect(res).toEqual({ status: 200, body: { id: who.id, name: 'Santa Claus', email: who.email } });
+    expect(await rename(who, '  Santa   Claus ')).toEqual(res);
+    expect((await me(who)).body.name).toBe('Santa Claus');
   });
 
   it('validates the name', async () => {

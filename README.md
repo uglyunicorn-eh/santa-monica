@@ -9,7 +9,7 @@
 
 # Santa Monica
 
-The API behind [Anonymous Ded Morozes](https://gnomik.me), a Secret Santa app: people sign in with a magic link,
+The API behind [Anonymous Santa Clauses](https://gnomik.me), a Secret Santa app: people sign in with a magic link,
 host or join a party, and the host draws who gives a gift to whom. The web app is
 [santa-barbara](https://github.com/uglyunicorn-eh/santa-barbara).
 
