@@ -53,6 +53,27 @@ describe('request size', () => {
   });
 });
 
+describe('names', () => {
+  it("can't hold a web address, since they go into emails; ordinary names with dots still can", async () => {
+    const who = await signIn();
+    const rename = (name: string) => request('PATCH', '/v1/me', { token: who.token, body: { name } });
+    for (const name of ['evil.co', 'Win at www.example', 'https://x', 'bob@mail.com', 'Ask SANTA.CLAUS', 'St.Petersburg']) {
+      expect([name, await rename(name)]).toMatchObject([name, { status: 400, body: { error: { field: 'name', message: "Name can't contain a web address." } } }]);
+    }
+    for (const name of ['J.R.R. Tolkien', 'Mr. Smith', 'Anne-Marie', 'Hi... there!', 'Zoë 2.0']) {
+      expect([name, (await rename(name)).status]).toEqual([name, 200]);
+    }
+    expect(await request('POST', '/v1/parties', { token: who.token, body: { name: 'Gifts at evil.co' } })).toMatchObject({
+      status: 400, body: { error: { field: 'name', message: "Party name can't contain a web address." } },
+    });
+    const party = (await request('POST', '/v1/parties', { token: who.token, body: { name: 'Office party' } })).body;
+    const guest = await signIn();
+    expect(await request('POST', '/v1/parties/join', { token: guest.token, body: { code: party.code, name: 'see evil.co' } })).toMatchObject({
+      status: 400, body: { error: { field: 'name' } },
+    });
+  });
+});
+
 describe('party size', () => {
   /** Adds stand-in members straight to the party, so the test doesn't need a hundred real joins. */
   const addMembers = (code: string, count: number) => runInDurableObject(env.PARTY.getByName(code), async (_instance, state) => {
