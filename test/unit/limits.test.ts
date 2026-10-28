@@ -187,6 +187,18 @@ describe('old 5-letter party codes', () => {
   });
 });
 
+describe('client addresses', () => {
+  it('are counted per IPv6 /64, so rotating addresses inside one does not get around a limit', async () => {
+    const keys: string[] = [];
+    const counting = { limit: async ({ key }: { key: string }) => (keys.push(key), { success: true }) } as unknown as RateLimit;
+    const e = testEnv({ PARTY_LOOKUP_RATE_LIMIT_IP: counting });
+    for (const ip of ['2001:db8:1:2::a', '2001:db8:1:2:ffff:ffff:ffff:ffff', '2001:db8:1:3::a', '192.0.2.9']) {
+      await request('POST', '/v1/parties/lookup', { body: { code: 'QWERTYUI' }, env: e, ip });
+    }
+    expect(keys).toEqual(['2001:db8:1:2::/64', '2001:db8:1:2::/64', '2001:db8:1:3::/64', '192.0.2.9']);
+  });
+});
+
 describe('party codes in writes', () => {
   const write = (token: string, action: string, code: string, e: typeof env) =>
     request('POST', `/v1/parties/${action}`, { token, body: { code, ...(action === 'join' ? { name: 'Guest' } : {}) }, env: e });
