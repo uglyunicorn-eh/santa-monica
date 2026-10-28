@@ -6,6 +6,7 @@ export const subject = 'Your Anonymous Santa Clauses email is being changed';
 
 export const vars = {
   title: 'Email change requested',
+  preheader: "If this wasn't you, you can stop it from this email.",
   action: "This wasn't me",
   ...actionTones.stop,
   footer: "If it was you, there's nothing to do. If it wasn't, the button stops the change and signs out every device signed in to your account. It works for an hour.",

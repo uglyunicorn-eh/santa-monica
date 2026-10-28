@@ -66,7 +66,7 @@ describe('the draw', () => {
     await settleParty(party.code);
     expect(await Promise.all(everyone.map(async p => (await viewParty(party.code, p)).body.target))).toEqual(before);
     for (const p of everyone) {
-      expect((await mailbox(p.email)).filter(m => m.subject === 'Draw party')).toHaveLength(1);
+      expect((await mailbox(p.email)).filter(m => m.subject === 'Draw party: the dice are rolled!')).toHaveLength(1);
     }
   });
 });
@@ -95,7 +95,7 @@ describe('notification emails', () => {
     expect(await settleParty(party.code)).toBe(0);
 
     for (const p of everyone) {
-      const notifications = (await mailbox(p.email)).filter(m => m.subject === 'Tom & Jerry <3');
+      const notifications = (await mailbox(p.email)).filter(m => m.subject === 'Tom & Jerry <3: the dice are rolled!');
       expect(notifications).toHaveLength(1);
       const [mail] = notifications;
       expect(mail.to).toEqual([p.email]);
@@ -123,8 +123,8 @@ describe('notification emails', () => {
     expect((await drawParty(host, party)).status).toBe(200);
 
     expect(await settleParty(party.code, 5)).toBe(1);
-    expect((await mailbox(host.email)).some(m => m.subject === 'Flaky mail')).toBe(true);
-    expect((await mailbox(ok.email)).some(m => m.subject === 'Flaky mail')).toBe(true);
+    expect((await mailbox(host.email)).some(m => m.subject === 'Flaky mail: the dice are rolled!')).toBe(true);
+    expect((await mailbox(ok.email)).some(m => m.subject === 'Flaky mail: the dice are rolled!')).toBe(true);
     expect((await viewParty(party.code, flaky)).body.target).not.toBeNull();
   });
 });

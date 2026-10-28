@@ -5,6 +5,7 @@ export const subject = 'Confirm your new email for Anonymous Santa Clauses';
 
 export const vars = {
   title: 'Confirm your new email',
+  preheader: 'Confirm it to sign in with this address from now on.',
   action: 'Use this email',
   ...actionTones.go,
   footer: "The link works for an hour. If you didn't ask for this, ignore this email and nothing will change.",

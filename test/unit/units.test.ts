@@ -63,7 +63,7 @@ describe('mail templates', () => {
 
   it('escapes the party name in HTML but not in the subject', () => {
     const mail = renderPartyNotification({ party: { name: 'Tom & Jerry <3', url: 'https://gnomik.me/p/QWERT/' }, assetsUrl: 'https://api.test' });
-    expect(mail.subject).toBe('Tom & Jerry <3');
+    expect(mail.subject).toBe('Tom & Jerry <3: the dice are rolled!');
     expect(mail.html).not.toContain('Tom & Jerry <3');
     expect(mail.html).toContain('href="https://gnomik.me/p/QWERT/"');
     expect(mail.html + mail.text).not.toMatch(/\{\{|unsubscribe|sendgrid/i);
@@ -73,6 +73,8 @@ describe('mail templates', () => {
     const deletion = renderAccountDeletion({ url: 'https://gnomik.me/profile/delete/abc', assetsUrl: 'https://api.test' });
     expect(deletion.text).toContain('https://gnomik.me/profile/delete/abc');
     expect(deletion.html).toContain('href="https://gnomik.me/profile/delete/abc"');
+    // The inbox preview is a short line of its own, not the body again.
+    expect(deletion.html).toMatch(/mso-hide:all;">Confirm with the link inside\. It works for an hour\.<\/div>/);
 
     const change = renderEmailChange({ url: 'https://gnomik.me/profile/email#abc', oldEmail: 'old@example.com', newEmail: 'a&b@example.com', assetsUrl: 'https://api.test' });
     expect(change.text).toContain('from old@example.com to a&b@example.com');
