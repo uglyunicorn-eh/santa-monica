@@ -2,6 +2,7 @@ import { Context } from 'hono';
 
 import { UserRecord } from 'src/do/types';
 import { Env } from 'src/env';
+import { rateLimitKey } from 'src/utils/ip';
 import { JwtHelpers, createJwtHelpers } from 'src/utils/jwt';
 import { Session, SessionProof } from 'src/utils/session';
 
@@ -26,9 +27,11 @@ export type ApiEnv = {
 
 export type ApiContext = Context<ApiEnv>;
 
-export const jwtFor = (env: Env): JwtHelpers => createJwtHelpers({ privateKey: env.JWT_PRIVATE_KEY, issuer: domain });
+export const jwtFor = (env: Env): JwtHelpers =>
+  createJwtHelpers({ privateKey: env.JWT_PRIVATE_KEY, previousKey: env.JWT_PRIVATE_KEY_PREVIOUS, issuer: domain });
 
-export const clientIp = (c: ApiContext) => c.req.header('cf-connecting-ip') ?? 'unknown';
+/** Who a request counts as for per-client rate limits: its IPv4 address, or its IPv6 /64 (`rateLimitKey`). */
+export const clientIp = (c: ApiContext) => rateLimitKey(c.req.header('cf-connecting-ip') ?? 'unknown');
 
 export function makeSession(env: Env, userId: string, email: string, tokenVersion?: number, proof?: SessionProof): RequestSession {
   let verified: Promise<UserRecord | null> | undefined;

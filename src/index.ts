@@ -29,6 +29,11 @@ app.use(cors({
 
 app.use(async (c, next) => {
   await next();
+  // Answers are for the one asking (profiles, party views, session tokens): nothing in between may keep them. A route
+  // whose answer is public sets its own (the stats). Set here, not under /v1, so the 413s of the body limit get it too.
+  if (!c.res.headers.has('Cache-Control')) {
+    c.res.headers.set('Cache-Control', 'no-store');
+  }
   c.res.headers.set('X-Developed-By', 'Made with love in Canada by Ugly Unicorn (https://uglyunicorn.ca)');
   c.res.headers.set('X-Powered-By', 'Maple syrup and magic, eh!');
 });

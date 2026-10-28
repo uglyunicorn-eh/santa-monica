@@ -53,6 +53,27 @@ describe('request size', () => {
   });
 });
 
+describe('names', () => {
+  it("can't hold a web address, since they go into emails; ordinary names with dots still can", async () => {
+    const who = await signIn();
+    const rename = (name: string) => request('PATCH', '/v1/me', { token: who.token, body: { name } });
+    for (const name of ['evil.co', 'Win at www.example', 'https://x', 'bob@mail.com', 'Ask SANTA.CLAUS', 'St.Petersburg']) {
+      expect([name, await rename(name)]).toMatchObject([name, { status: 400, body: { error: { field: 'name', message: "Name can't contain a web address." } } }]);
+    }
+    for (const name of ['J.R.R. Tolkien', 'Mr. Smith', 'Anne-Marie', 'Hi... there!', 'Zoë 2.0']) {
+      expect([name, (await rename(name)).status]).toEqual([name, 200]);
+    }
+    expect(await request('POST', '/v1/parties', { token: who.token, body: { name: 'Gifts at evil.co' } })).toMatchObject({
+      status: 400, body: { error: { field: 'name', message: "Party name can't contain a web address." } },
+    });
+    const party = (await request('POST', '/v1/parties', { token: who.token, body: { name: 'Office party' } })).body;
+    const guest = await signIn();
+    expect(await request('POST', '/v1/parties/join', { token: guest.token, body: { code: party.code, name: 'see evil.co' } })).toMatchObject({
+      status: 400, body: { error: { field: 'name' } },
+    });
+  });
+});
+
 describe('party size', () => {
   /** Adds stand-in members straight to the party, so the test doesn't need a hundred real joins. */
   const addMembers = (code: string, count: number) => runInDurableObject(env.PARTY.getByName(code), async (_instance, state) => {
@@ -184,6 +205,18 @@ describe('old 5-letter party codes', () => {
     expect(await request('POST', '/v1/auth/magic-link', { body: { email: uniqueEmail(), party: 'QWERT' }, env: legacy })).toMatchObject({ status: 429, body: { error: { field: 'party' } } });
     expect((await request('POST', '/v1/parties/lookup', { body: { code: code }, env: legacy })).status).toBe(200);
     expect((await join(guest.token, code, undefined, legacy)).status).toBe(200);
+  });
+});
+
+describe('client addresses', () => {
+  it('are counted per IPv6 /64, so rotating addresses inside one does not get around a limit', async () => {
+    const keys: string[] = [];
+    const counting = { limit: async ({ key }: { key: string }) => (keys.push(key), { success: true }) } as unknown as RateLimit;
+    const e = testEnv({ PARTY_LOOKUP_RATE_LIMIT_IP: counting });
+    for (const ip of ['2001:db8:1:2::a', '2001:db8:1:2:ffff:ffff:ffff:ffff', '2001:db8:1:3::a', '192.0.2.9']) {
+      await request('POST', '/v1/parties/lookup', { body: { code: 'QWERTYUI' }, env: e, ip });
+    }
+    expect(keys).toEqual(['2001:db8:1:2::/64', '2001:db8:1:2::/64', '2001:db8:1:3::/64', '192.0.2.9']);
   });
 });
 
