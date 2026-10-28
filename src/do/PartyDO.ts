@@ -998,10 +998,10 @@ export class PartyDO extends DurableObject<Env> {
   }
 
   /**
-   * Reminds the host that the party is due in about a day, once, when `remind_at` has passed: by email, through the
-   * outbox. Like auto-prune, it's only for an open party that isn't deleted (`reminderDue`): a drawn party has nothing
-   * left to do, and a deleted one keeps its reminder for when it's restored. One whose due time has passed by then
-   * (restored late) is let go without an email.
+   * Reminds the host that the party starts in about a day (its due time: roughly when they mean to roll the dice),
+   * once, when `remind_at` has passed: by email, through the outbox. Like auto-prune, it's only for an open party that
+   * isn't deleted (`reminderDue`): a drawn party has nothing left to do, and a deleted one keeps its reminder for when
+   * it's restored. One whose due time has passed by then (restored late) is let go without an email.
    */
   private remindIfDue() {
     const party = this.party();

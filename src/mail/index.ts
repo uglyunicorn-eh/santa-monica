@@ -57,7 +57,7 @@ export const renderAccountDeletion = ({ url, assetsUrl }: { url: string; assetsU
 // The body has placeholders of its own, so it is filled first (as plain text: render escapes it once, in the HTML part).
 const fillBody = (body: string, vars: Record<string, string>) => fill(body, vars, s => s);
 
-/** The host's reminder the day before the party's due time, with how many people are in. */
+/** The host's reminder the day before the party starts (its due time), with how many people are in. */
 export const renderPartyDue = ({ party, members, assetsUrl }: { party: { name: string; url: string }; members: number; assetsUrl: string }) => {
   const vars = { 'party.name': party.name, url: party.url, members: members === 1 ? 'only you are in' : `${members} people are in`, assetsUrl, assetsVersion };
   return render(partyDue, { ...partyDue.vars, ...vars, body: fillBody(partyDue.body, vars) });

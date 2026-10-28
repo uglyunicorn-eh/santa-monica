@@ -20,7 +20,7 @@ async function alarmNow(code: string) {
   await settleParty(code);
 }
 
-const reminders = async (email: string) => (await mailbox(email)).filter(m => m.subject.endsWith('is due in about a day'));
+const reminders = async (email: string) => (await mailbox(email)).filter(m => m.subject.endsWith('starts in about a day'));
 
 describe("a party's due time", () => {
   it('is set at creation, shown to anyone who can see the party, and stays put once it has passed', async () => {
