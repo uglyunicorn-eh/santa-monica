@@ -6,6 +6,7 @@ export const subject = 'Someone tried to use your email on Anonymous Santa Claus
 
 export const vars = {
   title: 'Your email is already in use',
+  preheader: 'Nothing changed: this address already has its own account.',
   footer: "If it was you, sign in with this address instead. If it wasn't, you can ignore this email.",
 };
 

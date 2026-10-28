@@ -7,6 +7,7 @@ export const subject = '{{party.name}} was put away';
 
 export const vars = {
   title: 'We put your party away',
+  preheader: 'Nothing happened in it for 45 days, but you can still bring it back.',
   action: 'Bring it back',
   ...actionTones.go,
   footer: "If you don't need it any more, there's nothing to do: it goes for good after that date, with everyone's details.",

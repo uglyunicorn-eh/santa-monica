@@ -7,6 +7,7 @@ export const subject = '{{party.name}} starts in about a day';
 
 export const vars = {
   title: 'Your party starts in about a day',
+  preheader: "It's almost time to roll the dice.",
   action: 'Open the party',
   ...actionTones.go,
   footer: "It's only a reminder: nothing happens on its own, and you roll the dice when you're ready.",
