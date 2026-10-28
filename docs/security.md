@@ -159,7 +159,7 @@ The draw is uniformly random over every way to give each person one target other
 | Party members' emails | Until the party is drawn and the draw emails are sent. After that, members are known by id. |
 | Invited addresses | One day, to skip repeat invites. |
 | Expired link and request records | Deleted when the object starts. |
-| Sign-in requests, invites, email changes to a new address | Nothing is stored for that address until a link is used. |
+| Sign-in requests, invites, email changes to a new address | Nothing is stored for that address until a link is used. A wrong secret phrase on an invite is counted in the party, under a hash of the address. |
 | Open parties with no activity | Deleted after 45 days. The host gets an email and can restore it for 7 days, then it's erased with members' emails. |
 | Deleted parties (by the host) | Restorable for 24 hours, then erased. |
 

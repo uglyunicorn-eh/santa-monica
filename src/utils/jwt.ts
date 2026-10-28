@@ -20,7 +20,7 @@ export type VerifyTokenOptions = {
   expiredFor?: number;
 };
 
-export type TokenType = 'EnterRequest' | 'UserToken' | 'AccountDeletion' | 'EmailChange' | 'EmailChangeCancel' | 'LiveTicket';
+export type TokenType = 'EnterRequest' | 'UserToken' | 'AccountDeletion' | 'EmailChange' | 'EmailChangeCancel' | 'LiveTicket' | 'PartyInvite';
 
 export type JwtHelpers = {
   issueToken: <P extends TokenPayload = TokenPayload>(type: TokenType, payload: P, options?: IssueTokenOptions) => Promise<TokenValue>;

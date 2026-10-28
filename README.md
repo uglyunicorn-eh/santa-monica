@@ -84,8 +84,9 @@ Sessions last 30 days. Treat every token as an opaque string: tokens are encrypt
 | Endpoint | Body | Returns |
 |---|---|---|
 | `POST /auth/magic-link` | `{email, party?}` | `202`. Emails a sign-in link. |
-| `POST /auth/magic-link/again` | `{token}` | `202`. Emails a fresh link for one that expired (up to 7 days ago). |
+| `POST /auth/magic-link/again` | `{token}` | `202`. Emails a fresh link for a sign-in link or an invite that expired (up to 7 days ago). |
 | `POST /auth/session` | `{token, key?}` | A session. |
+| `POST /auth/invite` | `{token, key?, name, password?}` | A session, with the invited address joined to the party as `name` in one step. A wrong phrase is `forbidden` and the invite can be tried again; a member gets a magic link instead (`202`). |
 
 ### Account
 
