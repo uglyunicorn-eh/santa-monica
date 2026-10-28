@@ -12,6 +12,18 @@ export interface EnterRequestToken extends TokenPayload {
 }
 
 /**
+ * Emailed with a party invite: signs the invited address in and joins the party in one step (`POST /v1/auth/invite`).
+ * Single-use (`jti`), like a magic link, but it lasts INVITE_LINK_TTL, since an invite can wait in an inbox for days.
+ */
+export interface PartyInviteToken extends TokenPayload {
+  /** The invited address, normalized (`canonicalEmail`). */
+  email: string;
+  /** The party's code. */
+  party: string;
+  jti: string;
+}
+
+/**
  * Emailed to confirm deleting the account. Single-use (`jti`), identifies the user by id and email, and works only
  * while the account's token version is still `ver`: cancelling an email change (or any version bump) voids it.
  */

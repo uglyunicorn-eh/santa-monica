@@ -7,7 +7,10 @@ import { Session } from 'src/utils/session';
 
 import { newObjectId } from 'src/utils/ids';
 import { LIVE_USER_HEADER } from 'src/utils/liveHeaders';
+import { jwtFor } from 'src/api/context';
 import { takeAddressLimit, takeAllMail } from 'src/api/rateLimit';
+import type { PartyInviteToken } from 'src/api/types';
+import { mailRef } from 'src/utils/logRef';
 import { STATS_NAME } from './StatsDO';
 import { Outbox, RetryLater } from './outbox';
 
@@ -137,10 +140,20 @@ const tryAgain = fail('unavailable', "We couldn't reach your account. Please try
 export const MAX_PARTY_INVITES = 50;
 /** One address gets at most one invite to a party within this window; asking again sooner is answered as done. */
 export const REINVITE_AFTER_MS = 24 * 60 * 60 * 1000;
+/**
+ * How long the link in an invite email works, in seconds: a week, since an invite can wait in an inbox. It signs the
+ * invited address in, so it's single-use like a magic link, and it only signs in to join (`POST /v1/auth/invite`).
+ */
+export const INVITE_LINK_TTL = 7 * 24 * 60 * 60;
 
 /** What the host asked to invite, address by address. */
 export type InviteResult =
   | { ok: true; invited: string[]; alreadyInvited: string[]; alreadyJoined: string[]; invitesLeft: number }
+  | { ok: false; error: PartyUserError };
+
+/** Whether an invited address can take up its invite (`admitInvitee`): already a member, or free to join now. */
+export type InviteeResult =
+  | { ok: true; member: boolean }
   | { ok: false; error: PartyUserError };
 
 const closedToNewMembers = fail('conflict', 'Party is already packed. Sorry, we cannot accept a new participant...', 'party');
@@ -263,6 +276,34 @@ export class PartyDO extends DurableObject<Env> {
       .toArray()[0];
     const left = row ? row.first_failed_at + PHRASE_GUESS_WINDOW_MS - Date.now() : 0;
     return row && row.failures >= max && left > 0 ? left : 0;
+  }
+
+  /**
+   * Checks the secret phrase `guesser` (a member id, or `invite:` and an invited address's mail ref) gave: null when it's
+   * right, else the refusal. A wrong one counts against the guesser and the whole party; past either limit, even the
+   * right one waits. The right one clears the guesser's count.
+   */
+  private checkPhrase(party: PartyRow, guesser: string, password: string | null) {
+    const waitMessage = (ms: number) => {
+      const minutes = Math.ceil(ms / 60_000);
+      return `That's a lot of wrong guesses! Please ask your friend for the secret phrase and try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`;
+    };
+    const lockedFor = this.guessLockout(guesser, MAX_PHRASE_GUESSES);
+    if (lockedFor) {
+      return fail('rate_limited', waitMessage(lockedFor), 'password');
+    }
+    if ((party.password || '').toUpperCase() !== (password || '').toUpperCase()) {
+      // Too many wrong guesses at this party from everyone: refuse more for now, without counting them.
+      const partyLockedFor = this.guessLockout(WHOLE_PARTY, MAX_PARTY_PHRASE_GUESSES);
+      if (partyLockedFor) {
+        return fail('rate_limited', waitMessage(partyLockedFor), 'password');
+      }
+      this.recordWrongGuess(guesser);
+      this.recordWrongGuess(WHOLE_PARTY);
+      return fail('forbidden', "Hmm... Seems you've got a wrong secret phrase. Please try a different one or ask your friend for a hint.", 'password');
+    }
+    this.sql.exec('DELETE FROM phrase_guesses WHERE member_id = ?', guesser);
+    return null;
   }
 
   /** Counts a wrong secret phrase, starting a new window when the last one has passed. */
@@ -495,6 +536,34 @@ export class PartyDO extends DurableObject<Env> {
     return { ok: true, invited, alreadyInvited, alreadyJoined, invitesLeft: MAX_PARTY_INVITES - used - invited.length };
   }
 
+  /**
+   * Whether an invited address (canonical) can take up its invite, checked before the invite link is used up so a
+   * typo in the secret phrase doesn't cost it: the party is live, and the address is already a member (whatever the
+   * party's state), or the party is open, not full, and `password` is its secret phrase. Wrong phrases count the way a
+   * member's do, under the address's mail ref, since the account may not exist yet. The join itself comes after.
+   */
+  async admitInvitee(email: string, password: string | null): Promise<InviteeResult> {
+    const guesser = `invite:${await mailRef(this.env, email)}`;
+    const party = this.liveParty();
+    if (!party) {
+      return fail('not_found', 'Party does not exist.', 'party');
+    }
+    if (this.sql.exec('SELECT 1 FROM memberships WHERE member_email = ?', email).toArray().length) {
+      return { ok: true, member: true };
+    }
+    if (party.is_closed) {
+      return closedToNewMembers;
+    }
+    const wrongPhrase = this.checkPhrase(party, guesser, password);
+    if (wrongPhrase) {
+      return wrongPhrase;
+    }
+    if (this.memberCount() >= MAX_PARTY_MEMBERS) {
+      return partyIsFull;
+    }
+    return { ok: true, member: false };
+  }
+
   /** Only the host can still see a deleted party (to restore it): everyone else stops watching. */
   async delete(userId: string): Promise<PartyResult> {
     const result = await this.deleteNow(userId);
@@ -678,25 +747,10 @@ export class PartyDO extends DurableObject<Env> {
     if (party.is_closed) {
       return closedToNewMembers;
     }
-    const waitMessage = (ms: number) => {
-      const minutes = Math.ceil(ms / 60_000);
-      return `That's a lot of wrong guesses! Please ask your friend for the secret phrase and try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`;
-    };
-    const lockedFor = this.guessLockout(member.id, MAX_PHRASE_GUESSES);
-    if (lockedFor) {
-      return fail('rate_limited', waitMessage(lockedFor), 'password');
+    const wrongPhrase = this.checkPhrase(party, member.id, password);
+    if (wrongPhrase) {
+      return wrongPhrase;
     }
-    if ((party.password || '').toUpperCase() !== (password || '').toUpperCase()) {
-      // Too many wrong guesses at this party from everyone: refuse more for now, without counting them.
-      const partyLockedFor = this.guessLockout(WHOLE_PARTY, MAX_PARTY_PHRASE_GUESSES);
-      if (partyLockedFor) {
-        return fail('rate_limited', waitMessage(partyLockedFor), 'password');
-      }
-      this.recordWrongGuess(member.id);
-      this.recordWrongGuess(WHOLE_PARTY);
-      return fail('forbidden', "Hmm... Seems you've got a wrong secret phrase. Please try a different one or ask your friend for a hint.", 'password');
-    }
-    this.sql.exec('DELETE FROM phrase_guesses WHERE member_id = ?', member.id);
     if (this.memberCount() >= MAX_PARTY_MEMBERS) {
       return partyIsFull;
     }
@@ -1137,9 +1191,14 @@ export class PartyDO extends DurableObject<Env> {
       if (!await takeAddressLimit(this.env, first.email)) {
         return;
       }
+      // The link signs the address in to join (`POST /v1/auth/invite`). Made at sending, so it's never stored, and after
+      // "#", which keeps it out of server logs and the Referer header. Each try of a retried send makes a new one.
+      const invite = await jwtFor(this.env).issueToken<PartyInviteToken>('PartyInvite', {
+        email: first.email, party: first.slug, jti: crypto.randomUUID(),
+      }, { ttl: INVITE_LINK_TTL });
       return await sendMail(this.env, first.email, renderPartyInvite({
         hostName: first.hostName,
-        party: { name: first.partyName, url: `${this.env.FRONTEND_URL}/p/${first.slug}/`, isProtected: first.isProtected },
+        party: { name: first.partyName, url: `${this.env.FRONTEND_URL}/p/${first.slug}/#${invite}`, isProtected: first.isProtected },
         assetsUrl: this.env.PUBLIC_URL,
       }));
     }

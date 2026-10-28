@@ -130,6 +130,10 @@ export const bodies = {
   // Party codes travel in a body, never in a URL (Cloudflare's request logs record URLs): the lookup and every write.
   joinParty: body({ code: required(partyCode), name: required(words('Name', MAX_PERSON_NAME_LENGTH)), password: optional(phrase) }),
   partyAction: body({ code: required(partyCode) }),
+  /** An emailed invite, taken up: the link, the key to bind the session to, and what joining asks for. */
+  acceptInvite: body({
+    token: required(token), key: publicKey, name: required(words('Name', MAX_PERSON_NAME_LENGTH)), password: optional(phrase),
+  }),
   invite: body({
     code: required(partyCode),
     emails: v.pipe(
@@ -231,6 +235,7 @@ export const tokens = {
     sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), ver: v.optional(v.number()), cnf: v.optional(v.object({ jkt: v.pipe(v.string(), v.nonEmpty()) })),
   }),
   enterRequest: v.object({ email: v.pipe(v.string(), v.nonEmpty(), v.toLowerCase()), typed: v.optional(v.string()), jti: linkId, exp: v.number(), party: v.optional(v.string()) }),
+  partyInvite: v.object({ email: v.pipe(v.string(), v.nonEmpty(), v.toLowerCase()), party: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number() }),
   accountDeletion: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number(), ver: v.number() }),
   emailChange: v.object({
     sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), newEmail: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number(), ver: v.number(),

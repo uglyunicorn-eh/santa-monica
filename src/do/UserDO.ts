@@ -294,6 +294,17 @@ export class UserDO extends DurableObject<Env> {
     return this.ensure(email);
   }
 
+  /**
+   * The user, when the link `jti` was used by this same request (`requestKey`): a retry after a dropped answer. Null
+   * otherwise, whether another request used it or nobody did. Uses up nothing, and stores nothing for a new address.
+   */
+  redeemedBy(jti: string, requestKey: string): UserRecord | null {
+    if (!this.ready) {
+      return null;
+    }
+    return this.usedLink(jti)?.request_key === requestKey ? this.get() : null;
+  }
+
   /** How an emailed link was used, or null if it wasn't (forgetting used links that have expired). */
   private usedLink(jti: string): { request_key: string | null; outcome: string | null } | null {
     this.sql.exec('DELETE FROM used_magic_links WHERE expires_at < ?', Date.now());

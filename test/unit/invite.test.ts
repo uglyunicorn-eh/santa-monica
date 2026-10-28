@@ -4,7 +4,9 @@ import { describe, expect, it } from 'vitest';
 import { mailRef } from 'src/utils/logRef';
 import { MAX_PARTY_INVITES, REINVITE_AFTER_MS } from 'src/do/PartyDO';
 
-import { denied, drainOutbox, mailer, request, signIn, testEnv, uniqueEmail } from './helpers';
+import { PartyInviteToken } from 'src/api/types';
+
+import { denied, drainOutbox, jwt, mailer, request, signIn, testEnv, uniqueEmail } from './helpers';
 
 const createParty = async (token: string, password?: string) =>
   (await request('POST', '/v1/parties', { token, body: { name: 'Office party', ...(password ? { password } : {}) } })).body;
@@ -42,6 +44,9 @@ describe('POST /v1/parties/invite', () => {
     expect(sent[0].subject).toBe("You're invited to a Secret Santa party!");
     expect(sent[0].text).toContain('Santa Host invites you to Office party');
     expect(sent[0].text).toContain(`/p/${party.code}/`);
+    // The link carries a single-use invite for that address and party, after "#".
+    const link = /\/p\/[A-Z]+\/#([\w-]+(?:\.[\w-]*){4})/.exec(sent[0].text)![1];
+    expect(await jwt().jwtVerify<PartyInviteToken>(link, 'PartyInvite')).toMatchObject({ email: sent[0].to, party: party.code, jti: expect.any(String) });
     expect(sent[0].text).toContain('ask Santa Host for it');
     expect(sent[0].text).not.toContain('Jingle bells');
 

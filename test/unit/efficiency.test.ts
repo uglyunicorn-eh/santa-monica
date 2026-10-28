@@ -54,6 +54,8 @@ const BUDGETS: Record<string, { USER: number | string; PARTY: number | string }>
   'POST /auth/magic-link': { USER: 0, PARTY: '0, or 1 with a party code' },
   'POST /auth/magic-link/again': { USER: 0, PARTY: '0, or 1 with a party code' },
   'POST /auth/session': { USER: 1, PARTY: 0 },
+  // Joining: the invitee check and the join. A member gets a magic link (the party is looked up for it) instead.
+  'POST /auth/invite': { USER: 1, PARTY: '2, or 1 for a repeat' },
   'GET /me': { USER: 1, PARTY: 0 },
   'PATCH /me': { USER: 1, PARTY: 0 },
   'GET /me/parties': { USER: 1, PARTY: 0 },
@@ -122,6 +124,30 @@ describe('Durable Object call budgets', () => {
     }
     counting.reset();
     await request('POST', '/v1/auth/session', { body: { token: 'garbage' }, env: counting.env });
+    expect(counting.count()).toBe(0);
+  });
+
+  it('POST /auth/invite: the invitee check, the sign-in and the join; one fewer for a repeat; none when it is invalid', async () => {
+    const host = await person();
+    const party = await create(host.token);
+    const email = uniqueEmail();
+    const token = await jwt().issueToken('PartyInvite', { email, party: party.code, jti: crypto.randomUUID() }, { ttl: 60 });
+    const counting = countingEnv();
+    const k = key();
+    await request('POST', '/v1/auth/invite', { key: k, body: { token, name: 'Guest' }, env: counting.env });
+    expect(counting.methods()).toEqual(['PARTY.admitInvitee', 'USER.redeemMagicLink', 'PARTY.join']);
+
+    counting.reset();
+    await request('POST', '/v1/auth/invite', { key: k, body: { token, name: 'Guest' }, env: counting.env });
+    expect(counting.methods()).toEqual(['PARTY.admitInvitee', 'USER.redeemedBy']);
+
+    // A member signing in with an invite gets a magic link for the party instead.
+    counting.reset();
+    await request('POST', '/v1/auth/invite', { key: key(), body: { token, name: 'Guest' }, env: counting.env });
+    expect(counting.methods()).toEqual(['PARTY.admitInvitee', 'USER.redeemedBy', 'PARTY.view']);
+
+    counting.reset();
+    await request('POST', '/v1/auth/invite', { body: { token: 'garbage', name: 'Guest' }, env: counting.env });
     expect(counting.count()).toBe(0);
   });
 

@@ -11,9 +11,11 @@ import { forgetRequest, rememberRequest, seenRequest } from 'src/api/requestMemo
 import { accepted, bodies, session, tokens } from 'src/api/schemas';
 import { EnterRequestToken } from 'src/api/types';
 import { issueSession, sendRequestedMail } from 'src/api/users';
+import { UserRecord } from 'src/do/types';
+import { Env } from 'src/env';
 import { renderSignIn } from 'src/mail';
 import { canonicalEmail, undottedGmail } from 'src/utils/email';
-import { isExpiredToken } from 'src/utils/jwt';
+import { JwtHelpers, TokenType, isExpiredToken } from 'src/utils/jwt';
 import { partyRef } from 'src/utils/logRef';
 import { annotate } from 'src/utils/tracing';
 
@@ -86,19 +88,63 @@ auth.post('/magic-link', action('enterRequest', async c => {
  */
 auth.post('/magic-link/again', action('enterRequestAgain', async c => {
   const { token } = await readBody(c, bodies.link);
-  let payload: unknown;
-  try {
-    payload = await jwtFor(c.env).jwtVerify(token, 'EnterRequest', { expiredFor: AGAIN_WITHIN_S });
-  } catch {
-    payload = undefined;
+  const jwt = jwtFor(c.env);
+  const link = v.safeParse(tokens.enterRequest, await payloadOf(jwt, token, 'EnterRequest', AGAIN_WITHIN_S));
+  if (link.success) {
+    const email = canonicalEmail(link.output.email);
+    return sendSignInLink(c, { email, typed: link.output.typed ?? link.output.email, party: link.output.party });
   }
-  const link = v.safeParse(tokens.enterRequest, payload);
-  if (!link.success) {
+  // An expired invite asks the same way, and gets a magic link for its party (the address in it is already normalized).
+  const invite = v.safeParse(tokens.partyInvite, await payloadOf(jwt, token, 'PartyInvite', AGAIN_WITHIN_S));
+  if (!invite.success) {
     throw fail('invalid_link', 'Invalid request token.', 'token');
   }
-  const email = canonicalEmail(link.output.email);
-  return sendSignInLink(c, { email, typed: link.output.typed ?? link.output.email, party: link.output.party });
+  return sendSignInLink(c, { email: invite.output.email, typed: invite.output.email, party: invite.output.party });
 }));
+
+/** What a link of `type` says, accepting one expired up to `expiredFor` seconds ago; undefined when it doesn't open. */
+async function payloadOf(jwt: JwtHelpers, token: string, type: TokenType, expiredFor: number): Promise<unknown> {
+  try {
+    return await jwt.jwtVerify(token, type, { expiredFor });
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Opens an emailed link of `type` and reads it with `schema`. Refuses an expired one as `link_expired` (saying
+ * `expired`) and anything else that doesn't open as `invalid_link`, recording which on the trace as `trace`.
+ */
+async function openLink<S extends v.GenericSchema>(
+  jwt: JwtHelpers, token: string, type: TokenType, schema: S, trace: string, expired: string,
+): Promise<v.InferOutput<S>> {
+  let payload: unknown;
+  try {
+    payload = await jwt.jwtVerify(token, type);
+  } catch (error) {
+    if (isExpiredToken(error)) {
+      annotate({ [trace]: 'expired' });
+      throw fail('link_expired', expired, 'token');
+    }
+  }
+  const link = v.safeParse(schema, payload);
+  if (!link.success) {
+    annotate({ [trace]: 'invalid' });
+    throw fail('invalid_link', 'Invalid request token.', 'token');
+  }
+  return link.output;
+}
+
+/**
+ * An account kept under an older spelling of `email` (`typed`, or the Gmail address without its dots) moves to it
+ * first (`adoptTypedAccount`), so signing in with `link` lands there.
+ */
+async function adoptOlder(env: Env, email: string, link: { jti: string; exp: number }, key?: string, typed = email) {
+  const older = [...new Set([typed, undottedGmail(email)])].filter((address): address is string => !!address && address !== email);
+  if (older.length) {
+    annotate({ 'auth.typed_account': await adoptTypedAccount(env, older, email, link.jti, link.exp * 1000, key) });
+  }
+}
 
 /**
  * Signs in with a magic link. Each link works once; repeating the same request (same Idempotency-Key) signs in
@@ -110,34 +156,62 @@ auth.post('/session', action('enter', async c => {
   const { token, key: publicKey } = await readBody(c, bodies.session);
   const key = await keyHash(idempotencyKey(c));
   const jwt = jwtFor(env);
-
-  let payload: unknown;
-  try {
-    payload = await jwt.jwtVerify(token, 'EnterRequest');
-  } catch (error) {
-    if (isExpiredToken(error)) {
-      annotate({ 'auth.magic_link': 'expired' });
-      throw fail('link_expired', 'This magic link has expired. Please request a new one.', 'token');
-    }
-    payload = undefined;
-  }
-  const link = v.safeParse(tokens.enterRequest, payload);
-  if (!link.success) {
-    annotate({ 'auth.magic_link': 'invalid' });
-    throw fail('invalid_link', 'Invalid request token.', 'token');
-  }
+  const link = await openLink(jwt, token, 'EnterRequest', tokens.enterRequest, 'auth.magic_link', 'This magic link has expired. Please request a new one.');
 
   // Links sent before addresses were normalized carry the address as typed in `email`.
-  const { jti, exp, typed = link.output.email } = link.output;
-  const email = canonicalEmail(link.output.email);
-  const older = [...new Set([typed, undottedGmail(email)])].filter((address): address is string => !!address && address !== email);
-  if (older.length) {
-    annotate({ 'auth.typed_account': await adoptTypedAccount(env, older, email, jti, exp * 1000, key) });
-  }
+  const { jti, exp, typed = link.email } = link;
+  const email = canonicalEmail(link.email);
+  await adoptOlder(env, email, link, key, typed);
   const user = await env.USER.getByName(email).redeemMagicLink(email, jti, exp * 1000, key);
   annotate({ 'auth.magic_link': user ? 'redeemed' : 'already_used', 'user.id': user?.id });
   if (!user) {
     throw fail('link_used', 'This magic link has already been used. Please request a new one.', 'token');
   }
-  return send(c, session, { ...await issueSession(c.env, jwt, user, publicKey), party: link.output.party ?? null });
+  return send(c, session, { ...await issueSession(c.env, jwt, user, publicKey), party: link.party ?? null });
+}));
+
+/**
+ * Takes up an emailed party invite: signs the invited address in and joins the party, in one step, with the name (and
+ * secret phrase) the person typed. The account is the address's own, made now if it has none, as with a magic link.
+ *
+ * The link is used up only once the party says they can join, so a wrong phrase can be fixed and tried again; the
+ * party counts wrong phrases per address. It signs in only to join: someone who is already a member is emailed a
+ * magic link for the party instead (202), so an invite that's old or forwarded doesn't open their account. Repeating
+ * the request (same Idempotency-Key) signs in again. If the join fails after the link is used (the dice were rolled
+ * just then), the person is still signed in, and the party they see says why.
+ */
+auth.post('/invite', action('acceptInvite', async c => {
+  const { env } = c;
+  const { token, key: publicKey, name, password } = await readBody(c, bodies.acceptInvite);
+  const key = await keyHash(idempotencyKey(c));
+  const jwt = jwtFor(env);
+  const link = await openLink(jwt, token, 'PartyInvite', tokens.partyInvite, 'auth.invite', 'This invite has expired. We can send you a fresh link.');
+  const { email, party: code, jti, exp } = link;
+  annotate({ 'party.ref': await partyRef(env, code) });
+  const party = env.PARTY.getByName(code);
+  const userDO = env.USER.getByName(email);
+  const signedIn = async (user: UserRecord) => send(c, session, { ...await issueSession(env, jwt, user, publicKey), party: code });
+
+  const admitted = await party.admitInvitee(email, password ?? null);
+  if (!admitted.ok) {
+    annotate({ 'auth.invite': 'refused' });
+    // Every refusal names its field ('party' or 'password').
+    throw fail(admitted.error.code, admitted.error.message, admitted.error.fieldName!);
+  }
+  if (admitted.member) {
+    // Only a repeat of the request that joined them (its answer was lost) signs a member in.
+    const user = key ? await userDO.redeemedBy(jti, key) : null;
+    annotate({ 'auth.invite': user ? 'repeated' : 'member' });
+    return user ? signedIn(user) : sendSignInLink(c, { email, typed: email, party: code });
+  }
+
+  await adoptOlder(env, email, link, key);
+  const user = await userDO.redeemMagicLink(email, jti, exp * 1000, key);
+  annotate({ 'auth.invite': user ? 'redeemed' : 'already_used', 'user.id': user?.id });
+  if (!user) {
+    throw fail('link_used', 'This invite has already been used. Please sign in with your email to join.', 'token');
+  }
+  const joined = await party.join({ id: user.id, email, name }, name, password ?? null, { tokenVersion: user.tokenVersion });
+  annotate({ 'party.joined': joined.ok });
+  return signedIn(user);
 }));
