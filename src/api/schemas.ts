@@ -8,7 +8,7 @@ import * as v from 'valibot';
 import {
   DEFAULT_PAGE_SIZE, IDEMPOTENCY_KEY_RE, MAX_CURSOR_LENGTH, MAX_EMAIL_LENGTH, MAX_INVITES_PER_REQUEST, MAX_PAGE_SIZE,
   MAX_PARTY_NAME_LENGTH, MAX_PERSON_NAME_LENGTH, MAX_PHRASE_LENGTH,
-  MAX_TOKEN_LENGTH, MIN_PAGE_SIZE,
+  MAX_TOKEN_LENGTH, MIN_PAGE_SIZE, DUE_AT_MAX_MS, DUE_AT_MIN_MS,
 } from 'src/api/limits';
 import { RESTORE_WINDOW_MS } from 'src/do/PartyDO';
 import type { PartyListCursor } from 'src/do/types';
@@ -76,6 +76,27 @@ const publicKey = v.pipe(
   v.transform(value => value ?? undefined),
 );
 
+/**
+ * When a party is due (optional): an ISO 8601 date-time with its offset or Z, at least DUE_AT_MIN_MS and at most
+ * DUE_AT_MAX_MS from now. Read as ms since the epoch; left out or null reads as none.
+ */
+const dueAt = v.pipe(
+  v.nullish(v.pipe(
+    v.string('Invalid due time.'),
+    v.regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/, 'Invalid due time.'),
+    // Date.parse moves an impossible day (February 30) into the next month; refuse it instead.
+    v.check(text => {
+      const [year, month, day] = text.slice(0, 10).split('-').map(Number);
+      return new Date(Date.UTC(year, month - 1, day)).getUTCDate() === day;
+    }, 'Invalid due time.'),
+    v.transform(text => Date.parse(text)),
+    v.check(ms => Number.isFinite(ms), 'Invalid due time.'),
+    v.check(ms => ms >= Date.now() + DUE_AT_MIN_MS, 'The due time must be at least an hour from now.'),
+    v.check(ms => ms <= Date.now() + DUE_AT_MAX_MS, 'The due time must be within a year.'),
+  )),
+  v.transform(value => value ?? undefined),
+);
+
 /** A required field: left out or null reads as empty, so the field's own "is required" message answers. */
 const required = <S extends v.GenericSchema<string, unknown>>(schema: S) => v.nullish(schema, '');
 
@@ -105,7 +126,7 @@ export const bodies = {
   signInLink: body({ token: required(token), key: publicKey }),
   profile: body({ name: required(words('Name', MAX_PERSON_NAME_LENGTH)) }),
   emailChange: v.pipe(body({ email: required(typedEmail) }), v.transform(normalizeEmail)),
-  createParty: body({ name: required(words('Party name', MAX_PARTY_NAME_LENGTH)), password: optional(phrase) }),
+  createParty: body({ name: required(words('Party name', MAX_PARTY_NAME_LENGTH)), password: optional(phrase), dueAt: dueAt }),
   // Party codes travel in a body, never in a URL (Cloudflare's request logs record URLs): the lookup and every write.
   joinParty: body({ code: required(partyCode), name: required(words('Name', MAX_PERSON_NAME_LENGTH)), password: optional(phrase) }),
   partyAction: body({ code: required(partyCode) }),
@@ -268,6 +289,8 @@ export const PartySummaryJson = v.object({
 /** A party as the asking person sees it. */
 export const PartyJson = v.object({
   ...PartySummaryJson.entries,
+  /** When the party is due, if the host set one: the app counts down to it. */
+  dueAt: v.nullable(isoString),
   /** The secret phrase, for the host only. */
   password: v.nullable(v.string()),
   /** Only for members. */
@@ -303,7 +326,8 @@ export const party = v.pipe(
   v.object({
     slug: v.string(), name: v.string(), password: v.nullable(v.string()), isProtected: v.boolean(),
     isHost: v.boolean(), isJoined: v.boolean(), isClosed: v.boolean(), createdAt: v.number(),
-    closedAt: v.nullable(v.number()), deletedAt: v.nullable(v.number()), restorableUntil: v.nullish(v.number()), participantCount: v.nullable(v.number()),
+    closedAt: v.nullable(v.number()), deletedAt: v.nullable(v.number()), restorableUntil: v.nullish(v.number()), dueAt: v.nullish(v.number()),
+    participantCount: v.nullable(v.number()),
     participants: v.nullable(v.array(v.string())), target: v.nullable(v.object({ name: v.string() })),
   }),
   v.transform(p => ({
@@ -316,6 +340,7 @@ export const party = v.pipe(
     createdAt: iso(p.createdAt),
     rolledAt: p.closedAt === null ? null : iso(p.closedAt),
     ...deletionTimes(p.deletedAt, p.restorableUntil),
+    dueAt: p.dueAt ? iso(p.dueAt) : null,
     password: p.password,
     participantCount: p.participantCount,
     participants: p.participants,

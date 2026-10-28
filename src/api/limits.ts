@@ -27,3 +27,8 @@ export const DEFAULT_PAGE_SIZE = 10;
 
 /** `Idempotency-Key` header: a client-made id, such as a UUID. */
 export const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9_-]{16,100}$/;
+
+/** A party's due time is at least this far ahead when it's set (an hour)... */
+export const DUE_AT_MIN_MS = 60 * 60 * 1000;
+/** ...and at most this far (a year and a day). */
+export const DUE_AT_MAX_MS = 366 * 24 * 60 * 60 * 1000;

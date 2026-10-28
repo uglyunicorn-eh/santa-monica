@@ -158,6 +158,7 @@ parties.post('/', requireSession, action('createParty', async c => {
       password: input.password || null,
       host: { id: user.id, email: s.email, name: user.name },
       reservation: user.reservation,
+      dueAt: input.dueAt ?? null,
     });
     annotate({ 'party.code_attempts': attempt + 1 });
     if ('conflict' in result) {

@@ -213,6 +213,7 @@ export type PartyJson = {
   rolledAt: string | null;
   deletedAt: string | null;
   restorableUntil: string | null;
+  dueAt: string | null;
   participantCount: number | null;
   participants: string[] | null;
   target: { name: string } | null;

@@ -145,7 +145,7 @@ describe('looking up a party', () => {
       status: 200,
       body: {
         code: party.code, name: 'Secret party', password: null, isJoined: false, isHost: false, isProtected: true, isClosed: false,
-        createdAt: party.createdAt, rolledAt: null, deletedAt: null, restorableUntil: null,
+        createdAt: party.createdAt, rolledAt: null, deletedAt: null, restorableUntil: null, dueAt: null,
         participantCount: null, participants: null, target: null,
       },
     });

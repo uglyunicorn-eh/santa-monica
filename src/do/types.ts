@@ -71,6 +71,8 @@ export type PartyView = {
   deletedAt: number | null;
   /** Until when a deleted party can be restored; null when it isn't deleted. */
   restorableUntil: number | null;
+  /** When the party is due, if the host set it; the app counts down to it. */
+  dueAt: number | null;
   participantCount: number | null;
   participants: string[] | null;
   target: { id: string; name: string } | null;
@@ -106,4 +108,6 @@ export type CreatePartyInput = {
   host: Member;
   /** The host's slot from UserDO.startHosting, released once the party is in their list. */
   reservation?: string;
+  /** When the party is due, if the host set it (ms since the epoch). */
+  dueAt?: number | null;
 };

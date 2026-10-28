@@ -1,7 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 
 import { Env } from 'src/env';
-import { renderPartyInvite, renderPartyNotification, renderPartyPruned, sendMail } from 'src/mail';
+import { renderPartyDue, renderPartyInvite, renderPartyNotification, renderPartyPruned, sendMail } from 'src/mail';
 import santaShuffle from 'src/utils/santaShuffle';
 import { Session } from 'src/utils/session';
 
@@ -31,6 +31,10 @@ type PartyRow = {
   prune_at: number | null;
   /** Until when a deleted party can be restored. Parties deleted before this column existed have null (24 h). */
   restorable_until: number | null;
+  /** When the party is due, if the host set it. Shown as a countdown; nothing happens when it passes. */
+  due_at: number | null;
+  /** When the host's reminder goes out (`reminderAt`); null once sent, or when there's none. */
+  remind_at: number | null;
 };
 
 type MembershipRow = {
@@ -53,6 +57,8 @@ type OutboxMessage =
   // gone, so the slug travels with the message.
   | { kind: 'user.partyPurged'; email: string; slug: string }
   | { kind: 'mail.partyNotification'; email: string; partyName: string; slug: string }
+  // To the host, the day before the party's due time (`remindIfDue`).
+  | { kind: 'mail.partyDue'; email: string; partyName: string; slug: string; members: number }
   // To the host, when an open party was deleted for want of activity (`pruneIfDue`).
   | { kind: 'mail.partyPruned'; email: string; partyName: string; slug: string; restorableUntil: number }
   // An invite from the host. Counted against the recipient's per-address limit when it goes out; over it, it's dropped.
@@ -65,6 +71,19 @@ export type JoinCheck = Pick<Session, 'tokenVersion' | 'proof'>;
 
 /** How long a party the host deleted can be restored. After that it is erased for good. */
 export const RESTORE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * When the host is reminded of a party's due time: the day before it, at the time of day the party was created (a
+ * time the host is likely around, in whatever time zone they're in). That's the moment with the creation's clock time
+ * nearest to 24 hours before the due time, so 12 to 36 hours before it. Null when that moment has passed already.
+ */
+export function reminderAt(createdAt: number, dueAt: number): number | null {
+  // The moments with the creation's clock time are createdAt plus whole days: take the one nearest to a day before.
+  const at = createdAt + DAY_MS * Math.round((dueAt - DAY_MS - createdAt) / DAY_MS);
+  return at > createdAt ? at : null;
+}
 
 /** An open party with no activity (a write by a person) for this long is deleted, and its host told by email. */
 export const PRUNE_AFTER_MS = 45 * 24 * 60 * 60 * 1000;
@@ -81,7 +100,10 @@ export const AUTO_PRUNE_SINCE = Date.UTC(2026, 9, 27);
 
 // Columns added after the first release, by table. Parties created before them get the columns on their next start.
 const ADDED_COLUMNS: Record<string, Record<string, string>> = {
-  party: { closed_at: 'INTEGER', deleted_at: 'INTEGER', invites_sent: 'INTEGER NOT NULL DEFAULT 0', prune_at: 'INTEGER', restorable_until: 'INTEGER' },
+  party: {
+    closed_at: 'INTEGER', deleted_at: 'INTEGER', invites_sent: 'INTEGER NOT NULL DEFAULT 0', prune_at: 'INTEGER', restorable_until: 'INTEGER',
+    due_at: 'INTEGER', remind_at: 'INTEGER',
+  },
 };
 
 /** Wrong secret phrases one person can try on a party within PHRASE_GUESS_WINDOW_MS before having to wait. */
@@ -392,6 +414,7 @@ export class PartyDO extends DurableObject<Env> {
       closedAt: party.closed_at,
       deletedAt: party.deleted_at,
       restorableUntil: this.restorableUntil(party),
+      dueAt: party.due_at,
       participantCount: isJoined ? this.memberCount() : null,
       participants,
       target,
@@ -602,11 +625,13 @@ export class PartyDO extends DurableObject<Env> {
       invites_sent: 0,
       prune_at: now + PRUNE_AFTER_MS,
       restorable_until: null,
+      due_at: input.dueAt ?? null,
+      remind_at: input.dueAt ? reminderAt(now, input.dueAt) : null,
     };
     this.ctx.storage.transactionSync(() => {
       this.sql.exec(
-        'INSERT INTO party (id, slug, name, password, host_id, is_closed, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
-        party.id, party.slug, party.name, party.password, party.host_id, party.created_at,
+        'INSERT INTO party (id, slug, name, password, host_id, is_closed, created_at, due_at, remind_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)',
+        party.id, party.slug, party.name, party.password, party.host_id, party.created_at, party.due_at, party.remind_at,
       );
       this.touch();
       this.sql.exec(
@@ -972,6 +997,32 @@ export class PartyDO extends DurableObject<Env> {
     }
   }
 
+  /**
+   * Reminds the host that the party is due in about a day, once, when `remind_at` has passed: by email, through the
+   * outbox. Like auto-prune, it's only for an open party that isn't deleted (`reminderDue`): a drawn party has nothing
+   * left to do, and a deleted one keeps its reminder for when it's restored. One whose due time has passed by then
+   * (restored late) is let go without an email.
+   */
+  private remindIfDue() {
+    const party = this.party();
+    const due = party ? this.reminderDue(party) : null;
+    if (!party || due === null || due > Date.now()) {
+      return;
+    }
+    const hostEmail = this.membership(party.host_id)?.member_email;
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec('UPDATE party SET remind_at = NULL');
+      if (hostEmail && party.due_at !== null && party.due_at > Date.now()) {
+        this.enqueue({ kind: 'mail.partyDue', email: hostEmail, partyName: party.name, slug: party.slug, members: this.memberCount() });
+      }
+    });
+  }
+
+  /** When the host's reminder is due: only while the party is open and not deleted, like auto-prune. */
+  private reminderDue(party: PartyRow): number | null {
+    return !party.is_closed && !party.deleted_at ? party.remind_at : null;
+  }
+
   /** Erases the party for good: its memberships (and with them every email) go, and a tombstone keeps its code. */
   private erase(party: PartyRow) {
     const hostEmail = this.membership(party.host_id)?.member_email;
@@ -1092,6 +1143,13 @@ export class PartyDO extends DurableObject<Env> {
         assetsUrl: this.env.PUBLIC_URL,
       }));
     }
+    if (first.kind === 'mail.partyDue') {
+      return await sendMail(this.env, first.email, renderPartyDue({
+        party: { name: first.partyName, url: `${this.env.FRONTEND_URL}/p/${first.slug}/` },
+        members: first.members,
+        assetsUrl: this.env.PUBLIC_URL,
+      }));
+    }
     if (first.kind === 'mail.partyPruned') {
       return await sendMail(this.env, first.email, renderPartyPruned({
         party: { name: first.partyName, url: `${this.env.FRONTEND_URL}/p/${first.slug}/` },
@@ -1136,6 +1194,7 @@ export class PartyDO extends DurableObject<Env> {
       this.ensureSchema(); // parties created before tombstones existed have no `cancelled` table yet
       this.purgeIfExpired();
       this.pruneIfDue();
+      this.remindIfDue();
     }
     await this.runOutbox(() => true);
   }
@@ -1154,17 +1213,18 @@ export class PartyDO extends DurableObject<Env> {
 
   /**
    * When the alarm should next run: the earliest outbox retry, the end of a deleted party's restore window (it is
-   * erased then), when the oldest invite is due to be deleted, or when an open party is due to be pruned. Null when
-   * there's nothing to wait for.
+   * erased then), when the oldest invite is due to be deleted, when an open party is due to be pruned, or when its
+   * host is due a reminder. Null when there's nothing to wait for.
    */
   private nextAlarm(): number | null {
     const retry = this.outbox.nextAttemptAt();
     const party = this.hasSchema() ? this.party() : null;
     const purge = party ? this.restorableUntil(party) : null;
     const prune = party && !party.is_closed && !party.deleted_at ? party.prune_at : null;
+    const remind = party ? this.reminderDue(party) : null;
     const oldestInvite = this.hasSchema() ? this.sql.exec<{ at: number | null }>('SELECT MIN(invited_at) AS at FROM invites').one().at : null;
     const forget = oldestInvite === null ? null : oldestInvite + REINVITE_AFTER_MS;
-    const next = [retry, purge, prune, forget].filter((at): at is number => at !== null);
+    const next = [retry, purge, prune, remind, forget].filter((at): at is number => at !== null);
     return next.length ? Math.max(Math.min(...next), Date.now()) : null;
   }
 
