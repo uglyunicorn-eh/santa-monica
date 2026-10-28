@@ -80,14 +80,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * nearest to 24 hours before the due time, so 12 to 36 hours before it. Null when that moment has passed already.
  */
 export function reminderAt(createdAt: number, dueAt: number): number | null {
-  const target = dueAt - DAY_MS;
-  const timeOfDay = ((createdAt % DAY_MS) + DAY_MS) % DAY_MS;
-  let at = target - (((target % DAY_MS) + DAY_MS) % DAY_MS) + timeOfDay;
-  if (at - target > DAY_MS / 2) {
-    at -= DAY_MS;
-  } else if (target - at > DAY_MS / 2) {
-    at += DAY_MS;
-  }
+  // The moments with the creation's clock time are createdAt plus whole days: take the one nearest to a day before.
+  const at = createdAt + DAY_MS * Math.round((dueAt - DAY_MS - createdAt) / DAY_MS);
   return at > createdAt ? at : null;
 }
 
@@ -420,7 +414,7 @@ export class PartyDO extends DurableObject<Env> {
       closedAt: party.closed_at,
       deletedAt: party.deleted_at,
       restorableUntil: this.restorableUntil(party),
-      dueAt: party.due_at ?? null,
+      dueAt: party.due_at,
       participantCount: isJoined ? this.memberCount() : null,
       participants,
       target,
@@ -636,10 +630,9 @@ export class PartyDO extends DurableObject<Env> {
     };
     this.ctx.storage.transactionSync(() => {
       this.sql.exec(
-        'INSERT INTO party (id, slug, name, password, host_id, is_closed, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
-        party.id, party.slug, party.name, party.password, party.host_id, party.created_at,
+        'INSERT INTO party (id, slug, name, password, host_id, is_closed, created_at, due_at, remind_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)',
+        party.id, party.slug, party.name, party.password, party.host_id, party.created_at, party.due_at, party.remind_at,
       );
-      this.sql.exec('UPDATE party SET due_at = ?, remind_at = ?', party.due_at, party.remind_at);
       this.touch();
       this.sql.exec(
         'INSERT INTO memberships (member_id, member_email, name, joined_at) VALUES (?, ?, ?, ?)',
@@ -1006,20 +999,28 @@ export class PartyDO extends DurableObject<Env> {
 
   /**
    * Reminds the host that the party is due in about a day, once, when `remind_at` has passed: by email, through the
-   * outbox. A party drawn or deleted by then gets no reminder (there's nothing left to do, or nobody to do it for).
+   * outbox. Like auto-prune, it's only for an open party that isn't deleted (`reminderDue`): a drawn party has nothing
+   * left to do, and a deleted one keeps its reminder for when it's restored. One whose due time has passed by then
+   * (restored late) is let go without an email.
    */
   private remindIfDue() {
     const party = this.party();
-    if (!party || party.remind_at === null || party.remind_at > Date.now()) {
+    const due = party ? this.reminderDue(party) : null;
+    if (!party || due === null || due > Date.now()) {
       return;
     }
     const hostEmail = this.membership(party.host_id)?.member_email;
     this.ctx.storage.transactionSync(() => {
       this.sql.exec('UPDATE party SET remind_at = NULL');
-      if (!party.is_closed && !party.deleted_at && hostEmail) {
+      if (hostEmail && party.due_at !== null && party.due_at > Date.now()) {
         this.enqueue({ kind: 'mail.partyDue', email: hostEmail, partyName: party.name, slug: party.slug, members: this.memberCount() });
       }
     });
+  }
+
+  /** When the host's reminder is due: only while the party is open and not deleted, like auto-prune. */
+  private reminderDue(party: PartyRow): number | null {
+    return !party.is_closed && !party.deleted_at ? party.remind_at : null;
   }
 
   /** Erases the party for good: its memberships (and with them every email) go, and a tombstone keeps its code. */
@@ -1220,10 +1221,10 @@ export class PartyDO extends DurableObject<Env> {
     const party = this.hasSchema() ? this.party() : null;
     const purge = party ? this.restorableUntil(party) : null;
     const prune = party && !party.is_closed && !party.deleted_at ? party.prune_at : null;
-    const remind = party ? party.remind_at : null;
+    const remind = party ? this.reminderDue(party) : null;
     const oldestInvite = this.hasSchema() ? this.sql.exec<{ at: number | null }>('SELECT MIN(invited_at) AS at FROM invites').one().at : null;
     const forget = oldestInvite === null ? null : oldestInvite + REINVITE_AFTER_MS;
-    const next = [retry, purge, prune, remind, forget].filter((at): at is number => at !== null && at !== undefined);
+    const next = [retry, purge, prune, remind, forget].filter((at): at is number => at !== null);
     return next.length ? Math.max(Math.min(...next), Date.now()) : null;
   }
 

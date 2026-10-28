@@ -84,6 +84,11 @@ const dueAt = v.pipe(
   v.nullish(v.pipe(
     v.string('Invalid due time.'),
     v.regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/, 'Invalid due time.'),
+    // Date.parse moves an impossible day (February 30) into the next month; refuse it instead.
+    v.check(text => {
+      const [year, month, day] = text.slice(0, 10).split('-').map(Number);
+      return new Date(Date.UTC(year, month - 1, day)).getUTCDate() === day;
+    }, 'Invalid due time.'),
     v.transform(text => Date.parse(text)),
     v.check(ms => Number.isFinite(ms), 'Invalid due time.'),
     v.check(ms => ms >= Date.now() + DUE_AT_MIN_MS, 'The due time must be at least an hour from now.'),

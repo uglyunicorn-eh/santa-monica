@@ -358,10 +358,11 @@ Asked for after the release: "upon party creation, ask for a due time.. then on 
 - **API** (santa-monica, branch `party-due-time`):
   - `POST /v1/parties` takes an optional `dueAt` (an ISO date-time with its offset, 1 hour to 366 days ahead), stored as `party.due_at`. Every party answer carries `dueAt` (ISO, or null).
   - `reminderAt(createdAt, dueAt)` picks the moment with the creation's clock time nearest to 24 hours before the due time, so 12 to 36 hours ahead, or none if that has passed. It's stored as `party.remind_at` and joins `nextAlarm()`.
-  - The alarm's `remindIfDue()` queues `mail.partyDue` to the host once, and clears `remind_at`. A party that's drawn or deleted by then, or whose host has no email on file, gets none.
+  - The alarm's `remindIfDue()` queues `mail.partyDue` to the host once, and clears `remind_at`. Like auto-prune it's only for an open party that isn't deleted (`reminderDue`, used by `nextAlarm` too): a drawn party gets none, and a deleted one keeps its reminder for when it's restored. A reminder whose due time has passed by then is dropped without an email, and so is one for a host with no email on file.
+  - An impossible day (February 30) is refused, not moved into the next month by `Date.parse`.
   - The change only adds fields, so the old app keeps working.
 - **Web app** (santa-barbara): an optional due field on the create form, and a `D:HH:MM:SS` countdown on the party page that stops at `0:00:00:00`. Being built in its own PR.
-- **Not included:** changing the due time after creation, and a reminder for a party that is restored after its reminder time.
+- **Not included:** changing the due time after creation.
 
 ---
 

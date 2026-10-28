@@ -86,7 +86,13 @@ describe('a due time on a new party', () => {
     for (const dueAt of ['tomorrow', '2026-12-20', '2026-12-20T18:00', 12345, new Date(Date.now() - HOUR).toISOString(), new Date(Date.now() + 30 * 60 * 1000).toISOString(), new Date(Date.now() + DUE_AT_MAX_MS + DAY).toISOString()]) {
       expect([dueAt, (await createParty(host.token, dueAt)).body.error?.field]).toEqual([dueAt, 'dueAt']);
     }
-    expect((await createParty(host.token, '2026-02-30T18:00:00Z')).status).toBe(400);
+    // A day that doesn't exist in its month is refused, not moved into the next month.
+    const nextYear = new Date().getUTCFullYear() + 1;
+    for (const day of [`${nextYear}-02-30T18:00:00Z`, `${nextYear}-04-31T10:00:00+02:00`]) {
+      expect([day, (await createParty(host.token, day)).body.error?.field]).toEqual([day, 'dueAt']);
+    }
+    // A real day with an offset is fine.
+    expect((await createParty(host.token, new Date(Date.now() + 30 * DAY).toISOString().replace('Z', '+00:00'))).status).toBe(201);
   });
 });
 
@@ -110,7 +116,7 @@ describe('the reminder', () => {
     expect(await alarmNow(party.code)).toEqual([]);
   });
 
-  it('is skipped for a party drawn or deleted by then, and for a host with no email on file', async () => {
+  it('is not sent for a party drawn or deleted, nor to a host with no email on file', async () => {
     const host = await signIn(uniqueEmail('host'), 'Host');
     const guest = await signIn(uniqueEmail('guest'), 'Guest');
     const due = new Date(Date.now() + 3 * DAY).toISOString();
@@ -124,8 +130,29 @@ describe('the reminder', () => {
     for (const code of [drawn.code, deleted.code, noEmail.code]) {
       await partySql(code, 'UPDATE party SET remind_at = ?', Date.now() - 1000);
       expect([code, await alarmNow(code)]).toEqual([code, []]);
-      expect(await partySql(code, 'SELECT remind_at FROM party')).toEqual([{ remind_at: null }]);
     }
+    // A drawn or deleted party keeps it (a restore brings it back); a host with no email just doesn't get one.
+    expect((await partySql<{ remind_at: number | null }>(drawn.code, 'SELECT remind_at FROM party'))[0].remind_at).not.toBeNull();
+    expect((await partySql<{ remind_at: number | null }>(deleted.code, 'SELECT remind_at FROM party'))[0].remind_at).not.toBeNull();
+    expect(await partySql(noEmail.code, 'SELECT remind_at FROM party')).toEqual([{ remind_at: null }]);
+  });
+
+  it('comes back with a restored party, unless its due time has passed by then', async () => {
+    const host = await signIn(uniqueEmail('host'), 'Host');
+    const due = new Date(Date.now() + 3 * DAY).toISOString();
+    const restored = (await createParty(host.token, due)).body;
+    await request('POST', '/v1/parties/delete', { token: host.token, body: { code: restored.code } });
+    await partySql(restored.code, 'UPDATE party SET remind_at = ?', Date.now() - 1000);
+    expect(await alarmNow(restored.code)).toEqual([]);
+    expect((await request('POST', '/v1/parties/restore', { token: host.token, body: { code: restored.code } })).status).toBe(200);
+    expect((await alarmNow(restored.code)).map(m => m.to)).toEqual([host.email]);
+
+    const late = (await createParty(host.token, due)).body;
+    await request('POST', '/v1/parties/delete', { token: host.token, body: { code: late.code } });
+    await request('POST', '/v1/parties/restore', { token: host.token, body: { code: late.code } });
+    await partySql(late.code, 'UPDATE party SET remind_at = ?, due_at = ?', Date.now() - 2000, Date.now() - 1000);
+    expect(await alarmNow(late.code)).toEqual([]);
+    expect(await partySql(late.code, 'SELECT remind_at FROM party')).toEqual([{ remind_at: null }]);
   });
 
   it('reads well for a host on their own', () => {
