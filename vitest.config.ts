@@ -7,8 +7,8 @@ import { defineConfig } from 'vitest/config';
 
 const resolve = {
   alias: {
-    src: path.resolve(__dirname, 'src'),
-    'package.json': path.resolve(__dirname, 'package.json'),
+    src: path.resolve(import.meta.dirname, 'src'),
+    'package.json': path.resolve(import.meta.dirname, 'package.json'),
   },
 };
 
@@ -76,7 +76,7 @@ export default defineConfig({
               workers: [{
                 name: 'mail-sink',
                 modules: true,
-                script: fs.readFileSync(path.resolve(__dirname, 'test/integration/mail-sink.js'), 'utf8'),
+                script: fs.readFileSync(path.resolve(import.meta.dirname, 'test/integration/mail-sink.js'), 'utf8'),
                 kvNamespaces: { MAILS: 'test-mails' },
               }],
             },
