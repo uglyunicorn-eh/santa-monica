@@ -3,7 +3,6 @@
   "name": "gnomik-api",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
-  "compatibility_flags": ["nodejs_compat"],
   // Logs and traces: kept in Workers Logs and exported to Better Stack (source "gnomik-api") through the
   // betterstack-logs / betterstack-traces OpenTelemetry destinations set up in the Cloudflare dashboard.
   // Query strings are left out of request URLs in logs and traces: party routes carry the party code there (?code=),
