@@ -34,7 +34,8 @@ const keys = new Map<string, Promise<Uint8Array>>();
 
 /**
  * The 256-bit key every token is encrypted with: HKDF over JWT_PRIVATE_KEY with its own `info`, like the log ref key
- * (src/utils/logRef.ts). No other secret, and rotating JWT_PRIVATE_KEY retires every token at once.
+ * (src/utils/logRef.ts). To rotate it without signing everyone out, the old secret goes to JWT_PRIVATE_KEY_PREVIOUS
+ * for as long as a token lasts (docs/deployment.md).
  */
 function tokenKey(secret: string): Promise<Uint8Array> {
   let key = keys.get(secret);
@@ -60,7 +61,7 @@ function tokenKey(secret: string): Promise<Uint8Array> {
  * authentication tag proves the Worker made them, so no signature is nested inside. The type travels in the protected
  * header (`t`), which the tag covers too. The frontend treats every token as an opaque string.
  */
-export const createJwtHelpers = ({ privateKey, issuer }: { privateKey: string, issuer: string }): JwtHelpers => ({
+export const createJwtHelpers = ({ privateKey, previousKey, issuer }: { privateKey: string, previousKey?: string, issuer: string }): JwtHelpers => ({
   issueToken: async (type, payload, options = {}) => {
     const jwt = new jose.EncryptJWT({ ...payload })
       .setProtectedHeader({ alg: 'dir', enc: 'A256GCM', typ: 'JWT', t: type })
@@ -73,11 +74,19 @@ export const createJwtHelpers = ({ privateKey, issuer }: { privateKey: string, i
   },
 
   jwtVerify: async <P extends TokenPayload>(token: string, type: TokenType, options: VerifyTokenOptions = {}) => {
-    const { payload, protectedHeader } = await jose.jwtDecrypt(token, await tokenKey(privateKey), {
+    const decrypt = async (secret: string) => jose.jwtDecrypt(token, await tokenKey(secret), {
       issuer,
       keyManagementAlgorithms: ['dir'],
       contentEncryptionAlgorithms: ['A256GCM'],
       ...(options.expiredFor ? { clockTolerance: options.expiredFor } : {}),
+    });
+    // While the key is being rotated, tokens made with the previous one still open, so nobody is signed out. Only a
+    // token the current key can't open is tried again, so this costs nothing on the usual path.
+    const { payload, protectedHeader } = await decrypt(privateKey).catch(error => {
+      if (previousKey && error instanceof jose.errors.JWEDecryptionFailed) {
+        return decrypt(previousKey);
+      }
+      throw error;
     });
     if (protectedHeader.t !== type) {
       throw new Error(`Expected a ${type} token.`);

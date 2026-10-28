@@ -26,13 +26,23 @@ export const PARTY_CODE_RE = new RegExp(`^(?:[${PARTY_CODE_ALPHABET}]{5}|[${PART
 
 const NOT_TEXT = 'Must be text.';
 
-/** Words a person typed: trimmed, runs of spaces collapsed, no space before punctuation; required, at most `max`. */
+/**
+ * What mail apps turn into a link: a scheme (`https://`), `www.`, or a domain (`evil.co`, and so email addresses). One
+ * letter before a dot (`J.R.R.`) or a space after it (`Mr. Smith`) isn't one.
+ */
+export const LINK_RE = /[a-z][a-z0-9+.-]*:\/\/|www\.|[a-z0-9-]{2,}\.[a-z]{2,}/i;
+
+/**
+ * Words a person typed: trimmed, runs of spaces collapsed, no space before punctuation; required, at most `max`. Names
+ * go into emails sent to addresses a host typed (invites), so they can't hold a web address.
+ */
 const words = (label: string, max: number) => v.pipe(
   v.string(NOT_TEXT),
   v.trim(),
   v.transform((s: string) => s.replace(/\s+/g, ' ').replace(/\s([.,!?])/g, '$1')),
   v.nonEmpty(`${label} is required.`),
   v.maxLength(max, `${label} must be at most ${max} characters.`),
+  v.check(text => !LINK_RE.test(text), `${label} can't contain a web address.`),
 );
 
 /** A secret phrase: trimmed only (inner spacing is part of it), at most MAX_PHRASE_LENGTH. */

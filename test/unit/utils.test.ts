@@ -3,6 +3,7 @@ import * as jose from 'jose';
 import { describe, expect, it } from 'vitest';
 
 import { isPermanentMailError, render } from 'src/mail';
+import { rateLimitKey } from 'src/utils/ip';
 import { createJwtHelpers, isExpiredToken } from 'src/utils/jwt';
 import { strToNodeId } from 'src/utils/strings/nodeId';
 import { randomInt, randomString } from 'src/utils/strings/random';
@@ -20,6 +21,18 @@ describe('jwt', () => {
   it('refuses a token of the wrong type', async () => {
     const token = await helpers.issueToken('UserToken', {}, { ttl: 60 });
     await expect(helpers.jwtVerify(token, 'EnterRequest')).rejects.toThrow('Expected a EnterRequest token.');
+  });
+
+  it('opens tokens made with the previous key while it is rotated out, and makes new ones with the current key', async () => {
+    const old = await createJwtHelpers({ privateKey: env.TEST_OTHER_PRIVATE_KEY, issuer: 'api.test' }).issueToken('UserToken', { n: 1 }, { ttl: 60 });
+    await expect(helpers.jwtVerify(old, 'UserToken')).rejects.toBeInstanceOf(jose.errors.JWEDecryptionFailed);
+    const rotating = createJwtHelpers({ privateKey: env.JWT_PRIVATE_KEY, previousKey: env.TEST_OTHER_PRIVATE_KEY, issuer: 'api.test' });
+    expect(await rotating.jwtVerify(old, 'UserToken')).toMatchObject({ n: 1 });
+    await expect(rotating.jwtVerify(old, 'EnterRequest')).rejects.toThrow('Expected a EnterRequest token.');
+    const fresh = await rotating.issueToken('UserToken', { n: 2 }, { ttl: 60 });
+    expect(await helpers.jwtVerify(fresh, 'UserToken')).toMatchObject({ n: 2 });
+    // Anything else wrong with a token isn't retried with the previous key.
+    await expect(rotating.jwtVerify('not.a.token.at.all', 'UserToken')).rejects.not.toBeInstanceOf(jose.errors.JWEDecryptionFailed);
   });
 
   it('refuses a token from another issuer', async () => {
@@ -128,6 +141,34 @@ describe('mail', () => {
       undefined,
     ]) {
       expect(isPermanentMailError(error)).toBe(false);
+    }
+  });
+});
+
+describe('rateLimitKey', () => {
+  it('keeps IPv4 addresses, and anything that is not IPv6, as they are', () => {
+    expect(rateLimitKey('192.0.2.7')).toBe('192.0.2.7');
+    expect(rateLimitKey('unknown')).toBe('unknown');
+  });
+
+  it('counts an IPv4-mapped IPv6 address as its IPv4 address', () => {
+    expect(rateLimitKey('::ffff:192.0.2.7')).toBe('192.0.2.7');
+    expect(rateLimitKey('::FFFF:192.0.2.7')).toBe('192.0.2.7');
+  });
+
+  it('counts IPv6 per /64, however the address is written', () => {
+    const key = '2001:db8:85a3:12::/64';
+    expect(rateLimitKey('2001:0db8:85a3:0012:0000:8a2e:0370:7334')).toBe(key);
+    expect(rateLimitKey('2001:DB8:85A3:12::1')).toBe(key);
+    expect(rateLimitKey('2001:db8:85a3:12:ffff::')).toBe(key);
+    expect(rateLimitKey('2001:db8::1')).toBe('2001:db8:0:0::/64');
+    expect(rateLimitKey('::1')).toBe('0:0:0:0::/64');
+    expect(rateLimitKey('::')).toBe('0:0:0:0::/64');
+  });
+
+  it('keeps malformed addresses as they are', () => {
+    for (const ip of ['1::2::3', '1:2:3', '1:2:3:4:5:6:7:8:9', '1:2:3:4::5:6:7:8', 'g::1', '12345::1']) {
+      expect([ip, rateLimitKey(ip)]).toEqual([ip, ip]);
     }
   });
 });
