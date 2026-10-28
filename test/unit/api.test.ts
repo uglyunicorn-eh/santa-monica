@@ -732,10 +732,10 @@ describe('schemas', () => {
     expect(v.parse(partyJson, view)).toEqual({
       code: 'QWERT', name: 'P', password: null, isProtected: false, isHost: false, isJoined: true, isClosed: true,
       createdAt: '2026-12-01T18:30:00.000Z', rolledAt: '2026-12-20T09:00:05.250Z', deletedAt: null, restorableUntil: null,
-      participantCount: 2, participants: ['A'], target: { name: 'A' },
+      dueAt: null, participantCount: 2, participants: ['A'], target: { name: 'A' },
     });
-    expect(v.parse(partyJson, { ...view, target: null, closedAt: null, deletedAt: Date.UTC(2026, 11, 2) })).toMatchObject({
-      target: null, rolledAt: null, deletedAt: '2026-12-02T00:00:00.000Z', restorableUntil: '2026-12-03T00:00:00.000Z',
+    expect(v.parse(partyJson, { ...view, target: null, closedAt: null, deletedAt: Date.UTC(2026, 11, 2), dueAt: Date.UTC(2026, 11, 20, 18) })).toMatchObject({
+      target: null, rolledAt: null, deletedAt: '2026-12-02T00:00:00.000Z', restorableUntil: '2026-12-03T00:00:00.000Z', dueAt: '2026-12-20T18:00:00.000Z',
     });
     expect(v.parse(userJson, { id: 'a'.repeat(24), email: 'a@example.com', name: 'A', joined: 1, tokenVersion: 3 }))
       .toEqual({ id: nodeIdToStr({ kind: 'User', id: 'a'.repeat(24) }), name: 'A', email: 'a@example.com' });

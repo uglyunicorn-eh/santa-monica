@@ -351,6 +351,20 @@ Today `POST /auth/magic-link` writes to the user object named by the address bef
 
 ---
 
+## 7. Due time (added 2026-10-27)
+
+Asked for after the release: "upon party creation, ask for a due time.. then on party page add a countdown... don't do anything when time is out.. just displays 0:00:00:00 / send a reminder to host one day before.. around time of creation". Decided with the user: the due time is optional, and the reminder goes the day before, at the time of day the party was created.
+
+- **API** (santa-monica, branch `party-due-time`):
+  - `POST /v1/parties` takes an optional `dueAt` (an ISO date-time with its offset, 1 hour to 366 days ahead), stored as `party.due_at`. Every party answer carries `dueAt` (ISO, or null).
+  - `reminderAt(createdAt, dueAt)` picks the moment with the creation's clock time nearest to 24 hours before the due time, so 12 to 36 hours ahead, or none if that has passed. It's stored as `party.remind_at` and joins `nextAlarm()`.
+  - The alarm's `remindIfDue()` queues `mail.partyDue` to the host once, and clears `remind_at`. A party that's drawn or deleted by then, or whose host has no email on file, gets none.
+  - The change only adds fields, so the old app keeps working.
+- **Web app** (santa-barbara): an optional due field on the create form, and a `D:HH:MM:SS` countdown on the party page that stops at `0:00:00:00`. Being built in its own PR.
+- **Not included:** changing the due time after creation, and a reminder for a party that is restored after its reminder time.
+
+---
+
 ## Considered and not planned
 
 - **Encrypting stored data.** Cloudflare already encrypts storage. Anyone who can browse it (Data Studio needs Editor access) can also deploy code that reads any key. Keeping less data (section 1) protects more for far less work. Revisit if a GDPR position on encrypted data becomes a requirement.
