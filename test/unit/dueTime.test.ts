@@ -31,7 +31,7 @@ async function alarmNow(code: string) {
     await runInDurableObject(env.PARTY.getByName(code), async (_i, state) => state.storage.setAlarm(Date.now()));
     await runDurableObjectAlarm(env.PARTY.getByName(code));
   }
-  return sent.filter(m => m.subject.endsWith('is due in about a day'));
+  return sent.filter(m => m.subject.endsWith('starts in about a day'));
 }
 
 describe('the reminder time', () => {
@@ -157,7 +157,7 @@ describe('the reminder', () => {
 
   it('reads well for a host on their own', () => {
     const message = renderPartyDue({ party: { name: 'Office <party>', url: 'https://gnomik.me/p/QWERTYUI/' }, members: 1, assetsUrl: 'https://api.test' });
-    expect(message.subject).toBe('Office <party> is due in about a day');
+    expect(message.subject).toBe('Office <party> starts in about a day');
     expect(message.text).toContain('only you are in so far');
     expect(message.html).toContain('Office &lt;party&gt;');
   });
