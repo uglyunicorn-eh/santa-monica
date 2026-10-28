@@ -32,8 +32,8 @@ type Options = {
   /** HTML: paragraphs from p(). */
   body: string;
   action?: { label: string; url: string; color: string; textColor: string };
-  /** HTML: the small print under the button. */
-  note: string;
+  /** HTML: the small print under the button, if any. */
+  note?: string;
 };
 
 /** A body paragraph. */
@@ -112,9 +112,9 @@ export const layout = ({ preheader, header, title, titleAlign = 'left', body, ac
               <td>${body}</td>
             </tr>
             ${action ? button(action) : ''}
-            <tr>
+            ${note ? `<tr>
               <td style="padding:16px 0 0; font-family:${FONT}; font-size:15px; line-height:22px; color:${color.muted};">${note}</td>
-            </tr>
+            </tr>` : ''}
                 </table>
               </td>
             </tr>
