@@ -6,7 +6,7 @@ import { action } from 'src/api/action';
 import { ApiContext, ApiEnv, clientIp, jwtFor } from 'src/api/context';
 import { fail } from 'src/api/errors';
 import { idempotencyKey, keyHash, readBody, send } from 'src/api/input';
-import { admitLegacyCode, emailRateLimit } from 'src/api/rateLimit';
+import { REFUSALS, admitEmail, admitLegacyCode } from 'src/api/rateLimit';
 import { forgetRequest, rememberRequest, seenRequest } from 'src/api/requestMemo';
 import { accepted, bodies, session, tokens } from 'src/api/schemas';
 import { EnterRequestToken } from 'src/api/types';
@@ -59,11 +59,7 @@ async function sendSignInLink(c: ApiContext, { email, typed, party }: { email: s
 /** The limits, the party check and the email of `sendSignInLink`, once the request is claimed. */
 async function sendNewSignInLink(c: ApiContext, { email, typed, party }: { email: string; typed: string; party?: string }) {
   const { env } = c;
-  const rateLimited = await emailRateLimit(env, clientIp(c), email);
-  annotate({ 'auth.rate_limited': rateLimited ?? false });
-  if (rateLimited) {
-    throw fail('rate_limited', "Whoa, that's a lot of magic links! Please wait a minute and try again.", 'email');
-  }
+  await admitEmail(env, clientIp(c), email, REFUSALS.signInLinks);
   if (party) {
     await admitLegacyCode(env, clientIp(c), party, 'party');
   }

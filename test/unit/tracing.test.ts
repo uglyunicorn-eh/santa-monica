@@ -6,7 +6,7 @@ import { env } from 'cloudflare:test';
 import { partyRef } from 'src/utils/logRef';
 import { annotate, recordOutcome, withSpan } from 'src/utils/tracing';
 
-import { jwt, request, signIn } from './helpers';
+import { jwt, request, signIn, testEnv } from './helpers';
 
 type FakeSpan = {
   name: string;
@@ -132,6 +132,14 @@ describe('API action spans', () => {
     expect(JSON.stringify(spans)).not.toContain(party.code);
     expect(spans[1].attributes).toMatchObject({ 'parties.first': 10, 'parties.count': 1 });
     expect(spans[2].attributes).toMatchObject({ 'user.id': who.id, 'user.found': true });
+  });
+
+  it('records which rate limit refused a request, the same way for every limit', async () => {
+    const spans = captureSpans();
+    const denied = { limit: async () => ({ success: false }) } as unknown as RateLimit;
+    await request('POST', '/v1/auth/magic-link', { body: { email: `limited-${Date.now()}@example.com` }, env: testEnv({ ENTER_RATE_LIMIT_IP: denied }) });
+    await request('POST', '/v1/parties/lookup', { body: { code: 'QWERTYUI' }, env: testEnv({ PARTY_LOOKUP_RATE_LIMIT_IP: denied }) });
+    expect(spans.map(s => s.attributes['rate_limit.hit'])).toEqual(['ENTER_RATE_LIMIT_IP', 'PARTY_LOOKUP_RATE_LIMIT_IP']);
   });
 
   it('records how a magic link was used', async () => {

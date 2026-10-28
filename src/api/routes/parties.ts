@@ -6,7 +6,7 @@ import { ApiContext, ApiEnv, RequestSession, clientIp } from 'src/api/context';
 import { fail, notSignedIn } from 'src/api/errors';
 import { idempotencyKey, readBody, send } from 'src/api/input';
 import { invalidTicket, liveRequest, passUpgrade } from 'src/api/live';
-import { admitPartyCode } from 'src/api/rateLimit';
+import { REFUSALS, admit, admitPartyCode } from 'src/api/rateLimit';
 import { PARTY_CODE_ALPHABET, PARTY_CODE_LENGTH, bodies, invites, party as partyJson } from 'src/api/schemas';
 import { canonicalEmail } from 'src/utils/email';
 import { optionalSession, requireSession } from 'src/api/session';
@@ -180,11 +180,7 @@ parties.post('/join', requireSession, action('joinParty', async c => {
   const { code, name, password } = await readPartyWrite(c, bodies.joinParty);
   const s = session(c);
   // Joining is also limited per user, so trying codes from many addresses doesn't get around it.
-  const { success } = await c.env.JOIN_RATE_LIMIT_USER.limit({ key: s.userId });
-  annotate({ 'party.join_rate_limited': !success });
-  if (!success) {
-    throw fail('rate_limited', "Whoa, that's a lot of tries! Please wait a minute and try again.", 'party');
-  }
+  await admit(c.env, 'JOIN_RATE_LIMIT_USER', s.userId, REFUSALS.joins);
   return sendParty(c, await c.env.PARTY.getByName(code).join(
     { id: s.userId, email: s.email, name },
     name,
@@ -215,11 +211,8 @@ parties.post('/draw', requireSession, action('closeParty', async c => {
 parties.post('/invite', requireSession, action('inviteToParty', async c => {
   const { code, emails } = await readPartyWrite(c, bodies.invite);
   const s = session(c);
-  const { success } = await c.env.INVITE_RATE_LIMIT_USER.limit({ key: s.userId });
-  annotate({ 'party.invite_rate_limited': !success, 'party.invite_count': emails.length });
-  if (!success) {
-    throw fail('rate_limited', "That's a lot of invites at once. Please wait a minute and try again.", 'emails');
-  }
+  annotate({ 'party.invite_count': emails.length });
+  await admit(c.env, 'INVITE_RATE_LIMIT_USER', s.userId, REFUSALS.invites);
   const user = await verified(c);
   const typed = new Map<string, string>();
   for (const email of emails) {

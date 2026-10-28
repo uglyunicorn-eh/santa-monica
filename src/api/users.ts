@@ -1,5 +1,5 @@
 import { fail } from 'src/api/errors';
-import { takeAllMail } from 'src/api/rateLimit';
+import { takeAllMail, tooMany } from 'src/api/rateLimit';
 import { UserToken } from 'src/api/types';
 import { UserRecord } from 'src/do/types';
 import { Env } from 'src/env';
@@ -34,8 +34,8 @@ export async function issueSession(env: Env, jwt: JwtHelpers, user: UserRecord, 
  */
 export async function sendRequestedMail(env: Env, to: string, message: MailMessage, field: string | undefined, what = 'the email') {
   if (!await takeAllMail(env)) {
-    annotate({ 'mail.sent': false, 'mail.all_limited': true });
-    throw fail('rate_limited', `We're sending a lot of emails right now, so we couldn't send ${what}. Please try again in a few minutes.`, field);
+    annotate({ 'mail.sent': false });
+    throw tooMany({ message: `We're sending a lot of emails right now, so we couldn't send ${what}. Please try again in a few minutes.`, field });
   }
   try {
     await sendMail(env, to, message);

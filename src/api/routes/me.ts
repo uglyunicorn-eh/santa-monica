@@ -8,7 +8,7 @@ import { fail, notSignedIn } from 'src/api/errors';
 import { idempotencyKey, keyHash, readBody, readQuery, send } from 'src/api/input';
 import { invalidTicket, liveRequest, passUpgrade } from 'src/api/live';
 import { listParties } from 'src/api/party';
-import { emailRateLimit } from 'src/api/rateLimit';
+import { REFUSALS, admitEmail } from 'src/api/rateLimit';
 import { requireSession } from 'src/api/session';
 import { accepted, bodies, linkAccount, unrevealedParties, partyPage, queries, session as sessionJson, tokens, user as userJson } from 'src/api/schemas';
 import { AccountDeletionToken, EmailChangeCancelToken, EmailChangeToken } from 'src/api/types';
@@ -26,7 +26,6 @@ import { from } from 'src/config.json';
 /** Account links (deletion, email change) work for an hour. */
 const LINK_TTL = 60 * 60;
 
-const tooManyEmails = () => fail('rate_limited', "Whoa, that's a lot of emails! Please wait a minute and try again.");
 const invalidLink = () => fail('invalid_link', 'This link is invalid or has expired. Please request a new one.', 'token');
 export const me = new Hono<ApiEnv>();
 
@@ -153,11 +152,7 @@ me.post('/deletion', requireSession, action('requestAccountDeletion', async c =>
   await readBody(c, bodies.empty);
   const { env } = c;
   return await mailRequest(c, 'deletion', '', async user => {
-    const rateLimited = await emailRateLimit(env, clientIp(c), user.email);
-    annotate({ 'auth.rate_limited': rateLimited ?? false });
-    if (rateLimited) {
-      throw tooManyEmails();
-    }
+    await admitEmail(env, clientIp(c), user.email, REFUSALS.accountEmails);
     const token = await jwtFor(env).issueToken<AccountDeletionToken>('AccountDeletion', {
       sub: nodeIdToStr({ kind: 'User', id: user.id }), email: user.email, jti: crypto.randomUUID(), ver: user.tokenVersion,
     }, { ttl: LINK_TTL });
@@ -181,15 +176,11 @@ me.post('/email-change', requireSession, action('requestEmailChange', async c =>
     }
     // Only the new address is limited. An account made before addresses were normalized may still be kept under the
     // address as typed. Both checks only read, so an address without an account is left with nothing stored.
-    const [rateLimited, account, takenAsTyped] = await Promise.all([
-      emailRateLimit(env, clientIp(c), newEmail),
+    await admitEmail(env, clientIp(c), newEmail, REFUSALS.accountEmails);
+    const [account, takenAsTyped] = await Promise.all([
       env.USER.getByName(newEmail).get(),
       typed === newEmail ? null : env.USER.getByName(typed).get(),
     ]);
-    annotate({ 'auth.rate_limited': rateLimited ?? false });
-    if (rateLimited) {
-      throw tooManyEmails();
-    }
     const taken = Boolean(account) || Boolean(takenAsTyped);
     annotate({ 'account.email_taken': taken });
     const jwt = jwtFor(env);

@@ -97,7 +97,7 @@ JSON in, JSON out. A signed-in request sends `Authorization: Bearer <session tok
 | Names | 32 characters for a person (profile and join name), 48 for a party; names saved before keep their length | `src/api/limits.ts` |
 | Request body | 16 KB | `src/api/limits.ts` |
 
-Cloudflare's rate limits are counted per location and approximately; the phrase and new-party limits are counted exactly by the Durable Objects. The per-address email limit is a Rate Limiting binding on purpose, so an address that never signs in leaves nothing stored. The trade-off: it counts per minute, not per hour, so someone who knows an address can send it about 3 sign-in links a minute.
+All the Cloudflare rate limits go through `take` and `admit` in `src/api/rateLimit.ts`, with their messages in one table (`REFUSALS`). They're checked one at a time, broadest first (per client, then per user or address, then all emails together), and a later one is counted only when the earlier ones let the request through. A refusal is a 429 with `Retry-After: 60`, readable by the app, and the trace records which limit it was as `rate_limit.hit`. Cloudflare's rate limits are counted per location and approximately; the phrase and new-party limits are counted exactly by the Durable Objects. The per-address email limit is a Rate Limiting binding on purpose, so an address that never signs in leaves nothing stored. The trade-off: it counts per minute, not per hour, so someone who knows an address can send it about 3 sign-in links a minute.
 
 **The draw** is uniformly random over every way to give everyone one target other than themselves (`src/utils/santaShuffle.ts`, with a cryptographic random source), so nobody can guess who drew whom better than by chance.
 
@@ -174,7 +174,7 @@ rm jwt.pem
 
 ## Operations
 
-Logs (`console.*` and Cloudflare's request logs) and traces go to Workers Logs, and can be exported over OpenTelemetry through the destinations named in `wrangler.jsonc`. Every route runs in a span named `api.<action>` (`api.createParty`, `api.joinParty`, `api.lookUpParty`, …) with the action, the internal user id, the outcome (`api.status`, `api.error_code`) and details such as `party.ref`; Durable Object calls show up as child spans. An unexpected error returns a 500 with an `errorId`, logged with the error (`message: "Unhandled error"`).
+Logs (`console.*` and Cloudflare's request logs) and traces go to Workers Logs, and can be exported over OpenTelemetry through the destinations named in `wrangler.jsonc`. Every route runs in a span named `api.<action>` (`api.createParty`, `api.joinParty`, `api.lookUpParty`, …) with the action, the internal user id, the outcome (`api.status`, `api.error_code`) and details such as `party.ref`, or `rate_limit.hit` naming the limit that refused it; Durable Object calls show up as child spans. An unexpected error returns a 500 with an `errorId`, logged with the error (`message: "Unhandled error"`).
 
 ## Credits
 

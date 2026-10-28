@@ -1,5 +1,5 @@
 import { ApiContext } from 'src/api/context';
-import { ApiError } from 'src/api/errors';
+import { ApiError, errorResponse } from 'src/api/errors';
 import { recordOutcome, withSpan } from 'src/utils/tracing';
 
 /**
@@ -16,7 +16,7 @@ export const action = (name: string, handler: (c: ApiContext, span: Span) => Pro
     } catch (error) {
       if (error instanceof ApiError) {
         recordOutcome(span, error);
-        return c.json(error.toBody(), error.status);
+        return errorResponse(c, error);
       }
       throw error;
     }

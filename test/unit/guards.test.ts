@@ -1,7 +1,9 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { ALL_MAIL, emailRateLimit, takeAllMail } from 'src/api/rateLimit';
+import { ApiError } from 'src/api/errors';
+import { ALL_MAIL, REFUSALS, RETRY_AFTER_S, admitEmail, takeAllMail } from 'src/api/rateLimit';
+import { mailRef } from 'src/utils/logRef';
 import { MAX_REMEMBERED_REQUESTS, REQUEST_MEMO_MS, forgetRequest, forgetRequests, rememberRequest, seenRequest } from 'src/api/requestMemo';
 import { PUBLIC_CACHE_MS, PUBLIC_VIEW_MS, MAX_CACHED_VIEWS, cacheTtl, cachedView, cachedViewCount, clearViews, forgetView, keepView, viewTtl } from 'src/api/viewCache';
 import { PartyDO } from 'src/do/PartyDO';
@@ -135,11 +137,16 @@ describe('POST /v1/parties/lookup', () => {
 describe('the limit on all emails together', () => {
   const counting = (keys: string[], success = true) => ({ limit: async ({ key }: { key: string }) => { keys.push(key); return { success }; } }) as unknown as RateLimit;
 
-  it('is not part of the per-IP and per-address limits', async () => {
+  it('is not part of the per-IP and per-address limits, which are counted in turn', async () => {
     const keys: string[] = [];
-    expect(await emailRateLimit(testEnv({ ENTER_RATE_LIMIT_IP: denied, MAIL_RATE_LIMIT_ALL: counting(keys) }), '1.2.3.4', 'a@example.com')).toBe('ip');
-    expect(await emailRateLimit(testEnv({ MAIL_RATE_LIMIT_ADDRESS: denied, MAIL_RATE_LIMIT_ALL: counting(keys) }), '1.2.3.4', 'a@example.com')).toBe('email');
-    expect(await emailRateLimit(testEnv({ MAIL_RATE_LIMIT_ALL: denied }), '1.2.3.4', 'a@example.com')).toBeUndefined();
+    const address: string[] = [];
+    const refused = (e: typeof env) => admitEmail(e, '1.2.3.4', 'a@example.com', REFUSALS.signInLinks).then(() => 'ok', (error: ApiError) => error.code);
+    // Refused per IP: the address isn't counted, so the address keeps its emails.
+    expect(await refused(testEnv({ ENTER_RATE_LIMIT_IP: denied, MAIL_RATE_LIMIT_ADDRESS: counting(address), MAIL_RATE_LIMIT_ALL: counting(keys) }))).toBe('rate_limited');
+    expect(address).toEqual([]);
+    expect(await refused(testEnv({ MAIL_RATE_LIMIT_ADDRESS: denied, MAIL_RATE_LIMIT_ALL: counting(keys) }))).toBe('rate_limited');
+    expect(await refused(testEnv({ MAIL_RATE_LIMIT_ADDRESS: counting(address), MAIL_RATE_LIMIT_ALL: denied }))).toBe('ok');
+    expect(address).toEqual([await mailRef(env, 'a@example.com')]);
     expect(keys).toEqual([]);
     expect(await takeAllMail(testEnv({ MAIL_RATE_LIMIT_ALL: counting(keys) }))).toBe(true);
     expect(await takeAllMail(testEnv({ MAIL_RATE_LIMIT_ALL: denied }))).toBe(false);
@@ -244,5 +251,27 @@ describe('remembered sign-in requests', () => {
     expect(seenRequest('r0', '')).toBe(false);
     expect(seenRequest('r1', '')).toBe(true);
     expect(seenRequest('newest', '')).toBe(true);
+  });
+});
+
+describe('every rate limit', () => {
+  it('answers a refusal with 429, the same body shape and Retry-After, readable by the app', async () => {
+    const who = await signIn(uniqueEmail('limited'), 'Limited');
+    const { body: party } = await request('POST', '/v1/parties', { token: who.token, body: { name: 'Limits' } });
+    const refusals: [string, string, string, { body?: unknown; token?: string; headers?: Record<string, string> }][] = [
+      ['ENTER_RATE_LIMIT_IP', 'POST', '/v1/auth/magic-link', { body: { email: uniqueEmail() } }],
+      ['MAIL_RATE_LIMIT_ADDRESS', 'POST', '/v1/me/deletion', { token: who.token }],
+      ['MAIL_RATE_LIMIT_ALL', 'POST', '/v1/auth/magic-link', { body: { email: uniqueEmail() } }],
+      ['PARTY_LOOKUP_RATE_LIMIT_IP', 'POST', '/v1/parties/lookup', { body: { code: party.code } }],
+      ['LEGACY_CODE_LOOKUP_RATE_LIMIT_IP', 'POST', '/v1/parties/lookup', { body: { code: 'QWERT' } }],
+      ['JOIN_RATE_LIMIT_USER', 'POST', '/v1/parties/join', { token: who.token, body: { code: party.code, name: 'Me' } }],
+      ['INVITE_RATE_LIMIT_USER', 'POST', '/v1/parties/invite', { token: who.token, body: { code: party.code, emails: [uniqueEmail()] } }],
+      ['STATS_WATCH_RATE_LIMIT_IP', 'GET', '/v1/stats/live', { headers: { upgrade: 'websocket', origin: 'https://gnomik.me' } }],
+    ];
+    for (const [limit, method, path, options] of refusals) {
+      const res = await request(method, path, { ...options, env: testEnv({ [limit]: denied }), headers: { origin: 'https://gnomik.me', ...options.headers } });
+      expect([limit, res.status, res.body.error.code, res.headers.get('retry-after')]).toEqual([limit, 429, 'rate_limited', String(RETRY_AFTER_S)]);
+      expect(res.headers.get('access-control-expose-headers')).toContain('retry-after');
+    }
   });
 });

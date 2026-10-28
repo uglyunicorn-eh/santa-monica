@@ -17,6 +17,8 @@ Status, checked against branch `keep-less-meter-sessions` on 2026-10-27 (uncommi
 
 **Open from the review of the built code:** nothing.
 
+**Rate limits, made uniform (2026-10-27):** every Cloudflare rate limit now goes through `take` and `admit` in `src/api/rateLimit.ts`. They're checked one at a time, broadest first, so a refused request never uses up a later limit; before, the per-IP and per-address email limits were taken together. Refusals come from one table (`REFUSALS`), each is a 429 with `Retry-After: 60` (exposed to the app through CORS), and the trace records `rate_limit.hit`. One function, `errorResponse`, turns every API error into a response.
+
 **Still to do:**
 - **Web app (santa-barbara), in the same release:**
   - stop reading tokens (4.2) and switch to the lookup;

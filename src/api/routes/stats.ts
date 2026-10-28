@@ -4,6 +4,7 @@ import { action } from 'src/api/action';
 import { ApiEnv, clientIp } from 'src/api/context';
 import { fail } from 'src/api/errors';
 import { send } from 'src/api/input';
+import { REFUSALS, admit } from 'src/api/rateLimit';
 import { checkUpgrade, passUpgrade } from 'src/api/live';
 import { stats as statsJson } from 'src/api/schemas';
 import { cacheTtl } from 'src/api/viewCache';
@@ -38,10 +39,7 @@ stats.get('/', action('stats', async c => {
  */
 stats.get('/live', action('watchStats', async c => {
   checkUpgrade(c);
-  const { success } = await c.env.STATS_WATCH_RATE_LIMIT_IP.limit({ key: clientIp(c) });
-  if (!success) {
-    throw fail('rate_limited', 'Too many connections. Please wait a minute and try again.');
-  }
+  await admit(c.env, 'STATS_WATCH_RATE_LIMIT_IP', clientIp(c), REFUSALS.sockets);
   const answer = await c.env.STATS.getByName(STATS_NAME).fetch(c.req.raw);
   return passUpgrade(answer, () => fail('unavailable', "The Party'o'meter isn't available right now. Please try again in a minute."));
 }));
