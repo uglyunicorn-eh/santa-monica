@@ -67,6 +67,9 @@ describe('mail templates', () => {
     expect(mail.html).not.toContain('Tom & Jerry <3');
     expect(mail.html).toContain('href="https://gnomik.me/p/QWERT/"');
     expect(mail.html + mail.text).not.toMatch(/\{\{|unsubscribe|sendgrid/i);
+    // No donation links, and no empty small-print row where the note was.
+    expect(mail.html + mail.text).not.toMatch(/coffee|buymeacoffee/i);
+    expect(mail.html).not.toMatch(/color:#[0-9a-f]+;"><\/td>/i);
   });
 
   it('fills the account emails, escaping addresses in HTML only', () => {

@@ -5,8 +5,8 @@
   "compatibility_date": "2026-10-01",
   // Logs and traces: kept in Workers Logs and exported to Better Stack (source "gnomik-api") through the
   // betterstack-logs / betterstack-traces OpenTelemetry destinations set up in the Cloudflare dashboard.
-  // Query strings are left out of request URLs in logs and traces: party routes carry the party code there (?code=),
-  // and a code lets anyone into a party without a secret phrase.
+  // Query strings are left out of request URLs in logs and traces: live-update sockets carry their ticket there
+  // (?ticket=), which opens a socket for five minutes. Party codes are never in a URL.
   // Sampling: traces, the large and costly part, for 1 request in 10. Logs for every one: head sampling drops a whole
   // request, its error log included, and every 500 hands the person an `errorId` that has to be found in the logs.
   "observability": {
