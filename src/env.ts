@@ -40,6 +40,14 @@ export interface Env {
    * with the web app release that binds at sign-in (see wrangler.jsonc).
    */
   REQUIRE_BOUND_SESSIONS?: string;
-  /** P-256 private key (PKCS#8 PEM) for ES256 tokens. The frontend verifies tokens with the matching public key. */
+  /**
+   * The one secret: every token key and log-ref key is derived from it with HKDF (src/utils/jwt.ts, src/utils/logRef.ts).
+   * Any long random string works; a PEM key does too. Tokens are encrypted, so the frontend never needs it.
+   */
   JWT_PRIVATE_KEY: string;
+  /**
+   * The secret JWT_PRIVATE_KEY replaced, while it's being rotated: tokens made with it still open, for at most as long
+   * as a session lasts (30 days). Unset otherwise.
+   */
+  JWT_PRIVATE_KEY_PREVIOUS?: string;
 }

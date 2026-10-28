@@ -23,6 +23,18 @@ describe('jwt', () => {
     await expect(helpers.jwtVerify(token, 'EnterRequest')).rejects.toThrow('Expected a EnterRequest token.');
   });
 
+  it('opens tokens made with the previous key while it is rotated out, and makes new ones with the current key', async () => {
+    const old = await createJwtHelpers({ privateKey: env.TEST_OTHER_PRIVATE_KEY, issuer: 'api.test' }).issueToken('UserToken', { n: 1 }, { ttl: 60 });
+    await expect(helpers.jwtVerify(old, 'UserToken')).rejects.toBeInstanceOf(jose.errors.JWEDecryptionFailed);
+    const rotating = createJwtHelpers({ privateKey: env.JWT_PRIVATE_KEY, previousKey: env.TEST_OTHER_PRIVATE_KEY, issuer: 'api.test' });
+    expect(await rotating.jwtVerify(old, 'UserToken')).toMatchObject({ n: 1 });
+    await expect(rotating.jwtVerify(old, 'EnterRequest')).rejects.toThrow('Expected a EnterRequest token.');
+    const fresh = await rotating.issueToken('UserToken', { n: 2 }, { ttl: 60 });
+    expect(await helpers.jwtVerify(fresh, 'UserToken')).toMatchObject({ n: 2 });
+    // Anything else wrong with a token isn't retried with the previous key.
+    await expect(rotating.jwtVerify('not.a.token.at.all', 'UserToken')).rejects.not.toBeInstanceOf(jose.errors.JWEDecryptionFailed);
+  });
+
   it('refuses a token from another issuer', async () => {
     const other = createJwtHelpers({ privateKey: env.JWT_PRIVATE_KEY, issuer: 'elsewhere' });
     const token = await other.issueToken('UserToken', {}, { ttl: 60 });

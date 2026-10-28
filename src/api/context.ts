@@ -27,7 +27,8 @@ export type ApiEnv = {
 
 export type ApiContext = Context<ApiEnv>;
 
-export const jwtFor = (env: Env): JwtHelpers => createJwtHelpers({ privateKey: env.JWT_PRIVATE_KEY, issuer: domain });
+export const jwtFor = (env: Env): JwtHelpers =>
+  createJwtHelpers({ privateKey: env.JWT_PRIVATE_KEY, previousKey: env.JWT_PRIVATE_KEY_PREVIOUS, issuer: domain });
 
 /** Who a request counts as for per-client rate limits: its IPv4 address, or its IPv6 /64 (`rateLimitKey`). */
 export const clientIp = (c: ApiContext) => rateLimitKey(c.req.header('cf-connecting-ip') ?? 'unknown');
