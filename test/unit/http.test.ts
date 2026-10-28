@@ -3,9 +3,12 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { originAllowed } from 'src/api/cors';
 import { fail } from 'src/api/errors';
+import { MAX_BODY_BYTES } from 'src/api/limits';
 import worker, { app } from 'src/index';
 
 import { version } from 'package.json';
+
+import { request, signIn } from './helpers';
 
 // Routes that fail, to exercise the app's error handler. Routes can only be added before the first request.
 app.get('/__test/throw', () => { throw new Error('boom'); });
@@ -42,6 +45,28 @@ describe('Hono app', () => {
       expect(error).toHaveBeenCalledWith(expect.objectContaining({ message: 'Unhandled error', errorId: body.error.errorId, path, error: message }));
     }
     error.mockRestore();
+  });
+});
+
+describe('Cache-Control', () => {
+  it('is no-store on every answer, errors included, so nothing in between keeps them', async () => {
+    const user = await signIn();
+    const answers = [
+      await app.request('/', {}, env),
+      await app.request('/nope', {}, env),
+      await app.request('/v1/parties/lookup', { method: 'POST', body: 'x'.repeat(MAX_BODY_BYTES + 1), headers: { 'content-length': String(MAX_BODY_BYTES + 1) } }, env),
+      await app.request('/__test/expected', {}, env),
+    ];
+    expect(answers.map(res => [res.status, res.headers.get('Cache-Control')])).toEqual([[200, 'no-store'], [404, 'no-store'], [413, 'no-store'], [409, 'no-store']]);
+    const me = await request('GET', '/v1/me', { token: user.token });
+    expect([me.status, me.headers.get('Cache-Control')]).toEqual([200, 'no-store']);
+    const failed = await request('GET', '/v1/me', { token: 'nope' });
+    expect([failed.status, failed.headers.get('Cache-Control')]).toEqual([401, 'no-store']);
+  });
+
+  it('keeps what a public route sets itself', async () => {
+    const res = await app.request('/v1/stats', {}, env);
+    expect(res.headers.get('Cache-Control')).toBe('public, max-age=10');
   });
 });
 
