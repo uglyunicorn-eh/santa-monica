@@ -53,7 +53,7 @@ const typedEmail = v.pipe(
   v.check(address => canonicalEmail(address).indexOf('@') > 0, 'Must be a valid email'),
 );
 
-/** A signed token pasted from a link: length-limited before anything verifies it. */
+/** An encrypted token pasted from a link: length-limited before anything opens it. */
 const token = v.pipe(
   v.string(NOT_TEXT),
   v.trim(),
@@ -63,6 +63,18 @@ const token = v.pipe(
 
 /** A party code, in either case. */
 const partyCode = v.pipe(v.string(NOT_TEXT), v.trim(), v.toUpperCase(), v.regex(PARTY_CODE_RE, 'Invalid party code'));
+
+/** A P-256 key coordinate in a JWK: 32 bytes, base64url. */
+const jwkCoordinate = v.pipe(v.string('Invalid key.'), v.regex(/^[A-Za-z0-9_-]{43}$/, 'Invalid key.'));
+
+/**
+ * The public key a browser binds its session to (src/utils/dpop.ts): a P-256 JWK with only its key fields, so
+ * `exportKey('jwk')` output needs `ext` and `key_ops` taken off. Optional; left out or null reads as not given.
+ */
+const publicKey = v.pipe(
+  v.nullish(v.strictObject({ kty: v.literal('EC', 'Invalid key.'), crv: v.literal('P-256', 'Invalid key.'), x: jwkCoordinate, y: jwkCoordinate }, 'Invalid key.')),
+  v.transform(value => value ?? undefined),
+);
 
 /** A required field: left out or null reads as empty, so the field's own "is required" message answers. */
 const required = <S extends v.GenericSchema<string, unknown>>(schema: S) => v.nullish(schema, '');
@@ -86,12 +98,15 @@ const normalizeEmail = <T extends { email: string }>(input: T) => ({ ...input, e
 
 export const bodies = {
   magicLink: v.pipe(body({ email: required(typedEmail), party: optional(partyCode) }), v.transform(normalizeEmail)),
-  session: body({ token: required(token) }),
+  // Sign-ins: the link, and the key to bind the new session to (optional until bound sessions are required).
+  session: body({ token: required(token), key: publicKey }),
   link: body({ token: required(token) }),
+  /** The email-change link, which signs in at the new address: it can bind the new session too. */
+  signInLink: body({ token: required(token), key: publicKey }),
   profile: body({ name: required(words('Name', MAX_PERSON_NAME_LENGTH)) }),
   emailChange: v.pipe(body({ email: required(typedEmail) }), v.transform(normalizeEmail)),
   createParty: body({ name: required(words('Party name', MAX_PARTY_NAME_LENGTH)), password: optional(phrase) }),
-  // Party codes travel in the body of every write, never in the URL: see `partyQuery`.
+  // Party codes travel in a body, never in a URL (Cloudflare's request logs record URLs): the lookup and every write.
   joinParty: body({ code: required(partyCode), name: required(words('Name', MAX_PERSON_NAME_LENGTH)), password: optional(phrase) }),
   partyAction: body({ code: required(partyCode) }),
   invite: body({
@@ -103,6 +118,8 @@ export const bodies = {
     ),
   }),
   empty: body({}),
+  /** A live-updates ticket: for the user's own updates, or with a party's code, for that party's. */
+  liveTicket: body({ code: optional(partyCode) }),
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -148,14 +165,6 @@ export const queries = {
   }),
 };
 
-/**
- * `GET /v1/parties?code=`: the one party route that can't take the code in a body. A party code lets anyone into a
- * party without a secret phrase, and Cloudflare's request logs and traces record request URLs, so it travels in the
- * query string, which they drop (`redact_query_string` in wrangler.jsonc), never in the path. Writes take it in the
- * body. Anything that isn't a party code reads as a party that doesn't exist.
- */
-export const partyQuery = v.object({ code: v.pipe(v.string(), v.toUpperCase(), v.regex(PARTY_CODE_RE)) });
-
 export const headers = {
   /** `Idempotency-Key`: optional, and refused when malformed rather than ignored. */
   idempotency: v.object({
@@ -168,7 +177,8 @@ export const headers = {
   bearer: v.pipe(
     v.string(),
     v.maxLength('Bearer '.length + MAX_TOKEN_LENGTH),
-    v.regex(/^Bearer [\w-]+\.[\w-]+\.[\w-]+$/),
+    // A compact JWE with `dir` (src/utils/jwt.ts): header, empty key, IV, ciphertext and tag.
+    v.regex(/^Bearer [\w-]+\.\.[\w-]+\.[\w-]+\.[\w-]+$/),
     v.transform((s: string) => s.slice('Bearer '.length)),
   ),
 };
@@ -196,14 +206,16 @@ const userNodeId = v.pipe(
 const linkId = v.pipe(v.string(), v.nonEmpty());
 
 export const tokens = {
-  user: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), ver: v.optional(v.number()) }),
+  user: v.object({
+    sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), ver: v.optional(v.number()), cnf: v.optional(v.object({ jkt: v.pipe(v.string(), v.nonEmpty()) })),
+  }),
   enterRequest: v.object({ email: v.pipe(v.string(), v.nonEmpty(), v.toLowerCase()), typed: v.optional(v.string()), jti: linkId, exp: v.number(), party: v.optional(v.string()) }),
   accountDeletion: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number(), ver: v.number() }),
   emailChange: v.object({
     sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), newEmail: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number(), ver: v.number(),
   }),
   emailChangeCancel: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number() }),
-  liveTicket: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), ver: v.optional(v.number()), exp: v.number() }),
+  liveTicket: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), ver: v.optional(v.number()), exp: v.number(), party: v.optional(v.string()) }),
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -224,11 +236,16 @@ export const user = v.pipe(
 );
 
 /** A sign-in: a session token and the user. */
-export const session = v.object({ userToken: v.string(), user });
+/**
+ * A new session. `expiresAt` is when the token stops working (the app can't read it: tokens are encrypted). `party` is
+ * the party code a sign-in link was for, so the app can go there; null otherwise.
+ */
+export const session = v.object({ userToken: v.string(), user, expiresAt: isoString, party: v.nullish(v.string(), null) });
 
-const deletionTimes = (deletedAt: number | null | undefined) => ({
+/** When a party was deleted, and until when it can be restored (a day, for parties deleted before that was kept). */
+const deletionTimes = (deletedAt: number | null | undefined, restorableUntil: number | null | undefined) => ({
   deletedAt: deletedAt ? iso(deletedAt) : null,
-  restorableUntil: deletedAt ? iso(deletedAt + RESTORE_WINDOW_MS) : null,
+  restorableUntil: deletedAt ? iso(restorableUntil ?? deletedAt + RESTORE_WINDOW_MS) : null,
 });
 
 /** A party in a list: what the user's own copy of it carries. */
@@ -265,7 +282,7 @@ export const PartyJson = v.object({
 export const partySummary = v.pipe(
   v.object({
     slug: v.string(), name: v.string(), createdAt: v.number(), isHost: v.boolean(), isProtected: v.boolean(),
-    isClosed: v.boolean(), closedAt: v.nullable(v.number()), deletedAt: v.nullish(v.number()),
+    isClosed: v.boolean(), closedAt: v.nullable(v.number()), deletedAt: v.nullish(v.number()), restorableUntil: v.nullish(v.number()),
   }),
   v.transform(s => ({
     code: s.slug,
@@ -276,7 +293,7 @@ export const partySummary = v.pipe(
     isJoined: true,
     createdAt: iso(s.createdAt),
     rolledAt: s.closedAt === null ? null : iso(s.closedAt),
-    ...deletionTimes(s.deletedAt),
+    ...deletionTimes(s.deletedAt, s.restorableUntil),
   })),
   PartySummaryJson,
 );
@@ -286,7 +303,7 @@ export const party = v.pipe(
   v.object({
     slug: v.string(), name: v.string(), password: v.nullable(v.string()), isProtected: v.boolean(),
     isHost: v.boolean(), isJoined: v.boolean(), isClosed: v.boolean(), createdAt: v.number(),
-    closedAt: v.nullable(v.number()), deletedAt: v.nullable(v.number()), participantCount: v.nullable(v.number()),
+    closedAt: v.nullable(v.number()), deletedAt: v.nullable(v.number()), restorableUntil: v.nullish(v.number()), participantCount: v.nullable(v.number()),
     participants: v.nullable(v.array(v.string())), target: v.nullable(v.object({ name: v.string() })),
   }),
   v.transform(p => ({
@@ -298,7 +315,7 @@ export const party = v.pipe(
     isJoined: p.isJoined,
     createdAt: iso(p.createdAt),
     rolledAt: p.closedAt === null ? null : iso(p.closedAt),
-    ...deletionTimes(p.deletedAt),
+    ...deletionTimes(p.deletedAt, p.restorableUntil),
     password: p.password,
     participantCount: p.participantCount,
     participants: p.participants,
@@ -324,6 +341,9 @@ export const unrevealedParties = v.object({
 
 /** A ticket for opening a live-updates WebSocket. */
 export const liveTicket = v.object({ ticket: v.string() });
+
+/** The Party'o'meter: how many parties have rolled their dice. */
+export const stats = v.object({ rolled: v.number() });
 
 /** `?ticket=` on a live-updates WebSocket request, length-limited before anything verifies it. */
 export const liveQuery = v.object({ ticket: token });

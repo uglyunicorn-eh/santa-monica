@@ -5,8 +5,9 @@ import * as v from 'valibot';
 import { makeSession } from 'src/api/context';
 import { ApiError, fail } from 'src/api/errors';
 import { keyHash, readBody } from 'src/api/input';
-import { bodies, encodeCursor, headers, party as partyJson, partyQuery, partyPage, queries, tokens, user as userJson } from 'src/api/schemas';
+import { bodies, encodeCursor, headers, party as partyJson, partyPage, queries, tokens, user as userJson } from 'src/api/schemas';
 import { authenticate } from 'src/api/session';
+import { Session } from 'src/utils/session';
 import { EnterRequestToken, UserToken } from 'src/api/types';
 import { MAX_PARTY_MEMBERS, PartyDO } from 'src/do/PartyDO';
 import { nodeIdToStr, strToNodeId } from 'src/utils/strings/nodeId';
@@ -17,7 +18,7 @@ const key = () => crypto.randomUUID();
 const DAY = 24 * 60 * 60 * 1000;
 
 /** The token from the last link of `path` sent (after a `/`, or after `#` for links that keep it out of the URL path). */
-const tokenFrom = (text: string, path: string) => new RegExp(`/${path}#([\\w-]+\\.[\\w-]+\\.[\\w-]+)`).exec(text)![1];
+const tokenFrom = (text: string, path: string) => new RegExp(`/${path}#([\\w-]+(?:\\.[\\w-]*){4})`).exec(text)![1];
 
 const createParty = (token: string, name = 'Party', options: { password?: string; key?: string; env?: typeof env } = {}) =>
   request('POST', '/v1/parties', { token, key: options.key, env: options.env, body: { name, ...(options.password ? { password: options.password } : {}) } });
@@ -44,7 +45,7 @@ describe('POST /v1/auth/magic-link', () => {
   it('refuses an unknown party, either rate limit, and a failed send', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     expect(await request('POST', '/v1/auth/magic-link', { body: { email: uniqueEmail(), party: 'QQQQQ' } })).toMatchObject({ status: 404 });
-    for (const limits of [{ ENTER_RATE_LIMIT_IP: denied }, { ENTER_RATE_LIMIT_EMAIL: denied }]) {
+    for (const limits of [{ ENTER_RATE_LIMIT_IP: denied }, { MAIL_RATE_LIMIT_ADDRESS: denied }]) {
       expect(await request('POST', '/v1/auth/magic-link', { body: { email: uniqueEmail() }, env: testEnv(limits) })).toMatchObject({
         status: 429, body: { error: { code: 'rate_limited', field: 'email' } },
       });
@@ -219,7 +220,7 @@ describe('POST /v1/me/deletion and /v1/me/email-change', () => {
     const who = await signIn();
     const ask = (email: string, e?: typeof env) => request('POST', '/v1/me/email-change', { token: who.token, body: { email }, env: e });
     expect(await ask(who.email)).toMatchObject({ status: 400, body: { error: { message: "That's already your email." } } });
-    expect(await ask(uniqueEmail(), testEnv({ ENTER_RATE_LIMIT_EMAIL: denied }))).toMatchObject({ status: 429 });
+    expect(await ask(uniqueEmail(), testEnv({ MAIL_RATE_LIMIT_ADDRESS: denied }))).toMatchObject({ status: 429 });
     await env.USER.getByName(who.email).tombstone();
     expect((await ask(uniqueEmail())).status).toBe(401);
   });
@@ -330,7 +331,7 @@ describe('POST /v1/me/deletion/confirm', () => {
     expect(error).toHaveBeenCalledWith('Unable to remove a deleted account from a party', 'Error: down');
     expect(await env.USER.getByName(who.email).get()).not.toBeNull();
     expect((await request('POST', '/v1/me/deletion/confirm', { body: { token } })).status).toBe(200);
-    expect((await request('GET', `/v1/parties?code=${party.code}`)).status).toBe(404);
+    expect((await request('POST', '/v1/parties/lookup', { body: { code: party.code } })).status).toBe(404);
     error.mockRestore();
   });
 
@@ -510,31 +511,32 @@ describe('POST /v1/me/email-change/confirm', () => {
   });
 });
 
-describe('GET /v1/parties?code=', () => {
+describe('POST /v1/parties/lookup', () => {
   it('shows members more than anyone else, and a revoked token only what anyone sees', async () => {
     const host = await signIn(uniqueEmail(), 'Host');
     const { body: party } = await createParty(host.token, 'Mine', { password: 'pw' });
-    expect((await request('GET', `/v1/parties?code=${party.code.toLowerCase()}`, { token: host.token })).body).toMatchObject({ isHost: true, password: 'pw', participants: ['Host'] });
-    const anonymous = (await request('GET', `/v1/parties?code=${party.code}`)).body;
+    expect((await request('POST', '/v1/parties/lookup', { body: { code: party.code.toLowerCase() }, token: host.token })).body).toMatchObject({ isHost: true, password: 'pw', participants: ['Host'] });
+    const anonymous = (await request('POST', '/v1/parties/lookup', { body: { code: party.code } })).body;
     expect(anonymous).toMatchObject({ isHost: false, isJoined: false, password: null, participants: null });
 
     await env.USER.getByName(host.email).tombstone();
-    expect((await request('GET', `/v1/parties?code=${party.code}`, { token: host.token })).body).toEqual(anonymous);
+    expect((await request('POST', '/v1/parties/lookup', { body: { code: party.code }, token: host.token })).body).toEqual(anonymous);
   });
 
   it('hides a deleted party from everyone but its host, revoked or not', async () => {
     const host = await signIn();
     const { body: party } = await createParty(host.token);
     await request('POST', '/v1/parties/delete', { body: { code: party.code }, token: host.token });
-    expect((await request('GET', `/v1/parties?code=${party.code}`, { token: host.token })).body.deletedAt).toEqual(expect.any(String));
-    expect((await request('GET', `/v1/parties?code=${party.code}`)).status).toBe(404);
+    expect((await request('POST', '/v1/parties/lookup', { body: { code: party.code }, token: host.token })).body.deletedAt).toEqual(expect.any(String));
+    expect((await request('POST', '/v1/parties/lookup', { body: { code: party.code } })).status).toBe(404);
     await env.USER.getByName(host.email).tombstone();
-    expect((await request('GET', `/v1/parties?code=${party.code}`, { token: host.token })).status).toBe(404);
+    expect((await request('POST', '/v1/parties/lookup', { body: { code: party.code }, token: host.token })).status).toBe(404);
   });
 
-  it('answers 404 for codes that aren\'t codes and 429 over the lookup limit', async () => {
-    expect(await request('GET', '/v1/parties?code=nope!')).toMatchObject({ status: 404, body: { error: { code: 'not_found', field: 'party' } } });
-    expect(await request('GET', '/v1/parties?code=QWERT', { env: testEnv({ PARTY_LOOKUP_RATE_LIMIT_IP: denied }) })).toMatchObject({ status: 429 });
+  it('answers 400 for codes that aren\'t codes, 404 for unknown ones and 429 over the lookup limit', async () => {
+    expect(await request('POST', '/v1/parties/lookup', { body: { code: 'nope!' } })).toMatchObject({ status: 400, body: { error: { code: 'invalid', field: 'code' } } });
+    expect(await request('POST', '/v1/parties/lookup', { body: { code: 'QQQQQQQQ' } })).toMatchObject({ status: 404, body: { error: { code: 'not_found', field: 'party' } } });
+    expect(await request('POST', '/v1/parties/lookup', { body: { code: 'QWERT' }, env: testEnv({ PARTY_LOOKUP_RATE_LIMIT_IP: denied }) })).toMatchObject({ status: 429 });
   });
 });
 
@@ -619,7 +621,7 @@ describe('POST /v1/parties/join?code=', () => {
       .toMatchObject({ status: 429, body: { error: { field: 'party' } } });
     await env.USER.getByName(guest.email).tombstone();
     expect(await join(guest.token, party.code)).toMatchObject({ status: 401, body: { error: { message: 'You must be logged in before joining the party.' } } });
-    expect((await request('GET', `/v1/parties?code=${party.code}`, { token: host.token })).body.participantCount).toBe(1);
+    expect((await request('POST', '/v1/parties/lookup', { body: { code: party.code }, token: host.token })).body.participantCount).toBe(1);
   });
 });
 
@@ -702,12 +704,11 @@ describe('schemas', () => {
   });
 
   it('read party codes, keys and bearer tokens', () => {
-    expect(v.parse(partyQuery, { code: 'qwertyui' })).toEqual({ code: 'QWERTYUI' });
-    expect(issue(partyQuery, { code: 'nope!' })).not.toBe('ok');
     expect(v.parse(headers.idempotency, { 'idempotency-key': undefined })).toEqual({});
     expect(issue(headers.idempotency, { 'idempotency-key': 'short' })).toMatchObject({ field: 'idempotency-key' });
-    expect(v.parse(headers.bearer, 'Bearer a.b.c')).toBe('a.b.c');
-    for (const header of ['Basic a.b.c', 'Bearer abc', `Bearer ${'a'.repeat(2050)}.b.c`]) {
+    // A compact JWE with `dir`: five parts, the second (the key) empty.
+    expect(v.parse(headers.bearer, 'Bearer a..b.c.d')).toBe('a..b.c.d');
+    for (const header of ['Basic a..b.c.d', 'Bearer abc', 'Bearer a.b.c', 'Bearer a.x.b.c.d', `Bearer ${'a'.repeat(2050)}..b.c.d`]) {
       expect(issue(headers.bearer, header)).not.toBe('ok');
     }
   });
@@ -785,12 +786,12 @@ describe('sessions', () => {
   it('check the token against the user once per request', async () => {
     const email = uniqueEmail();
     const stored = await env.USER.getByName(email).ensure(email);
-    const get = vi.fn(() => env.USER.getByName(email).get());
-    const counting = { ...env, USER: { getByName: () => ({ get }) } } as unknown as typeof env;
+    const check = vi.fn((session: Session) => env.USER.getByName(email).check(session));
+    const counting = { ...env, USER: { getByName: () => ({ check }) } } as unknown as typeof env;
     const session = makeSession(counting, stored.id, email, 0);
     expect(await session.verify()).toMatchObject({ id: stored.id });
     await session.verify();
-    expect(get).toHaveBeenCalledTimes(1);
+    expect(check).toHaveBeenCalledTimes(1);
     expect(await makeSession(env, stored.id, email, 5).verify()).toBeNull();
   });
 });
@@ -819,7 +820,7 @@ describe('PartyDO joins that must check the session on their own', () => {
     const host = await signIn();
     const { body: party } = await createParty(host.token);
     const guest = await signIn();
-    const unreachable = { getByName: () => ({ apply: async () => { throw new Error('down'); }, get: async () => { throw new Error('down'); } }) };
+    const unreachable = { getByName: () => ({ apply: async () => { throw new Error('down'); }, check: async () => { throw new Error('down'); } }) };
     for (const queued of [false, true]) {
       if (queued) {
         await queueFor(party.code, guest.email);
@@ -835,8 +836,64 @@ describe('PartyDO joins that must check the session on their own', () => {
       });
       expect(result).toMatchObject({ ok: false, error: { code: 'unavailable' } });
     }
-    expect((await request('GET', `/v1/parties?code=${party.code}`, { token: host.token })).body.participantCount).toBe(1);
+    expect((await request('POST', '/v1/parties/lookup', { body: { code: party.code }, token: host.token })).body.participantCount).toBe(1);
     warn.mockRestore();
+  });
+
+  it('check the session of a member who joins again, before answering with their view', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const host = await signIn();
+    const { body: party } = await createParty(host.token);
+    const guest = await signIn();
+    expect((await join(guest.token, party.code)).status).toBe(200);
+    expect(await join(guest.token, party.code)).toMatchObject({ status: 200, body: { isJoined: true } });
+    const rejoin = (USER: unknown) => runInDurableObject(env.PARTY.getByName(party.code), async (instance: PartyDO) => {
+      const original = (instance as any).env;
+      (instance as any).env = { ...original, USER: { getByName: () => USER } };
+      try {
+        return await instance.join({ id: guest.id, email: guest.email, name: '' }, 'Guest', null, { tokenVersion: 0 });
+      } finally {
+        (instance as any).env = original;
+      }
+    });
+    expect(await rejoin({ check: async () => { throw new Error('down'); } })).toMatchObject({ ok: false, error: { code: 'unavailable' } });
+    // A token that no longer holds (here, one for a newer token version) doesn't get the view.
+    expect((await join(await sessionToken(guest.id, guest.email, 1), party.code)).status).toBe(401);
+    // The party was deleted while the session was being checked.
+    const deleting = await runInDurableObject(env.PARTY.getByName(party.code), async (instance: PartyDO, state) => {
+      const original = (instance as any).env;
+      (instance as any).env = { ...original, USER: { getByName: () => ({ check: async (session: Session) => {
+        state.storage.sql.exec('UPDATE party SET deleted_at = ?', Date.now());
+        return await env.USER.getByName(guest.email).check(session);
+      } }) } };
+      try {
+        return await instance.join({ id: guest.id, email: guest.email, name: '' }, 'Guest', null, { tokenVersion: 0 });
+      } finally {
+        (instance as any).env = original;
+      }
+    });
+    expect(deleting).toMatchObject({ ok: false, error: { code: 'not_found' } });
+    warn.mockRestore();
+  });
+
+  it('answer a member who left during the check with the party as they now see it, not as gone', async () => {
+    const host = await signIn();
+    const { body: party } = await createParty(host.token);
+    const guest = await signIn();
+    expect((await join(guest.token, party.code)).status).toBe(200);
+    const result = await runInDurableObject(env.PARTY.getByName(party.code), async (instance: PartyDO, state) => {
+      const original = (instance as any).env;
+      (instance as any).env = { ...original, USER: { getByName: () => ({ check: async (session: Session) => {
+        state.storage.sql.exec('DELETE FROM memberships WHERE member_id = ?', guest.id);
+        return await env.USER.getByName(guest.email).check(session);
+      } }) } };
+      try {
+        return await instance.join({ id: guest.id, email: guest.email, name: '' }, 'Guest', null, { tokenVersion: 0 });
+      } finally {
+        (instance as any).env = original;
+      }
+    });
+    expect(result).toMatchObject({ ok: true, view: { isJoined: false, name: 'Party' } });
   });
 
   it('look again after the check: the party may be gone, closed, full, or already joined by then', async () => {
@@ -857,7 +914,7 @@ describe('PartyDO joins that must check the session on their own', () => {
           ...original,
           USER: {
             getByName: (email: string) => ({
-              get: async () => {
+              check: async (session: Session) => {
                 if (change === 'deleted') state.storage.sql.exec('UPDATE party SET deleted_at = ?', Date.now());
                 if (change === 'closed') state.storage.sql.exec('UPDATE party SET is_closed = 1');
                 if (change === 'filled') {
@@ -866,7 +923,7 @@ describe('PartyDO joins that must check the session on their own', () => {
                   }
                 }
                 if (change === 'joined') state.storage.sql.exec("INSERT INTO memberships (member_id, member_email, name, joined_at) VALUES (?, ?, 'Guest', 1)", guest.id, guest.email);
-                return await env.USER.getByName(email).get();
+                return await env.USER.getByName(email).check(session);
               },
             }),
           },
@@ -898,7 +955,7 @@ describe('PartyDO repeats', () => {
     expect(await stub(open.code).delete(host.id)).toEqual(deleted);
     expect(await stub(open.code).delete(guest.id)).toMatchObject({ ok: false, error: { code: 'not_found' } });
     await runInDurableObject(stub(open.code), async (_i, state) => {
-      state.storage.sql.exec('UPDATE party SET deleted_at = ?', Date.now() - DAY - 1000);
+      state.storage.sql.exec('UPDATE party SET deleted_at = ?, restorable_until = NULL', Date.now() - DAY - 1000);
     });
     expect(await stub(open.code).delete(host.id)).toMatchObject({ ok: false, error: { code: 'not_found' } });
 
@@ -922,12 +979,14 @@ describe('UserDO request ids and sessions', () => {
     const who = await signIn();
     const stub = env.USER.getByName(who.email);
     const session = { userId: who.id, tokenVersion: 0 };
-    expect(await stub.beginMailRequest({ userId: who.id, tokenVersion: 1 }, 'k', '', { limit: 6 })).toBeNull();
-    expect(await stub.beginMailRequest(session, undefined, '', { limit: 6 })).toMatchObject({ id: who.id });
-    expect(await stub.beginMailRequest(session, 'k', '', { limit: 6 })).toMatchObject({ id: who.id });
-    expect(await stub.beginMailRequest(session, 'k', '', { limit: 6 })).toBe('repeat');
-    expect(await stub.seenMailRequest('k', '')).toBe(true);
-    expect(await stub.seenMailRequest('k', 'other')).toBe(false);
+    expect(await stub.beginMailRequest({ userId: who.id, tokenVersion: 1 }, 'k', '')).toBeNull();
+    expect(await stub.beginMailRequest(session, undefined, '')).toMatchObject({ id: who.id });
+    expect(await stub.beginMailRequest(session, 'k', '')).toMatchObject({ id: who.id });
+    expect(await stub.beginMailRequest(session, 'k', '')).toBe('repeat');
+    // The same key for something else is a new request; a released one can be made again.
+    expect(await stub.beginMailRequest(session, 'k', 'other')).toMatchObject({ id: who.id });
+    await stub.releaseMailRequest('k', 'other');
+    expect(await stub.beginMailRequest(session, 'k', 'other')).toMatchObject({ id: who.id });
   });
 
   it('lists parties only for the session they belong to', async () => {
@@ -944,8 +1003,12 @@ describe('the remaining refusals', () => {
       expect(await request('POST', '/v1/auth/magic-link', { raw })).toMatchObject({ status: 400, body: { error: { message: 'The request body must be a JSON object.' } } });
     }
     expect(await request('POST', '/v1/auth/magic-link', { key: 'bad key', body: { email: uniqueEmail() } })).toMatchObject({ status: 400, body: { error: { field: 'Idempotency-Key' } } });
-    const res = await (await import('src/index')).app.request('/v1/parties?code=QWERT', {}, testEnv());
+    const res = await (await import('src/index')).app.request('/v1/parties/lookup', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"code":"QWERTYUI"}',
+    }, testEnv());
     expect(res.status).toBe(404);
+    // The lookup by query string is gone.
+    expect((await request('GET', '/v1/parties?code=QWERTYUI')).body.error.message).not.toBe('Party does not exist.');
   });
 
   it('refuse deleting or restoring a party that isn\'t yours, doesn\'t exist, is rolled, or is past its restore window', async () => {
@@ -962,14 +1025,13 @@ describe('the remaining refusals', () => {
 
     const { body: other } = await createParty(host.token, 'Other');
     await stub(other.code).delete(host.id);
-    // Let the delete's own alarm run first; it then waits for the end of the restore window.
-    await runDurableObjectAlarm(stub(other.code));
-    // Past the window, with no alarm left: one firing before the restore would erase the party (then "not found").
-    await runInDurableObject(stub(other.code), async (_i, state) => {
-      state.storage.sql.exec('UPDATE party SET deleted_at = ?', Date.now() - DAY - 1000);
-      await state.storage.deleteAlarm();
+    // Past the window, and asked at once, in the same call: an alarm running in between would erase the party first
+    // (then the answer is "not found", not "too late").
+    const late = await runInDurableObject(stub(other.code), async (instance: PartyDO, state) => {
+      state.storage.sql.exec('UPDATE party SET deleted_at = ?, restorable_until = NULL', Date.now() - DAY - 1000);
+      return instance.restore(host.id);
     });
-    expect(await stub(other.code).restore(host.id)).toMatchObject({ ok: false, error: { code: 'conflict', message: 'This party was deleted more than a day ago and can no longer be restored.' } });
+    expect(late).toMatchObject({ ok: false, error: { code: 'conflict', message: 'This party was deleted more than a day ago and can no longer be restored.' } });
   });
 
   it('refuse a confirmation link that was used by another request, or while the account is busy', async () => {
@@ -1019,7 +1081,7 @@ describe('PartyDO with older data', () => {
     await request('POST', '/v1/parties/delete', { body: { code: party.code }, token: host.token });
     await runDurableObjectAlarm(env.PARTY.getByName(party.code));
     await runInDurableObject(env.PARTY.getByName(party.code), async (instance: PartyDO, state) => {
-      state.storage.sql.exec('UPDATE party SET deleted_at = ?', Date.now() - DAY - 1000);
+      state.storage.sql.exec('UPDATE party SET deleted_at = ?, restorable_until = NULL', Date.now() - DAY - 1000);
       state.storage.sql.exec('DROP TABLE cancelled');
       state.storage.sql.exec('DELETE FROM memberships');
       await instance.alarm();

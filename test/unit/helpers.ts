@@ -21,11 +21,13 @@ export const denied = { limit: async () => ({ success: false }) } as unknown as 
 export const testEnv = (overrides: Partial<typeof env> = {}) => ({
   ...env,
   ENTER_RATE_LIMIT_IP: allowed,
-  ENTER_RATE_LIMIT_EMAIL: allowed,
+  MAIL_RATE_LIMIT_ADDRESS: allowed,
   PARTY_LOOKUP_RATE_LIMIT_IP: allowed,
   LEGACY_CODE_LOOKUP_RATE_LIMIT_IP: allowed,
   JOIN_RATE_LIMIT_USER: allowed,
   INVITE_RATE_LIMIT_USER: allowed,
+  MAIL_RATE_LIMIT_ALL: allowed,
+  STATS_WATCH_RATE_LIMIT_IP: allowed,
   ...overrides,
 }) as typeof env;
 
@@ -46,7 +48,7 @@ export function mailer(fail: (to: string) => boolean = () => false) {
   return { sent, EMAIL };
 }
 
-export type RequestOptions = { body?: unknown; raw?: string; token?: string; key?: string; ip?: string; env?: typeof env };
+export type RequestOptions = { body?: unknown; raw?: string; token?: string; key?: string; ip?: string; env?: typeof env; headers?: Record<string, string> };
 
 /** Calls the app as a client would. Returns the status and the parsed body. */
 export async function request<T = any>(method: string, path: string, options: RequestOptions = {}) {
@@ -56,6 +58,7 @@ export async function request<T = any>(method: string, path: string, options: Re
       'cf-connecting-ip': options.ip ?? `192.0.2.${++counter % 250}`,
       ...(options.token ? { authorization: `Bearer ${options.token}` } : {}),
       ...(options.key ? { 'idempotency-key': options.key } : {}),
+      ...options.headers,
     },
     body: options.raw ?? (options.body === undefined ? undefined : JSON.stringify(options.body)),
   }, options.env ?? testEnv());

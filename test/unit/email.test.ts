@@ -14,7 +14,7 @@ const gmailUser = () => uniqueEmail('g').split('@')[0].replaceAll('-', '');
 /** The same Gmail user name with a dot after its first letter. */
 const dotted = (id: string) => `${id.slice(0, 1)}.${id.slice(1)}`;
 
-const tokenFrom = (text: string, path: string) => new RegExp(`/${path}#([\\w-]+\\.[\\w-]+\\.[\\w-]+)`).exec(text)![1];
+const tokenFrom = (text: string, path: string) => new RegExp(`/${path}#([\\w-]+(?:\\.[\\w-]*){4})`).exec(text)![1];
 const signInLink = (payload: { email: string; typed?: string }) =>
   jwt().issueToken<EnterRequestToken>('EnterRequest', { ...payload, jti: crypto.randomUUID() } as EnterRequestToken, { ttl: 300 });
 const enter = (token: string) => request('POST', '/v1/auth/session', { body: { token } });

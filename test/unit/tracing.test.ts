@@ -6,7 +6,7 @@ import { env } from 'cloudflare:test';
 import { partyRef } from 'src/utils/logRef';
 import { annotate, recordOutcome, withSpan } from 'src/utils/tracing';
 
-import { jwt, request, signIn } from './helpers';
+import { jwt, request, signIn, testEnv } from './helpers';
 
 type FakeSpan = {
   name: string;
@@ -122,16 +122,24 @@ describe('API action spans', () => {
     const { body: party } = await request('POST', '/v1/parties', { token: who.token, body: { name: 'Query spans' } });
     const spans = captureSpans();
 
-    await request('GET', `/v1/parties?code=${party.code}`, { token: who.token });
+    await request('POST', '/v1/parties/lookup', { body: { code: party.code }, token: who.token });
     await request('GET', '/v1/me/parties', { token: who.token });
     await request('GET', '/v1/me', { token: who.token });
 
-    expect(spans.map(s => s.name)).toEqual(['api.party', 'api.partyHistory', 'api.user']);
+    expect(spans.map(s => s.name)).toEqual(['api.lookUpParty', 'api.partyHistory', 'api.user']);
     expect(spans[0].attributes).toMatchObject({ 'party.ref': await partyRef(env, party.code), 'party.found': true, 'party.joined': true });
     // The code itself is never recorded: it is the key to a party without a secret phrase.
     expect(JSON.stringify(spans)).not.toContain(party.code);
     expect(spans[1].attributes).toMatchObject({ 'parties.first': 10, 'parties.count': 1 });
     expect(spans[2].attributes).toMatchObject({ 'user.id': who.id, 'user.found': true });
+  });
+
+  it('records which rate limit refused a request, the same way for every limit', async () => {
+    const spans = captureSpans();
+    const denied = { limit: async () => ({ success: false }) } as unknown as RateLimit;
+    await request('POST', '/v1/auth/magic-link', { body: { email: `limited-${Date.now()}@example.com` }, env: testEnv({ ENTER_RATE_LIMIT_IP: denied }) });
+    await request('POST', '/v1/parties/lookup', { body: { code: 'QWERTYUI' }, env: testEnv({ PARTY_LOOKUP_RATE_LIMIT_IP: denied }) });
+    expect(spans.map(s => s.attributes['rate_limit.hit'])).toEqual(['ENTER_RATE_LIMIT_IP', 'PARTY_LOOKUP_RATE_LIMIT_IP']);
   });
 
   it('records how a magic link was used', async () => {

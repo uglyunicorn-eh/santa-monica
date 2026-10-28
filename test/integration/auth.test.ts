@@ -1,13 +1,11 @@
 import { env, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 
-import { EMAILS_PER_ADDRESS_PER_HOUR } from 'src/api/rateLimit';
-import { MAIL_QUOTA_WINDOW_MS } from 'src/do/UserDO';
 import { nodeIdToStr } from 'src/utils/strings/nodeId';
 
 import {
-  ageRows, apiError, createParty, magicLinkToken, mailbox, me, mintEnterRequestToken, mintUserToken, newKey, redeem,
-  requestMagicLink, signIn, uniqueEmail,
+  apiError, createParty, magicLinkToken, mailbox, me, mintEnterRequestToken, mintUserToken, newKey, redeem,
+  requestMagicLink, signIn, uniqueEmail, uniqueIp, untilRefused,
 } from './support';
 
 describe('magic-link sign-in', () => {
@@ -152,31 +150,24 @@ describe('repeating a sign-in request (Idempotency-Key)', () => {
 describe('rate limiting', () => {
   it('allows 3 magic links per email per minute', async () => {
     const email = uniqueEmail('limited');
-    const statuses = [];
-    for (let i = 0; i < 5; i++) {
-      statuses.push((await requestMagicLink(email)).status);
-    }
-    expect(statuses).toEqual([202, 202, 202, 429, 429]);
-    expect(await mailbox(email)).toHaveLength(3);
+    const statuses = (await untilRefused(3, () => requestMagicLink(email))).map(r => r.status);
+    expect(statuses.slice(0, 3)).toEqual([202, 202, 202]);
+    expect(statuses.at(-1)).toBe(429);
+    expect(await mailbox(email)).toHaveLength(statuses.filter(s => s === 202).length);
   });
 
   it('counts the email case-insensitively', async () => {
     const email = uniqueEmail('cased');
-    const statuses = [];
-    for (const variant of [email, email.toUpperCase(), email, email.toUpperCase()]) {
-      statuses.push((await requestMagicLink(variant)).status);
-    }
-    expect(statuses).toEqual([202, 202, 202, 429]);
+    const statuses = (await untilRefused(3, i => requestMagicLink(i % 2 ? email.toUpperCase() : email))).map(r => r.status);
+    expect(statuses.slice(0, 3)).toEqual([202, 202, 202]);
+    expect(statuses.at(-1)).toBe(429);
   });
 
   it('allows 10 magic links per IP per minute, across emails', async () => {
-    const ip = '203.0.113.77';
-    const statuses = [];
-    for (let i = 0; i < 12; i++) {
-      statuses.push((await requestMagicLink(uniqueEmail('ip'), { ip })).status);
-    }
+    const ip = uniqueIp();
+    const statuses = (await untilRefused(10, () => requestMagicLink(uniqueEmail('ip'), { ip }))).map(r => r.status);
     expect(statuses.slice(0, 10).every(s => s === 202)).toBe(true);
-    expect(statuses.slice(10)).toEqual([429, 429]);
+    expect(statuses.at(-1)).toBe(429);
   });
 });
 
@@ -187,8 +178,10 @@ describe('tokens', () => {
     expect(await redeem('nope')).toEqual(invalid);
   });
 
-  it('rejects an expired magic-link token', async () => {
-    expect(await redeem(await mintEnterRequestToken({ email: uniqueEmail() }, -60))).toEqual(invalid);
+  it('tells an expired magic-link token apart, so the app can offer a fresh one', async () => {
+    expect(await redeem(await mintEnterRequestToken({ email: uniqueEmail(), jti: 'x' }, -60))).toEqual({
+      status: 400, body: apiError('link_expired', 'This magic link has expired. Please request a new one.', 'token'),
+    });
   });
 
   it('rejects a magic-link token signed with another key, or without an id', async () => {
@@ -225,23 +218,14 @@ describe('tokens', () => {
   });
 });
 
-describe('the per-address email cap', () => {
-  it('refuses sign-in links to an address that had its fill this hour, until the hour has passed', async () => {
-    const email = uniqueEmail('capped');
-    const stub = env.USER.getByName(email);
-    // The per-minute limit allows 3 a minute, so the earlier emails of the hour are put in place directly.
-    await runInDurableObject(stub, async (_i, state) => {
-      for (let i = 0; i < EMAILS_PER_ADDRESS_PER_HOUR; i++) {
-        state.storage.sql.exec('INSERT INTO mail_sent (at) VALUES (?)', Date.now() - i * 60_000);
-      }
-    });
-    expect(await requestMagicLink(email)).toEqual({
-      status: 429, body: apiError('rate_limited', "That's a lot of emails for this address. Please try again in an hour.", 'email'),
-    });
-    expect(await mailbox(email)).toEqual([]);
-
-    await ageRows(stub, 'mail_sent', 'at', MAIL_QUOTA_WINDOW_MS);
-    expect((await requestMagicLink(email)).status).toBe(202);
-    expect(await mailbox(email)).toHaveLength(1);
+describe('a sign-in request', () => {
+  it('stores nothing until its link is used: then the account is made', async () => {
+    const email = uniqueEmail('not-yet');
+    expect((await requestMagicLink(email, { key: newKey() })).status).toBe(202);
+    const tables = () => runInDurableObject(env.USER.getByName(email), async (_i, state) =>
+      state.storage.sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '_cf_%'").toArray().map(r => r.name));
+    expect(await tables()).toEqual([]);
+    expect((await redeem(magicLinkToken((await mailbox(email)).at(-1)!))).status).toBe(200);
+    expect(await tables()).toContain('user');
   });
 });

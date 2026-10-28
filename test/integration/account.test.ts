@@ -198,7 +198,7 @@ describe('changing the email', () => {
     expect([(await mailbox(one)).length, (await mailbox(two)).length]).toEqual([1, 1]);
   });
 
-  it('moves open parties to the new email and leaves finished ones on the old one, all still listed', async () => {
+  it('moves open parties to the new email, leaves finished ones alone (their emails are already gone), all still listed', async () => {
     const host = await person('host');
     const who = await person('me');
     const other = await person('other');
@@ -220,7 +220,8 @@ describe('changing the email', () => {
     const moved = { ...who, email: newEmail, token: userToken };
 
     expect(await memberEmail(open.code, rawId(who))).toBe(newEmail);
-    expect(await memberEmail(finished.code, rawId(who))).toBe(who.email);
+    // A drawn party let go of its members' emails once the draw was delivered.
+    expect(await memberEmail(finished.code, rawId(who))).toBeNull();
     expect((await myParties(moved)).body.items.map(p => ({ code: p.code, isClosed: p.isClosed }))).toEqual(expect.arrayContaining([
       { code: open.code, isClosed: false }, { code: finished.code, isClosed: true },
     ]));

@@ -8,6 +8,7 @@ import { live } from 'src/api/live';
 import { auth } from 'src/api/routes/auth';
 import { me } from 'src/api/routes/me';
 import { parties } from 'src/api/routes/parties';
+import { stats } from 'src/api/routes/stats';
 
 /** The API, served under /v1. JSON in, JSON out; every failure answers `{ error: { code, message, field } }`. */
 export const api = new Hono<ApiEnv>({ strict: false });
@@ -22,6 +23,7 @@ api.route('/auth', auth);
 api.route('/me', me);
 api.route('/parties', parties);
 api.route('/live', live);
+api.route('/stats', stats);
 
 /** Every route the API serves, as "METHOD /path". Tests check each has a call budget and a revocation check. */
 export const routeList = () => api.routes

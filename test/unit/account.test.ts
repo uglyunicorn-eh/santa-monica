@@ -235,13 +235,13 @@ describe('PartyDO.changeMemberEmail', () => {
     });
   });
 
-  it('keeps the old email in a drawn party, and returns null for non-members and unknown parties', async () => {
+  it('leaves a drawn party alone (its emails are already gone), and returns null for non-members and unknown parties', async () => {
     const host = await signedIn('Host');
     const guest = await signedIn('Guest');
     const { stub } = await partyOf(host, [guest], { closed: true });
     expect(await stub.changeMemberEmail(guest.userId!, guest.userEmail!, uniqueEmail())).toMatchObject({ isClosed: true });
     await runInDurableObject(stub, async (_i, state) => {
-      expect(state.storage.sql.exec('SELECT member_email FROM memberships WHERE member_id = ?', guest.userId).one()).toEqual({ member_email: guest.userEmail });
+      expect(state.storage.sql.exec('SELECT member_email FROM memberships WHERE member_id = ?', guest.userId).one()).toEqual({ member_email: null });
     });
     expect(await stub.changeMemberEmail(newObjectId(), 'x@example.com', 'y@example.com')).toBeNull();
     expect(await env.PARTY.getByName(code()).changeMemberEmail(guest.userId!, 'x@example.com', 'y@example.com')).toBeNull();

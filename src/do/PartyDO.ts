@@ -1,14 +1,15 @@
 import { DurableObject } from 'cloudflare:workers';
 
 import { Env } from 'src/env';
-import { ADDRESS_QUOTA } from 'src/api/rateLimit';
-import { renderPartyInvite, renderPartyNotification, sendMail } from 'src/mail';
+import { renderPartyInvite, renderPartyNotification, renderPartyPruned, sendMail } from 'src/mail';
 import santaShuffle from 'src/utils/santaShuffle';
-import { Session, sessionMatches } from 'src/utils/session';
+import { Session } from 'src/utils/session';
 
 import { newObjectId } from 'src/utils/ids';
-import { LIVE_USER_HEADER } from 'src/api/live';
-import { Outbox } from './outbox';
+import { LIVE_USER_HEADER } from 'src/utils/liveHeaders';
+import { takeAddressLimit, takeAllMail } from 'src/api/rateLimit';
+import { STATS_NAME } from './StatsDO';
+import { Outbox, RetryLater } from './outbox';
 
 import { CreatePartyInput, ForgetMemberResult, Member, PartyErrorCode, PartyResult, PartyUserError, PartyView, UserPartyRecord, UserRecord, UserUpdate } from './types';
 
@@ -24,6 +25,12 @@ type PartyRow = {
   /** When the host drew the party. Parties drawn before this column existed have null. */
   closed_at: number | null;
   deleted_at: number | null;
+  /** Invite emails sent in all, for MAX_PARTY_INVITES (the invites themselves are kept only for REINVITE_AFTER_MS). */
+  invites_sent: number;
+  /** When an open party is deleted for want of activity: PRUNE_AFTER_MS after its last write (`touch`). */
+  prune_at: number | null;
+  /** Until when a deleted party can be restored. Parties deleted before this column existed have null (24 h). */
+  restorable_until: number | null;
 };
 
 type MembershipRow = {
@@ -46,21 +53,35 @@ type OutboxMessage =
   // gone, so the slug travels with the message.
   | { kind: 'user.partyPurged'; email: string; slug: string }
   | { kind: 'mail.partyNotification'; email: string; partyName: string; slug: string }
-  // An invite from the host. Counted against the recipient's hourly email cap when it goes out; over the cap, it's dropped.
+  // To the host, when an open party was deleted for want of activity (`pruneIfDue`).
+  | { kind: 'mail.partyPruned'; email: string; partyName: string; slug: string; restorableUntil: number }
+  // An invite from the host. Counted against the recipient's per-address limit when it goes out; over it, it's dropped.
   | { kind: 'mail.partyInvite'; email: string; hostName: string; partyName: string; slug: string; isProtected: boolean };
 
 
 
-/** The joining session's token version, checked against the user's record (see `Session`). */
-export type JoinCheck = Pick<Session, 'tokenVersion'>;
+/** The joining session's token version and proof, checked by the user's object (`UserDO.holds`, see `Session`). */
+export type JoinCheck = Pick<Session, 'tokenVersion' | 'proof'>;
 
-/** How long a deleted party can be restored. After that it is erased for good. */
+/** How long a party the host deleted can be restored. After that it is erased for good. */
 export const RESTORE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-// Columns added after the first release, by table. Parties created before them get the columns on their next start
-// (none are backfilled).
+/** An open party with no activity (a write by a person) for this long is deleted, and its host told by email. */
+export const PRUNE_AFTER_MS = 45 * 24 * 60 * 60 * 1000;
+
+/** How long a party deleted for want of activity can be restored. */
+export const PRUNED_RESTORE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * When auto-prune came in. A party that had already gone PRUNE_AFTER_MS without activity before then is erased at
+ * once, with no email and no restore: its host hasn't been near it in a long time. It must not be later than the
+ * deploy: a party due after it gets the email and the week to restore it.
+ */
+export const AUTO_PRUNE_SINCE = Date.UTC(2026, 9, 27);
+
+// Columns added after the first release, by table. Parties created before them get the columns on their next start.
 const ADDED_COLUMNS: Record<string, Record<string, string>> = {
-  party: { closed_at: 'INTEGER', deleted_at: 'INTEGER' },
+  party: { closed_at: 'INTEGER', deleted_at: 'INTEGER', invites_sent: 'INTEGER NOT NULL DEFAULT 0', prune_at: 'INTEGER', restorable_until: 'INTEGER' },
 };
 
 /** Wrong secret phrases one person can try on a party within PHRASE_GUESS_WINDOW_MS before having to wait. */
@@ -131,18 +152,24 @@ export class PartyDO extends DurableObject<Env> {
     return this.schemaReady;
   }
 
-  /** Adds the columns introduced after a party was created. Runs once per start, when the party is first read. */
+  /**
+   * Adds the columns introduced after a party was created, and lets go of what it no longer needs (`tidy`). Runs once
+   * per start, when the party is first read.
+   */
   private migrate() {
     this.schemaReady = true;
-    for (const [table, added] of Object.entries(ADDED_COLUMNS)) {
-      const columns = new Set(this.sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray().map(c => c.name));
-      for (const [column, definition] of Object.entries(added)) {
-        if (!columns.has(column)) {
+    const added: string[] = [];
+    for (const [table, columns] of Object.entries(ADDED_COLUMNS)) {
+      const existing = new Set(this.sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray().map(c => c.name));
+      for (const [column, definition] of Object.entries(columns)) {
+        if (!existing.has(column)) {
           this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+          added.push(`${table}.${column}`);
         }
       }
     }
-    // Invites the host sent, by address: who was invited when, and how many invite emails the party sent in all.
+    // Invites the host sent in the last REINVITE_AFTER_MS, by address, so a repeat isn't sent again. Older ones are
+    // deleted: the address was only ever needed for that. (`sent` is from when invites were kept for good.)
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS invites (
         email TEXT PRIMARY KEY,
@@ -150,6 +177,18 @@ export class PartyDO extends DurableObject<Env> {
         sent INTEGER NOT NULL DEFAULT 1
       )
     `);
+    if (added.includes('party.invites_sent')) {
+      // The invite cap was the sum over the invites kept; now it's a counter, so they can go.
+      this.sql.exec('UPDATE party SET invites_sent = (SELECT COALESCE(SUM(sent), 0) FROM invites)');
+    }
+    if (added.includes('party.prune_at')) {
+      // From the last activity known: when it was made, when someone last joined, or when the host last invited.
+      this.sql.exec(
+        `UPDATE party SET prune_at = MAX(created_at, COALESCE((SELECT MAX(joined_at) FROM memberships), 0),
+           COALESCE((SELECT MAX(invited_at) FROM invites), 0)) + ?`,
+        PRUNE_AFTER_MS,
+      );
+    }
     // Wrong secret phrases per person, so guessing one is slow (see MAX_PHRASE_GUESSES).
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS phrase_guesses (
@@ -158,6 +197,38 @@ export class PartyDO extends DurableObject<Env> {
         first_failed_at INTEGER NOT NULL
       )
     `);
+    this.tidy();
+    // A party that starts for any reason gets its alarm (an old one may be due to be pruned). Not awaited, since this
+    // runs inside a read; the output gate holds the answer until the alarm is stored.
+    const next = this.nextAlarm();
+    if (next !== null) {
+      void this.ctx.storage.setAlarm(next);
+    }
+  }
+
+  /** Marks a write by a person: the party is pruned PRUNE_AFTER_MS from now. Runs inside the write's transaction. */
+  private touch() {
+    this.sql.exec('UPDATE party SET prune_at = ?', Date.now() + PRUNE_AFTER_MS);
+  }
+
+  /**
+   * Lets go of personal data the party no longer needs. Runs when the party starts and after the outbox runs:
+   * - invited addresses older than REINVITE_AFTER_MS, and all of them once the party is drawn (nobody can join then);
+   * - members' emails once the party is drawn and the outbox is empty. After the draw they're only used to deliver
+   *   what the draw queued; everything else goes by member id (views, email changes, account deletion).
+   */
+  private tidy() {
+    const party = this.sql.exec<{ is_closed: number }>('SELECT is_closed FROM party LIMIT 1').toArray()[0];
+    if (party?.is_closed) {
+      this.sql.exec('DELETE FROM invites');
+      // Parties from before the outbox have no table for it, and nothing queued.
+      const hasOutbox = this.sql.exec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'outbox'").toArray().length > 0;
+      if (!hasOutbox || !this.sql.exec('SELECT 1 FROM outbox LIMIT 1').toArray().length) {
+        this.sql.exec('UPDATE memberships SET member_email = NULL WHERE member_email IS NOT NULL');
+      }
+    } else {
+      this.sql.exec('DELETE FROM invites WHERE invited_at <= ?', Date.now() - REINVITE_AFTER_MS);
+    }
   }
 
   /**
@@ -270,6 +341,7 @@ export class PartyDO extends DurableObject<Env> {
       isClosed: Boolean(party.is_closed),
       closedAt: party.closed_at,
       deletedAt: party.deleted_at,
+      restorableUntil: this.restorableUntil(party),
     };
   }
 
@@ -319,6 +391,7 @@ export class PartyDO extends DurableObject<Env> {
       createdAt: party.created_at,
       closedAt: party.closed_at,
       deletedAt: party.deleted_at,
+      restorableUntil: this.restorableUntil(party),
       participantCount: isJoined ? this.memberCount() : null,
       participants,
       target,
@@ -365,17 +438,17 @@ export class PartyDO extends DurableObject<Env> {
     // Invites say who sent them: the name the host goes by in this party (the host can't leave, so it's always there).
     const hostName = this.membership(userId)!.name;
     const now = Date.now();
+    this.tidy();
     const members = new Set(this.sql.exec<{ member_email: string | null }>('SELECT member_email FROM memberships').toArray()
       .map(row => row.member_email));
-    const recent = new Set(this.sql.exec<{ email: string }>('SELECT email FROM invites WHERE invited_at > ?', now - REINVITE_AFTER_MS)
-      .toArray().map(row => row.email));
+    const recent = new Set(this.sql.exec<{ email: string }>('SELECT email FROM invites').toArray().map(row => row.email));
     const invited: string[] = [];
     const alreadyInvited: string[] = [];
     const alreadyJoined: string[] = [];
     for (const email of new Set(emails)) {
       (members.has(email) ? alreadyJoined : recent.has(email) ? alreadyInvited : invited).push(email);
     }
-    const used = this.sql.exec<{ n: number | null }>('SELECT SUM(sent) AS n FROM invites').one().n ?? 0;
+    const used = party.invites_sent;
     if (used + invited.length > MAX_PARTY_INVITES) {
       const left = MAX_PARTY_INVITES - used;
       return fail(
@@ -386,15 +459,14 @@ export class PartyDO extends DurableObject<Env> {
     }
     this.ctx.storage.transactionSync(() => {
       for (const email of invited) {
-        this.sql.exec(
-          `INSERT INTO invites (email, invited_at) VALUES (?, ?)
-           ON CONFLICT (email) DO UPDATE SET invited_at = excluded.invited_at, sent = sent + 1`,
-          email, now,
-        );
+        this.sql.exec('INSERT OR REPLACE INTO invites (email, invited_at) VALUES (?, ?)', email, now);
         this.enqueue({ kind: 'mail.partyInvite', email, hostName, partyName: party.name, slug: party.slug, isProtected: Boolean(party.password) });
       }
+      this.sql.exec('UPDATE party SET invites_sent = invites_sent + ?', invited.length);
+      this.touch();
     });
     if (invited.length) {
+      // Delivers the invites now, and sets the alarm that deletes them once REINVITE_AFTER_MS has passed.
       await this.deliverSoon();
     }
     return { ok: true, invited, alreadyInvited, alreadyJoined, invitesLeft: MAX_PARTY_INVITES - used - invited.length };
@@ -489,8 +561,14 @@ export class PartyDO extends DurableObject<Env> {
     return this.buildView(party, userId);
   }
 
+  /** Until when a deleted party can be restored; parties deleted before `restorable_until` existed had 24 hours. */
+  private restorableUntil(party: PartyRow): number | null {
+    return party.deleted_at ? party.restorable_until ?? party.deleted_at + RESTORE_WINDOW_MS : null;
+  }
+
   private restoreExpired(party: PartyRow) {
-    return Boolean(party.deleted_at && Date.now() >= party.deleted_at + RESTORE_WINDOW_MS);
+    const until = this.restorableUntil(party);
+    return until !== null && Date.now() >= until;
   }
 
   /** The party unless it was deleted: joining, leaving and closing treat a deleted party as gone. */
@@ -521,12 +599,16 @@ export class PartyDO extends DurableObject<Env> {
       created_at: now,
       closed_at: null,
       deleted_at: null,
+      invites_sent: 0,
+      prune_at: now + PRUNE_AFTER_MS,
+      restorable_until: null,
     };
     this.ctx.storage.transactionSync(() => {
       this.sql.exec(
         'INSERT INTO party (id, slug, name, password, host_id, is_closed, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)',
         party.id, party.slug, party.name, party.password, party.host_id, party.created_at,
       );
+      this.touch();
       this.sql.exec(
         'INSERT INTO memberships (member_id, member_email, name, joined_at) VALUES (?, ?, ?, ?)',
         input.host.id, input.host.email, input.host.name, now,
@@ -553,6 +635,19 @@ export class PartyDO extends DurableObject<Env> {
       return fail('not_found', 'Party does not exist.', 'party');
     }
     if (this.membership(member.id)) {
+      // A repeat answers with the member's view, so the session is checked first, like for any other join.
+      if (check && member.email) {
+        const holds = await this.checkSession(member.email, { userId: member.id, ...check });
+        if (holds !== true) {
+          return holds === false ? notLoggedIn : tryAgain;
+        }
+        // The party may have changed during the check: gone is not found; left meanwhile shows it as they now see it.
+        const current = this.liveParty();
+        if (!current) {
+          return fail('not_found', 'Party does not exist.', 'party');
+        }
+        return { ok: true, view: this.buildView(current, member.id) };
+      }
       return { ok: true, view: this.buildView(party, member.id) };
     }
     if (party.is_closed) {
@@ -589,15 +684,9 @@ export class PartyDO extends DurableObject<Env> {
       if (!this.hasQueuedUserUpdates(member.email)) {
         return await this.checkedJoin(party, { ...member, email: member.email }, displayName, check);
       }
-      let user: UserRecord | null;
-      try {
-        user = await this.env.USER.getByName(member.email).get();
-      } catch (error) {
-        console.warn('Unable to check the joining user', { error: String(error) });
-        return tryAgain;
-      }
-      if (!sessionMatches(user, { userId: member.id, tokenVersion: check.tokenVersion })) {
-        return notLoggedIn;
+      const holds = await this.checkSession(member.email, { userId: member.id, ...check });
+      if (holds !== true) {
+        return holds === false ? notLoggedIn : tryAgain;
       }
       // Other requests may have reached the party meanwhile.
       const current = this.liveParty();
@@ -620,6 +709,7 @@ export class PartyDO extends DurableObject<Env> {
         'INSERT INTO memberships (member_id, member_email, name, joined_at) VALUES (?, ?, ?, ?)',
         member.id, member.email, displayName, Date.now(),
       );
+      this.touch();
       if (member.email) {
         this.enqueue({ kind: 'user.sync', email: member.email });
         this.enqueue({ kind: 'user.setNameIfEmpty', email: member.email, name: displayName, memberId: member.id });
@@ -629,12 +719,22 @@ export class PartyDO extends DurableObject<Env> {
     return { ok: true, view: this.buildView(party, member.id) };
   }
 
+  /** Checks a joining session with the user's object on its own (`UserDO.check`). Null when it can't be reached. */
+  private async checkSession(email: string, session: Session): Promise<boolean | null> {
+    try {
+      return Boolean(await this.env.USER.getByName(email).check(session));
+    } catch (error) {
+      console.warn('Unable to check the joining user', { error: String(error) });
+      return null;
+    }
+  }
+
   /**
    * Updates the member's UserDO with the session check first, then stores the membership. Refuses the join when the
    * user can't be reached.
    */
   private async checkedJoin(party: PartyRow, member: Member & { email: string }, displayName: string, check: JoinCheck): Promise<PartyResult> {
-    const session = { userId: member.id, tokenVersion: check.tokenVersion };
+    const session = { userId: member.id, ...check };
     let user: UserRecord | null;
     try {
       user = await this.env.USER.getByName(member.email).apply([
@@ -645,7 +745,7 @@ export class PartyDO extends DurableObject<Env> {
       console.warn('Unable to update the joining user', { error: String(error) });
       return tryAgain;
     }
-    if (!sessionMatches(user, session)) {
+    if (!user) {
       return notLoggedIn;
     }
 
@@ -669,6 +769,7 @@ export class PartyDO extends DurableObject<Env> {
         'INSERT INTO memberships (member_id, member_email, name, joined_at) VALUES (?, ?, ?, ?)',
         member.id, member.email, displayName, Date.now(),
       );
+      this.touch();
     }
     return { ok: true, view: this.buildView(current, member.id) };
   }
@@ -692,6 +793,7 @@ export class PartyDO extends DurableObject<Env> {
 
     this.ctx.storage.transactionSync(() => {
       this.sql.exec('DELETE FROM memberships WHERE member_id = ?', userId);
+      this.touch();
       if (membership.member_email) {
         this.enqueue({ kind: 'user.sync', email: membership.member_email });
       }
@@ -727,6 +829,8 @@ export class PartyDO extends DurableObject<Env> {
         );
       }
       this.sql.exec('UPDATE party SET is_closed = 1, closed_at = ?', closedAt);
+      // Nobody can join a drawn party, so the invited addresses aren't needed any more.
+      this.sql.exec('DELETE FROM invites');
       // Every member's party list shows the party as closed, and everyone gets the notification email.
       for (const member of members) {
         if (member.member_email) {
@@ -735,12 +839,27 @@ export class PartyDO extends DurableObject<Env> {
         }
       }
     });
+    // The Party'o'meter is counted alongside: the draw doesn't wait for it.
+    this.ctx.waitUntil(this.countRoll());
     // The host's list is updated before returning, so the closed party stops counting towards their open-party
     // limit right away. Other members and the emails follow on the alarm.
     const hostEmail = members.find(member => member.member_id === userId)?.member_email;
     await this.deliverHostNow(hostEmail);
     await this.deliverSoon();
     return { ok: true, view: this.buildView({ ...party, is_closed: 1, closed_at: closedAt }, userId) };
+  }
+
+  /**
+   * Adds this party to the Party'o'meter (StatsDO), once: only the first draw gets here. If the counter can't be
+   * reached, the roll goes uncounted. That's fine for a number on a page, and keeps the draw itself out of it: it
+   * never waits for this, or fails because of it.
+   */
+  private async countRoll() {
+    try {
+      await this.env.STATS.getByName(STATS_NAME).rolled();
+    } catch (error) {
+      console.warn('Unable to count the roll', { error: String(error) });
+    }
   }
 
   /**
@@ -800,11 +919,17 @@ export class PartyDO extends DurableObject<Env> {
     return { ok: true, view: this.buildView({ ...party, deleted_at: null }, userId) };
   }
 
-  /** Marks the party deleted (or restored) and queues an update for every member's list. */
-  private setDeleted(deletedAt: number | null, reservation?: string) {
+  /**
+   * Marks the party deleted, restorable for `restoreFor` (or restored, which counts as activity), and queues an update
+   * for every member's list.
+   */
+  private setDeleted(deletedAt: number | null, reservation?: string, restoreFor = RESTORE_WINDOW_MS) {
     const hostId = this.party()!.host_id;
     this.ctx.storage.transactionSync(() => {
-      this.sql.exec('UPDATE party SET deleted_at = ?', deletedAt);
+      this.sql.exec('UPDATE party SET deleted_at = ?, restorable_until = ?', deletedAt, deletedAt === null ? null : deletedAt + restoreFor);
+      if (deletedAt === null) {
+        this.touch();
+      }
       for (const member of this.sql.exec<MembershipRow>('SELECT * FROM memberships').toArray()) {
         if (member.member_email) {
           this.enqueue({
@@ -820,9 +945,35 @@ export class PartyDO extends DurableObject<Env> {
   /** Erases a party whose restore window has passed, leaving a tombstone so its code is never reused. */
   private purgeIfExpired() {
     const party = this.party();
-    if (!party || !this.restoreExpired(party)) {
+    if (party && this.restoreExpired(party)) {
+      this.erase(party);
+    }
+  }
+
+  /**
+   * Deletes an open party whose `prune_at` has passed: like the host's own delete, restorable for
+   * PRUNED_RESTORE_WINDOW_MS, and the host gets an email. One already past it before AUTO_PRUNE_SINCE is erased at
+   * once, with no email. Runs in the alarm, whose outbox run then delivers the list updates and the email.
+   */
+  private pruneIfDue() {
+    const party = this.party();
+    if (!party || party.is_closed || party.deleted_at || party.prune_at === null || party.prune_at > Date.now()) {
       return;
     }
+    if (party.prune_at < AUTO_PRUNE_SINCE) {
+      this.erase(party);
+      return;
+    }
+    const deletedAt = Date.now();
+    const hostEmail = this.membership(party.host_id)?.member_email;
+    this.setDeleted(deletedAt, undefined, PRUNED_RESTORE_WINDOW_MS);
+    if (hostEmail) {
+      this.enqueue({ kind: 'mail.partyPruned', email: hostEmail, partyName: party.name, slug: party.slug, restorableUntil: deletedAt + PRUNED_RESTORE_WINDOW_MS });
+    }
+  }
+
+  /** Erases the party for good: its memberships (and with them every email) go, and a tombstone keeps its code. */
+  private erase(party: PartyRow) {
     const hostEmail = this.membership(party.host_id)?.member_email;
     this.ctx.storage.transactionSync(() => {
       this.sql.exec('DELETE FROM memberships');
@@ -920,15 +1071,31 @@ export class PartyDO extends DurableObject<Env> {
   private async deliver(messages: OutboxMessage[]) {
     const [first] = messages;
     if (first.kind === 'mail.partyInvite') {
-      // Invites go to addresses that may never have asked for anything: they share the per-address cap with every
-      // other email, and one over it is dropped, not retried. A party deleted or drawn since then has nothing to join.
+      // Invites go to addresses that may never have asked for anything: they share the per-address limit with every
+      // other email (a Rate Limiting binding, so nothing is stored for the address), and one over it is dropped, not
+      // retried. A party deleted or drawn since then has nothing to join.
       const party = this.liveParty();
-      if (!party || party.is_closed || !await this.env.USER.getByName(first.email).countMail(ADDRESS_QUOTA)) {
+      if (!party || party.is_closed) {
+        return;
+      }
+      // They also count against the limit on all emails together. Over it, the invite waits for the outbox's next try:
+      // the host asked for it. Taken before the per-address limit, so a retry doesn't count against the address twice.
+      if (!await takeAllMail(this.env)) {
+        throw new RetryLater('Over the limit on all emails together');
+      }
+      if (!await takeAddressLimit(this.env, first.email)) {
         return;
       }
       return await sendMail(this.env, first.email, renderPartyInvite({
         hostName: first.hostName,
         party: { name: first.partyName, url: `${this.env.FRONTEND_URL}/p/${first.slug}/`, isProtected: first.isProtected },
+        assetsUrl: this.env.PUBLIC_URL,
+      }));
+    }
+    if (first.kind === 'mail.partyPruned') {
+      return await sendMail(this.env, first.email, renderPartyPruned({
+        party: { name: first.partyName, url: `${this.env.FRONTEND_URL}/p/${first.slug}/` },
+        restorableUntil: first.restorableUntil,
         assetsUrl: this.env.PUBLIC_URL,
       }));
     }
@@ -968,6 +1135,7 @@ export class PartyDO extends DurableObject<Env> {
     if (this.hasSchema()) {
       this.ensureSchema(); // parties created before tombstones existed have no `cancelled` table yet
       this.purgeIfExpired();
+      this.pruneIfDue();
     }
     await this.runOutbox(() => true);
   }
@@ -975,14 +1143,29 @@ export class PartyDO extends DurableObject<Env> {
   /** Delivers due outbox messages that match `filter`, then sets the next alarm. */
   private async runOutbox(filter: (message: OutboxMessage) => boolean, skipRetryWait = false) {
     await this.outbox.process(filter, skipRetryWait);
-    // The next alarm: the earliest retry, or when a deleted party's restore window ends (it is erased then).
-    const retry = this.outbox.nextAttemptAt();
-    const deletedAt = this.hasSchema() ? this.party()?.deleted_at : null;
-    const purge = deletedAt ? deletedAt + RESTORE_WINDOW_MS : null;
-    const next = [retry, purge].filter((at): at is number => at !== null);
-    if (next.length) {
-      await this.ctx.storage.setAlarm(Math.max(Math.min(...next), Date.now()));
+    if (this.hasSchema()) {
+      this.tidy();
     }
+    const next = this.nextAlarm();
+    if (next !== null) {
+      await this.ctx.storage.setAlarm(next);
+    }
+  }
+
+  /**
+   * When the alarm should next run: the earliest outbox retry, the end of a deleted party's restore window (it is
+   * erased then), when the oldest invite is due to be deleted, or when an open party is due to be pruned. Null when
+   * there's nothing to wait for.
+   */
+  private nextAlarm(): number | null {
+    const retry = this.outbox.nextAttemptAt();
+    const party = this.hasSchema() ? this.party() : null;
+    const purge = party ? this.restorableUntil(party) : null;
+    const prune = party && !party.is_closed && !party.deleted_at ? party.prune_at : null;
+    const oldestInvite = this.hasSchema() ? this.sql.exec<{ at: number | null }>('SELECT MIN(invited_at) AS at FROM invites').one().at : null;
+    const forget = oldestInvite === null ? null : oldestInvite + REINVITE_AFTER_MS;
+    const next = [retry, purge, prune, forget].filter((at): at is number => at !== null);
+    return next.length ? Math.max(Math.min(...next), Date.now()) : null;
   }
 
   /** Number of undelivered outbox messages. Used by tests. */

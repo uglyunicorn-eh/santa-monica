@@ -4,9 +4,9 @@ import * as v from 'valibot';
 import { action } from 'src/api/action';
 import { ApiContext, ApiEnv, RequestSession, clientIp } from 'src/api/context';
 import { fail, notSignedIn } from 'src/api/errors';
-import { idempotencyKey, readBody, readPartyCode, send } from 'src/api/input';
-import { liveRequest, passUpgrade } from 'src/api/live';
-import { admitLegacyCode } from 'src/api/rateLimit';
+import { idempotencyKey, readBody, send } from 'src/api/input';
+import { invalidTicket, liveRequest, passUpgrade } from 'src/api/live';
+import { REFUSALS, admit, admitPartyCode } from 'src/api/rateLimit';
 import { PARTY_CODE_ALPHABET, PARTY_CODE_LENGTH, bodies, invites, party as partyJson } from 'src/api/schemas';
 import { canonicalEmail } from 'src/utils/email';
 import { optionalSession, requireSession } from 'src/api/session';
@@ -15,6 +15,7 @@ import { newObjectId } from 'src/utils/ids';
 import { randomString } from 'src/utils/strings/random';
 import { partyRef } from 'src/utils/logRef';
 import { annotate } from 'src/utils/tracing';
+import { cachedView, forgetView, keepView, viewTtl } from 'src/api/viewCache';
 
 const SLUG_ATTEMPTS = 10;
 
@@ -47,23 +48,13 @@ function anonymousView(view: PartyView): PartyView | null {
 
 const session = (c: ApiContext): RequestSession => c.get('session')!;
 
-/**
- * Party codes are how a party without a secret phrase is reached, and any route that takes one tells whether it
- * exists. So every one of them is limited per client: 60 codes a minute, 10 for old 5-letter codes.
- */
-async function admitCode(c: ApiContext, code: string) {
-  annotate({ 'party.ref': await partyRef(c.env, code) });
-  const { success } = await c.env.PARTY_LOOKUP_RATE_LIMIT_IP.limit({ key: clientIp(c) });
-  if (!success) {
-    throw fail('rate_limited', 'Too many party lookups. Please wait a minute and try again.', 'party');
-  }
-  await admitLegacyCode(c.env, clientIp(c), code, 'party');
-}
+/** Admits a party code for this client (`admitPartyCode`). Returns its log ref. */
+const admitCode = (c: ApiContext, code: string) => admitPartyCode(c.env, clientIp(c), code);
 
-/** A party write's body, after the code passed `admitCode`. */
+/** A party write's body, after the code passed `admitCode`. The kept signed-out view of the party is forgotten after. */
 async function readPartyWrite<S extends typeof bodies.partyAction | typeof bodies.joinParty | typeof bodies.invite>(c: ApiContext, schema: S) {
   const body = await readBody(c, schema);
-  await admitCode(c, body.code);
+  c.set('changedParty', await admitCode(c, body.code));
   return body as v.InferOutput<S>;
 }
 
@@ -78,22 +69,47 @@ async function verified(c: ApiContext) {
 
 export const parties = new Hono<ApiEnv>();
 
+// After a write (join, leave, draw, invite, delete, restore), this isolate's kept signed-out view of the party is out
+// of date: forget it, so the next lookup here sees the change. A lookup that started before the write and finishes
+// after it keeps nothing either (`keepView` checks when it started), so it can't put the old view back.
+parties.use(async (c, next) => {
+  await next();
+  const ref = c.get('changedParty');
+  if (ref) {
+    forgetView(ref);
+  }
+});
+
 /**
- * Looks up a party by code. Anyone gets a limited view; members see more. A signed-in lookup checks the session at
- * the same time as it reads the party (one call each, in parallel); a revoked token sees what anyone sees.
+ * A party as this person sees it. Anyone gets a limited view; members see more. A signed-in lookup checks the session
+ * at the same time as it reads the party (one call each, in parallel); a revoked token sees what anyone sees. Without
+ * a session, the view may come from the short-lived cache in `src/api/viewCache.ts`, with no call at all.
  */
-parties.get('/', optionalSession, action('party', async (c, span) => {
-  const code = readPartyCode(c);
-  await admitCode(c, code);
+async function lookUp(c: ApiContext, span: Span, code: string) {
+  const ref = await admitCode(c, code);
   const s = c.get('session');
-  const stub = c.env.PARTY.getByName(code);
-  const [view, user] = await Promise.all([stub.view(s?.userId), s ? s.verify() : null]);
-  const seen = view && (user ? view : anonymousView(view));
+  const kept = s ? undefined : cachedView(ref);
+  annotate({ 'party.cached': Boolean(kept) });
+  let seen = kept ?? null;
+  if (!kept) {
+    const startedAt = Date.now();
+    const [view, user] = await Promise.all([c.env.PARTY.getByName(code).view(s?.userId), s ? s.verify() : null]);
+    seen = view && (user ? view : anonymousView(view));
+    if (seen && !s) {
+      keepView(ref, seen, viewTtl(c.env), Date.now(), startedAt);
+    }
+  }
   span.setAttributes({ 'party.found': Boolean(seen), 'party.joined': seen?.isJoined });
   if (!seen) {
     throw fail('not_found', 'Party does not exist.', 'party');
   }
   return send(c, partyJson, seen);
+}
+
+/** Looks up a party by its code, in the body, so the code stays out of URLs: browser history, proxy logs, HAR files. */
+parties.post('/lookup', optionalSession, action('lookUpParty', async (c, span) => {
+  const { code } = await readBody(c, bodies.partyAction);
+  return lookUp(c, span, code);
 }));
 
 /**
@@ -164,16 +180,12 @@ parties.post('/join', requireSession, action('joinParty', async c => {
   const { code, name, password } = await readPartyWrite(c, bodies.joinParty);
   const s = session(c);
   // Joining is also limited per user, so trying codes from many addresses doesn't get around it.
-  const { success } = await c.env.JOIN_RATE_LIMIT_USER.limit({ key: s.userId });
-  annotate({ 'party.join_rate_limited': !success });
-  if (!success) {
-    throw fail('rate_limited', "Whoa, that's a lot of tries! Please wait a minute and try again.", 'party');
-  }
+  await admit(c.env, 'JOIN_RATE_LIMIT_USER', s.userId, REFUSALS.joins);
   return sendParty(c, await c.env.PARTY.getByName(code).join(
     { id: s.userId, email: s.email, name },
     name,
     password || null,
-    { tokenVersion: s.tokenVersion },
+    { tokenVersion: s.tokenVersion, proof: s.proof },
   ));
 }));
 
@@ -199,11 +211,8 @@ parties.post('/draw', requireSession, action('closeParty', async c => {
 parties.post('/invite', requireSession, action('inviteToParty', async c => {
   const { code, emails } = await readPartyWrite(c, bodies.invite);
   const s = session(c);
-  const { success } = await c.env.INVITE_RATE_LIMIT_USER.limit({ key: s.userId });
-  annotate({ 'party.invite_rate_limited': !success, 'party.invite_count': emails.length });
-  if (!success) {
-    throw fail('rate_limited', "That's a lot of invites at once. Please wait a minute and try again.", 'emails');
-  }
+  annotate({ 'party.invite_count': emails.length });
+  await admit(c.env, 'INVITE_RATE_LIMIT_USER', s.userId, REFUSALS.invites);
   const user = await verified(c);
   const typed = new Map<string, string>();
   for (const email of emails) {
@@ -265,8 +274,11 @@ parties.post('/restore', requireSession, action('restoreParty', async c => {
  * watch; anyone else, and a party that doesn't exist, is refused alike.
  */
 parties.get('/live', action('watchParty', async c => {
-  const code = readPartyCode(c);
-  const { request } = await liveRequest(c);
-  const answer = await c.env.PARTY.getByName(code).fetch(request);
+  // The party comes from the ticket (POST /v1/live/ticket with its code), never from the URL.
+  const { party, request } = await liveRequest(c);
+  if (!party) {
+    throw invalidTicket();
+  }
+  const answer = await c.env.PARTY.getByName(party).fetch(request);
   return passUpgrade(answer, () => fail('forbidden', 'Only the party\'s members can watch it.', 'party'));
 }));

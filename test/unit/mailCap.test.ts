@@ -1,113 +1,134 @@
 import { env, runInDurableObject } from 'cloudflare:test';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { EMAILS_PER_ADDRESS_PER_HOUR } from 'src/api/rateLimit';
+import { forgetRequests } from 'src/api/requestMemo';
 import { isPermanentMailError, recipientAllowed } from 'src/mail';
-import { MAIL_QUOTA_WINDOW_MS } from 'src/do/UserDO';
+import { mailRef } from 'src/utils/logRef';
 
 import { denied, mailer, request, signIn, testEnv, uniqueEmail } from './helpers';
 
 const key = () => crypto.randomUUID();
 
-/** How many emails the address has had counted in the current window. */
-const counted = (email: string) => runInDurableObject(env.USER.getByName(email), async (_i, state) =>
-  state.storage.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM mail_sent').one().n);
+/** A per-address limit that records the keys it was asked for, refusing the ones in `refuse`. */
+function addressLimit(refuse: string[] = []) {
+  const keys: string[] = [];
+  return { keys, limit: { limit: async ({ key }: { key: string }) => { keys.push(key); return { success: !refuse.includes(key) }; } } as unknown as RateLimit };
+}
 
-/** Moves the address's counted emails out of the window, as if an hour had passed. */
-const anHourLater = (email: string) => runInDurableObject(env.USER.getByName(email), async (_i, state) => {
-  state.storage.sql.exec('UPDATE mail_sent SET at = at - ?', MAIL_QUOTA_WINDOW_MS);
-});
+/** What a user object has stored: its tables, leaving out the runtime's own. */
+const storedTables = (email: string) => runInDurableObject(env.USER.getByName(email), async (_i, state) =>
+  state.storage.sql.exec<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '_cf_%'").toArray().map(r => r.name));
 
-const capped = { status: 429, body: { error: { code: 'rate_limited', message: "That's a lot of emails for this address. Please try again in an hour." } } };
+const overLimit = { status: 429, body: { error: { code: 'rate_limited' } } };
 
-describe('the per-address email cap', () => {
-  const magicLink = (email: string, options: { key?: string; e?: typeof env } = {}) =>
-    request('POST', '/v1/auth/magic-link', { body: { email }, key: options.key, env: options.e });
+describe('the per-address email limit', () => {
+  afterEach(forgetRequests);
 
-  it(`allows ${EMAILS_PER_ADDRESS_PER_HOUR} sign-in links an hour to one address, then refuses more until the hour has passed`, async () => {
-    const email = uniqueEmail();
-    const { sent, EMAIL } = mailer();
-    for (let i = 0; i < EMAILS_PER_ADDRESS_PER_HOUR; i++) {
-      expect((await magicLink(email, { e: testEnv({ EMAIL }), key: i % 2 ? key() : undefined })).status).toBe(202);
-    }
-    expect(await magicLink(email, { e: testEnv({ EMAIL }) })).toMatchObject({ ...capped, body: { error: { ...capped.body.error, field: 'email' } } });
-    expect(await magicLink(email, { e: testEnv({ EMAIL }), key: key() })).toMatchObject(capped);
-    expect(sent).toHaveLength(EMAILS_PER_ADDRESS_PER_HOUR);
-    // Another address isn't affected.
-    expect((await magicLink(uniqueEmail())).status).toBe(202);
+  const magicLink = (email: string, options: { key?: string; e?: typeof env; party?: string } = {}) =>
+    request('POST', '/v1/auth/magic-link', { body: { email, ...(options.party ? { party: options.party } : {}) }, key: options.key, env: options.e });
 
-    await anHourLater(email);
-    expect((await magicLink(email, { e: testEnv({ EMAIL }) })).status).toBe(202);
-    expect(sent).toHaveLength(EMAILS_PER_ADDRESS_PER_HOUR + 1);
+  it('counts each address by its hash, never the address itself, for sign-in, account and email-change links', async () => {
+    const address = addressLimit();
+    const e = testEnv({ MAIL_RATE_LIMIT_ADDRESS: address.limit });
+    const email = uniqueEmail('hashed');
+    expect((await magicLink(email, { e })).status).toBe(202);
+    const who = await signIn(uniqueEmail('account'), 'Account');
+    expect((await request('POST', '/v1/me/deletion', { token: who.token, env: e })).status).toBe(202);
+    const newEmail = uniqueEmail('new');
+    expect((await request('POST', '/v1/me/email-change', { token: who.token, body: { email: newEmail }, env: e })).status).toBe(202);
+    expect(address.keys).toEqual([await mailRef(env, email), await mailRef(env, who.email), await mailRef(env, newEmail)]);
+    expect(address.keys.join()).not.toContain('@');
   });
 
-  it('counts a repeated request once, and keeps no claim for a refused one', async () => {
-    const email = uniqueEmail();
+  it('refuses a sign-in link, an account link or an email-change link over it', async () => {
+    const e = testEnv({ MAIL_RATE_LIMIT_ADDRESS: denied });
+    expect(await magicLink(uniqueEmail(), { e })).toMatchObject({ ...overLimit, body: { error: { field: 'email' } } });
+    const who = await signIn(uniqueEmail('account'), 'Account');
+    expect(await request('POST', '/v1/me/deletion', { token: who.token, env: e })).toMatchObject(overLimit);
+    expect(await request('POST', '/v1/me/email-change', { token: who.token, body: { email: uniqueEmail('new') }, env: e })).toMatchObject(overLimit);
+  });
+
+  it('never holds back the notice of an email change to the current address', async () => {
+    const { sent, EMAIL } = mailer();
+    const who = await signIn(uniqueEmail('owner'), 'Owner');
+    // The current address is over its limit; the new one isn't.
+    const address = addressLimit([await mailRef(env, who.email)]);
+    const newEmail = uniqueEmail('new');
+    expect((await request('POST', '/v1/me/email-change', { token: who.token, body: { email: newEmail }, env: testEnv({ EMAIL, MAIL_RATE_LIMIT_ADDRESS: address.limit }) })).status).toBe(202);
+    expect(sent.map(m => m.to).sort()).toEqual([newEmail, who.email].sort());
+    expect(address.keys).toEqual([await mailRef(env, newEmail)]);
+  });
+
+  it('answers a repeated sign-in request from memory: one email, one count', async () => {
+    const { sent, EMAIL } = mailer();
+    const address = addressLimit();
+    const e = testEnv({ EMAIL, MAIL_RATE_LIMIT_ADDRESS: address.limit });
+    const email = uniqueEmail('repeat');
     const k = key();
     for (let i = 0; i < 3; i++) {
-      expect((await magicLink(email, { key: k })).status).toBe(202);
+      expect((await magicLink(email, { key: k, e })).status).toBe(202);
     }
-    expect(await counted(email)).toBe(1);
-    for (let i = 1; i < EMAILS_PER_ADDRESS_PER_HOUR; i++) {
-      await magicLink(email);
-    }
-    const refused = key();
-    expect(await magicLink(email, { key: refused })).toMatchObject(capped);
-    expect(await env.USER.getByName(email).seenMailRequest(refused, '')).toBe(false);
+    expect(sent).toHaveLength(1);
+    expect(address.keys).toHaveLength(1);
+    // The same key for another party is a new request.
+    const host = await signIn(uniqueEmail('host'), 'Host');
+    const { body: party } = await request('POST', '/v1/parties', { token: host.token, body: { name: 'P' } });
+    expect((await magicLink(email, { key: k, e, party: party.code })).status).toBe(202);
+    expect(sent).toHaveLength(2);
   });
 
-  it('gives the count back when the email could not be sent', async () => {
+  it("remembers nothing for a request whose email didn't go out, so a retry sends it", async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const email = uniqueEmail();
-    expect((await magicLink(email, { key: key(), e: testEnv({ EMAIL: mailer(() => true).EMAIL }) })).status).toBe(503);
-    expect(await counted(email)).toBe(0);
+    let down = true;
+    const { sent, EMAIL } = mailer(() => down);
+    const e = testEnv({ EMAIL });
+    const email = uniqueEmail('retry');
+    const k = key();
+    expect((await magicLink(email, { key: k, e })).status).toBe(503);
+    down = false;
+    expect((await magicLink(email, { key: k, e })).status).toBe(202);
+    expect(sent).toHaveLength(1);
     error.mockRestore();
   });
 
-  it('shares one count between sign-in links and account links', async () => {
-    const who = await signIn();
-    for (let i = 0; i < EMAILS_PER_ADDRESS_PER_HOUR - 1; i++) {
-      await magicLink(who.email);
-    }
-    expect((await request('POST', '/v1/me/deletion', { token: who.token, key: key() })).status).toBe(202);
-    expect(await request('POST', '/v1/me/deletion', { token: who.token, key: key() })).toMatchObject(capped);
-    expect(await request('POST', '/v1/me/deletion', { token: who.token })).toMatchObject(capped);
-    expect(await magicLink(who.email)).toMatchObject(capped);
+  it('takes one count, and only one, for a request the all-emails limit refuses', async () => {
+    const address = addressLimit();
+    expect((await magicLink(uniqueEmail('spike'), { e: testEnv({ MAIL_RATE_LIMIT_ADDRESS: address.limit, MAIL_RATE_LIMIT_ALL: denied }) })).status).toBe(429);
+    expect(address.keys).toHaveLength(1);
+  });
+});
+
+describe('nothing stored before a sign-in link is used', () => {
+  it('leaves no stored object for a magic-link request, and makes the account only when the link is used', async () => {
+    const { sent, EMAIL } = mailer();
+    const email = uniqueEmail('not-yet');
+    expect((await request('POST', '/v1/auth/magic-link', { body: { email }, key: key(), env: testEnv({ EMAIL }) })).status).toBe(202);
+    expect(await storedTables(email)).toEqual([]);
+    const link = /#([\w-]+(?:\.[\w-]*){4})/.exec(sent[0].text)![1];
+    expect((await request('POST', '/v1/auth/session', { body: { token: link } })).status).toBe(200);
+    expect(await storedTables(email)).toContain('user');
   });
 
-  it('caps email-change links to the new address, but never blocks the change over notices to the current one', async () => {
-    const who = await signIn();
-    const ask = (email: string, k?: string) => request('POST', '/v1/me/email-change', { token: who.token, key: k, body: { email } });
+  it('leaves no stored object for an email-change request to a new address, or a look at whether it is taken', async () => {
+    const who = await signIn(uniqueEmail('mover'), 'Mover');
+    const newEmail = uniqueEmail('elsewhere');
+    expect((await request('POST', '/v1/me/email-change', { token: who.token, body: { email: newEmail } })).status).toBe(202);
+    expect(await storedTables(newEmail)).toEqual([]);
+    expect(await env.USER.getByName(newEmail).get()).toBeNull();
+    expect(await env.USER.getByName(newEmail).listParties(10)).toEqual([]);
+    expect(await env.USER.getByName(newEmail).checkAccountChange('x', 'y')).toBe('gone');
+    expect(await env.USER.getByName(newEmail).pendingOutbox()).toBe(0);
+    await env.USER.getByName(newEmail).releaseMailRequest('k', '');
+    expect(await storedTables(newEmail)).toEqual([]);
+  });
 
-    const busy = uniqueEmail('busy');
-    for (let i = 0; i < EMAILS_PER_ADDRESS_PER_HOUR; i++) {
-      await magicLink(busy);
-    }
-    expect(await ask(busy)).toMatchObject({ ...capped, body: { error: { ...capped.body.error, field: 'email' } } });
-
-    // The current address has had its fill, yet the change still goes ahead, and its notice is counted.
-    for (let i = 0; i < EMAILS_PER_ADDRESS_PER_HOUR; i++) {
-      await magicLink(who.email);
-    }
-    const { sent, EMAIL } = mailer();
-    const before = await counted(who.email);
-    const fresh = uniqueEmail('fresh');
-    expect((await request('POST', '/v1/me/email-change', { token: who.token, key: key(), body: { email: fresh }, env: testEnv({ EMAIL }) })).status).toBe(202);
-    expect(sent.map(m => m.to)).toEqual([fresh, who.email]);
-    expect([await counted(who.email), await counted(fresh)]).toEqual([before + 1, 1]);
-
-    // A refused change gives back what it counted.
-    const counts = await counted(who.email);
-    const limited = await request('POST', '/v1/me/email-change', {
-      token: who.token, key: key(), body: { email: uniqueEmail() }, env: testEnv({ ENTER_RATE_LIMIT_EMAIL: denied }),
+  it('keeps the old count table out of objects that had one', async () => {
+    const who = await signIn(uniqueEmail('old'), 'Old');
+    await runInDurableObject(env.USER.getByName(who.email), async (instance, state) => {
+      state.storage.sql.exec('CREATE TABLE IF NOT EXISTS mail_sent (at INTEGER NOT NULL)');
+      (instance as any).setUp();
     });
-    expect(limited.status).toBe(429);
-    expect(await counted(who.email)).toBe(counts);
-
-    // An address with an account gets a notice instead of the link, counted the same way.
-    const taken = await signIn();
-    expect((await ask(taken.email, key())).status).toBe(202);
-    expect(await counted(taken.email)).toBe(1);
+    expect(await storedTables(who.email)).not.toContain('mail_sent');
   });
 });
 

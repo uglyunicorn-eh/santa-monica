@@ -22,30 +22,42 @@
   "vars": {
     "PUBLIC_URL": "https://api.gnomik.me",
     "FRONTEND_URL": "https://gnomik.me",
-    "ALLOWED_ORIGINS": "https://gnomik.me,https://*.santa-57a.pages.dev"
+    "ALLOWED_ORIGINS": "https://gnomik.me,https://*.santa-57a.pages.dev",
+    // Only session tokens bound to a browser's key (DPoP) count. Turn on with the web app release that binds at sign-in
+    // (every session starts fresh then), after the checks in the README's deploy notes. Off again is the kill switch.
+    "REQUIRE_BOUND_SESSIONS": "false"
   },
   "durable_objects": {
     "bindings": [
       { "name": "PARTY", "class_name": "PartyDO" },
-      { "name": "USER", "class_name": "UserDO" }
+      { "name": "USER", "class_name": "UserDO" },
+      { "name": "STATS", "class_name": "StatsDO" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["PartyDO", "UserDO"] }
+    { "tag": "v1", "new_sqlite_classes": ["PartyDO", "UserDO"] },
+    // The Party'o'meter (src/do/StatsDO.ts).
+    { "tag": "v2", "new_sqlite_classes": ["StatsDO"] }
   ],
   "send_email": [
     { "name": "EMAIL", "allowed_sender_addresses": ["info@gnomik.me"] }
   ],
   "ratelimits": [
     { "name": "ENTER_RATE_LIMIT_IP", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } },
-    { "name": "ENTER_RATE_LIMIT_EMAIL", "namespace_id": "1002", "simple": { "limit": 3, "period": 60 } },
+    // Emails to one address, keyed by a hash of it (`mailRef`), never the address: the only per-address email limit.
+    { "name": "MAIL_RATE_LIMIT_ADDRESS", "namespace_id": "1002", "simple": { "limit": 3, "period": 60 } },
     // Party codes are the key to a party without a secret phrase, so looking them up and joining are limited too.
     { "name": "PARTY_LOOKUP_RATE_LIMIT_IP", "namespace_id": "1003", "simple": { "limit": 60, "period": 60 } },
     // Old 5-letter codes (about 1.2·10^7 of them) are far easier to guess than 8-letter ones, so trying them is slower.
     { "name": "LEGACY_CODE_LOOKUP_RATE_LIMIT_IP", "namespace_id": "1005", "simple": { "limit": 10, "period": 60 } },
     { "name": "JOIN_RATE_LIMIT_USER", "namespace_id": "1004", "simple": { "limit": 10, "period": 60 } },
     // Each invite request emails up to 10 addresses, so hosts get only a few a minute.
-    { "name": "INVITE_RATE_LIMIT_USER", "namespace_id": "1006", "simple": { "limit": 3, "period": 60 } }
+    { "name": "INVITE_RATE_LIMIT_USER", "namespace_id": "1006", "simple": { "limit": 3, "period": 60 } },
+    // All sign-in and account emails together, so a spike or a spam run can't use up the sending quota. Counted per
+    // location and roughly: a backstop, not an exact cap.
+    { "name": "MAIL_RATE_LIMIT_ALL", "namespace_id": "1007", "simple": { "limit": 60, "period": 60 } },
+    // Opening the Party'o'meter's WebSocket. A page opens one, and again after a reconnect.
+    { "name": "STATS_WATCH_RATE_LIMIT_IP", "namespace_id": "1008", "simple": { "limit": 30, "period": 60 } }
   ],
 
   "env": {
@@ -62,12 +74,14 @@
       "vars": {
         "PUBLIC_URL": "https://gnomik-api-preview.uglyunicorn.workers.dev",
         "FRONTEND_URL": "http://localhost:4321",
-        "ALLOWED_ORIGINS": "https://gnomik.me,https://*.santa-57a.pages.dev,http://localhost:4321,http://localhost:4322,http://localhost:4323"
+        "ALLOWED_ORIGINS": "https://gnomik.me,https://*.santa-57a.pages.dev,http://localhost:4321,http://localhost:4322,http://localhost:4323",
+        "REQUIRE_BOUND_SESSIONS": "false"
       },
       "durable_objects": {
         "bindings": [
           { "name": "PARTY", "class_name": "PartyDO" },
-          { "name": "USER", "class_name": "UserDO" }
+          { "name": "USER", "class_name": "UserDO" },
+          { "name": "STATS", "class_name": "StatsDO" }
         ]
       },
       "send_email": [
@@ -75,11 +89,13 @@
       ],
       "ratelimits": [
         { "name": "ENTER_RATE_LIMIT_IP", "namespace_id": "2001", "simple": { "limit": 10, "period": 60 } },
-        { "name": "ENTER_RATE_LIMIT_EMAIL", "namespace_id": "2002", "simple": { "limit": 3, "period": 60 } },
+        { "name": "MAIL_RATE_LIMIT_ADDRESS", "namespace_id": "2002", "simple": { "limit": 3, "period": 60 } },
         { "name": "PARTY_LOOKUP_RATE_LIMIT_IP", "namespace_id": "2003", "simple": { "limit": 60, "period": 60 } },
         { "name": "LEGACY_CODE_LOOKUP_RATE_LIMIT_IP", "namespace_id": "2005", "simple": { "limit": 10, "period": 60 } },
         { "name": "JOIN_RATE_LIMIT_USER", "namespace_id": "2004", "simple": { "limit": 10, "period": 60 } },
-        { "name": "INVITE_RATE_LIMIT_USER", "namespace_id": "2006", "simple": { "limit": 3, "period": 60 } }
+        { "name": "INVITE_RATE_LIMIT_USER", "namespace_id": "2006", "simple": { "limit": 3, "period": 60 } },
+        { "name": "MAIL_RATE_LIMIT_ALL", "namespace_id": "2007", "simple": { "limit": 60, "period": 60 } },
+        { "name": "STATS_WATCH_RATE_LIMIT_IP", "namespace_id": "2008", "simple": { "limit": 30, "period": 60 } }
       ],
       // Logs stay in Workers Logs only, so test traffic stays out of Better Stack.
       "observability": {
@@ -92,13 +108,16 @@
           // Previews are public, so they email only these (comma-separated addresses and @domains). Add yours to test.
           "EMAIL_ALLOWLIST": "@uglyunicorn.ca,@gnomik.me",
           "FRONTEND_URL": "http://localhost:4321",
-          "ALLOWED_ORIGINS": "https://gnomik.me,https://*.santa-57a.pages.dev,http://localhost:4321,http://localhost:4322,http://localhost:4323"
+          "ALLOWED_ORIGINS": "https://gnomik.me,https://*.santa-57a.pages.dev,http://localhost:4321,http://localhost:4322,http://localhost:4323",
+          // Previews can turn this on before production, to try it with the app.
+          "REQUIRE_BOUND_SESSIONS": "false"
         },
         // The code reads these from env, so Previews need them declared (each Preview still gets its own storage).
         "durable_objects": {
           "bindings": [
             { "name": "PARTY", "class_name": "PartyDO" },
-            { "name": "USER", "class_name": "UserDO" }
+            { "name": "USER", "class_name": "UserDO" },
+            { "name": "STATS", "class_name": "StatsDO" }
           ]
         },
         "send_email": [
@@ -106,11 +125,13 @@
         ],
         "ratelimits": [
           { "name": "ENTER_RATE_LIMIT_IP", "namespace_id": "2001", "simple": { "limit": 10, "period": 60 } },
-          { "name": "ENTER_RATE_LIMIT_EMAIL", "namespace_id": "2002", "simple": { "limit": 3, "period": 60 } },
+          { "name": "MAIL_RATE_LIMIT_ADDRESS", "namespace_id": "2002", "simple": { "limit": 3, "period": 60 } },
           { "name": "PARTY_LOOKUP_RATE_LIMIT_IP", "namespace_id": "2003", "simple": { "limit": 60, "period": 60 } },
           { "name": "LEGACY_CODE_LOOKUP_RATE_LIMIT_IP", "namespace_id": "2005", "simple": { "limit": 10, "period": 60 } },
           { "name": "JOIN_RATE_LIMIT_USER", "namespace_id": "2004", "simple": { "limit": 10, "period": 60 } },
-        { "name": "INVITE_RATE_LIMIT_USER", "namespace_id": "2006", "simple": { "limit": 3, "period": 60 } }
+        { "name": "INVITE_RATE_LIMIT_USER", "namespace_id": "2006", "simple": { "limit": 3, "period": 60 } },
+          { "name": "MAIL_RATE_LIMIT_ALL", "namespace_id": "2007", "simple": { "limit": 60, "period": 60 } },
+          { "name": "STATS_WATCH_RATE_LIMIT_IP", "namespace_id": "2008", "simple": { "limit": 30, "period": 60 } }
         ],
         "observability": {
           "redact_query_string": true,

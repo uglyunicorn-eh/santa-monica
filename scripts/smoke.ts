@@ -31,9 +31,16 @@ const checks: Check[] = [
     },
   },
   {
+    name: "Party'o'meter answers a count",
+    run: async () => {
+      const { status, body } = await api('/v1/stats');
+      assert(status === 200 && Number.isInteger(body?.rolled), `unexpected response ${status} ${JSON.stringify(body)}`);
+    },
+  },
+  {
     name: 'unknown party is 404',
     run: async () => {
-      const { status, body } = await api('/v1/parties?code=QQQQQ');
+      const { status, body } = await api('/v1/parties/lookup', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"code":"QQQQQQQQ"}' });
       assert(status === 404 && body?.error?.code === 'not_found', `unexpected response ${status} ${JSON.stringify(body)}`);
     },
   },
@@ -74,6 +81,27 @@ const checks: Check[] = [
     },
   },
   {
+    name: 'bound sessions: the app may send DPoP proofs and read the clock header',
+    run: async () => {
+      const preflight = await fetch(new URL('/v1/me', base), {
+        method: 'OPTIONS',
+        headers: { origin: 'https://gnomik.me', 'access-control-request-method': 'GET', 'access-control-request-headers': 'authorization,dpop' },
+      });
+      const allowed = preflight.headers.get('access-control-allow-headers') ?? '';
+      assert(preflight.status === 204 && allowed.includes('dpop'), `preflight answered HTTP ${preflight.status} (${allowed})`);
+      const res = await fetch(new URL('/v1/stats', base), { headers: { origin: 'https://gnomik.me' } });
+      const exposed = res.headers.get('access-control-expose-headers') ?? '';
+      assert(exposed.includes('dpop-time'), `DPoP-Time is not readable across origins (${exposed})`);
+    },
+  },
+  {
+    name: 'a token with a proof that does not hold is 401, not an error',
+    run: async () => {
+      const { status, body } = await api('/v1/me', { headers: { authorization: 'Bearer not.a.token', dpop: 'not.a.proof' } });
+      assert(status === 401 && body?.error?.code === 'unauthenticated', `unexpected response ${status} ${JSON.stringify(body)}`);
+    },
+  },
+  {
     name: 'email images',
     run: async () => {
       for (const file of ['gnomik.png', 'uglyunicorn.png', 'party.gif']) {
@@ -91,7 +119,8 @@ const READY_TIMEOUT_MS = 60_000;
 const startedAt = Date.now();
 const ready = async () => {
   const home = await fetch(new URL('/', base)).then(res => res.status, () => 0);
-  return home === 200 ? await fetch(new URL('/v1/parties?code=READYZZZ', base)).then(res => res.status, () => 0) : home;
+  const lookup = () => fetch(new URL('/v1/parties/lookup', base), { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"code":"READYZZZ"}' });
+  return home === 200 ? await lookup().then(res => res.status, () => 0) : home;
 };
 while (true) {
   const status = await ready();

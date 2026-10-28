@@ -151,9 +151,10 @@ describe('looking up a party', () => {
     });
   });
 
-  it('answers 404 for unknown or malformed codes', async () => {
-    for (const code of ['QQQQQ', 'abc', '12345', 'QWERTYU']) {
-      expect(await viewParty(code)).toEqual({ status: 404, body: apiError('not_found', 'Party does not exist.', 'party') });
+  it('answers 404 for unknown codes and 400 for malformed ones', async () => {
+    expect(await viewParty('QQQQQ')).toEqual({ status: 404, body: apiError('not_found', 'Party does not exist.', 'party') });
+    for (const code of ['abc', '12345', 'QWERTYU']) {
+      expect(await viewParty(code)).toMatchObject({ status: 400, body: { error: { code: 'invalid', field: 'code' } } });
     }
   });
 
