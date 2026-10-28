@@ -26,6 +26,8 @@ const bindings = {
   // Public answers (signed-out party views, the stats) aren't cached in tests, so every request sees things as they are.
   // Tests of the caches turn them on.
   PUBLIC_CACHE_MS: '0',
+  // Production requires bound sessions; most tests sign in without a key. Tests of bound sessions turn it on.
+  REQUIRE_BOUND_SESSIONS: 'false',
 };
 
 export default defineConfig({

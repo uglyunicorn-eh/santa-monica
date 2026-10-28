@@ -24,9 +24,9 @@
     "PUBLIC_URL": "https://api.gnomik.me",
     "FRONTEND_URL": "https://gnomik.me",
     "ALLOWED_ORIGINS": "https://gnomik.me,https://*.santa-57a.pages.dev",
-    // Only session tokens bound to a browser's key (DPoP) count. Turn on with the web app release that binds at sign-in
-    // (every session starts fresh then), after the checks in the README's deploy notes. Off again is the kill switch.
-    "REQUIRE_BOUND_SESSIONS": "false"
+    // Only session tokens bound to a browser's key (DPoP) count. On since the web app binds at sign-in (santa-barbara
+    // #220). "false" is the kill switch, if bound requests start failing (docs/deployment.md).
+    "REQUIRE_BOUND_SESSIONS": "true"
   },
   "durable_objects": {
     "bindings": [
@@ -76,7 +76,7 @@
         "PUBLIC_URL": "https://gnomik-api-preview.uglyunicorn.workers.dev",
         "FRONTEND_URL": "http://localhost:4321",
         "ALLOWED_ORIGINS": "https://gnomik.me,https://*.santa-57a.pages.dev,http://localhost:4321,http://localhost:4322,http://localhost:4323",
-        "REQUIRE_BOUND_SESSIONS": "false"
+        "REQUIRE_BOUND_SESSIONS": "true"
       },
       "durable_objects": {
         "bindings": [
@@ -110,8 +110,8 @@
           "EMAIL_ALLOWLIST": "@uglyunicorn.ca,@gnomik.me",
           "FRONTEND_URL": "http://localhost:4321",
           "ALLOWED_ORIGINS": "https://gnomik.me,https://*.santa-57a.pages.dev,http://localhost:4321,http://localhost:4322,http://localhost:4323",
-          // Previews can turn this on before production, to try it with the app.
-          "REQUIRE_BOUND_SESSIONS": "false"
+          // Like production.
+          "REQUIRE_BOUND_SESSIONS": "true"
         },
         // The code reads these from env, so Previews need them declared (each Preview still gets its own storage).
         "durable_objects": {
