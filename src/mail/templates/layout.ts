@@ -1,5 +1,5 @@
 // The one layout every email uses, styled like the site (santa-barbara's docs/ui-kit.md): a white card on a light
-// grey page, the Cuprum font (Trebuchet where a mail app can't load it), teal links, and the content screens' buttons.
+// grey page, the Cuprum font (Trebuchet where a mail app can't load it), teal links, and pill buttons.
 // What goes in may hold {{placeholders}}; render() fills them later, HTML-escaping the values.
 
 const FONT = "Cuprum, 'Trebuchet MS', Helvetica, Arial, sans-serif";
@@ -22,8 +22,11 @@ export const actionTones = {
 type Options = {
   /** The line mail apps show beside the subject. */
   preheader: string;
-  /** "greeting": "Hola, Anonymous Santa Claus!" beside the gnome. Otherwise, an image across the card. */
-  header: 'greeting' | { image: string };
+  /**
+   * "greeting": "Hola, Anonymous Santa Claus!" beside the gnome. Otherwise, an image across the card, and with
+   * `greeting`, that line under it as the big heading (the account-deleted email's "Tchau…").
+   */
+  header: 'greeting' | { image: string; greeting?: string };
   title: string;
   titleAlign?: 'left' | 'center';
   /** HTML: paragraphs from p(). */
@@ -60,12 +63,16 @@ const image = (src: string) => `<tr>
               <td style="padding:0 0 8px;"><img src="${src}" width="534" alt="" style="display:block; width:100%; max-width:534px; height:auto; border:0; border-radius:8px;"></td>
             </tr>`;
 
+const heading = (text: string) => `<tr>
+              <td style="padding:16px 0 0;"><h1 style="margin:0; font-family:${FONT}; font-size:32px; line-height:38px; font-weight:700; color:${color.text};">${text}</h1></td>
+            </tr>`;
+
 const button = ({ label, url, color: bg, textColor }: NonNullable<Options['action']>) => `<tr>
               <td align="center" style="padding:16px 0 8px;">
                 <table cellpadding="0" cellspacing="0" border="0">
                   <tr>
-                    <td align="center" bgcolor="${bg}" style="border-radius:8px; background-color:${bg};">
-                      <a href="${url}" target="_blank" style="display:inline-block; padding:12px 24px; border-radius:8px; background-color:${bg}; color:${textColor}; font-family:${FONT}; font-size:20px; line-height:24px; font-weight:600; text-decoration:none;">${label}</a>
+                    <td align="center" bgcolor="${bg}" style="border-radius:999px; background-color:${bg};">
+                      <a href="${url}" target="_blank" style="display:inline-block; padding:12px 24px; border-radius:999px; background-color:${bg}; color:${textColor}; font-family:${FONT}; font-size:20px; line-height:24px; font-weight:600; text-decoration:none;">${label}</a>
                     </td>
                   </tr>
                 </table>
@@ -97,7 +104,7 @@ export const layout = ({ preheader, header, title, titleAlign = 'left', body, ac
             <tr>
               <td class="card" bgcolor="${color.card}" style="padding:32px; background-color:${color.card}; border:1px solid ${color.border}; border-radius:16px;">
                 <table width="100%" cellpadding="0" cellspacing="0" border="0">
-            ${header === 'greeting' ? greeting : image(header.image)}
+            ${header === 'greeting' ? greeting : image(header.image) + (header.greeting ? heading(header.greeting) : '')}
             <tr>
               <td align="${titleAlign}" style="padding:16px 0 12px;"><h2 style="margin:0; font-family:${FONT}; font-size:24px; line-height:30px; font-weight:600; color:${color.text}; text-align:${titleAlign};">${title}</h2></td>
             </tr>

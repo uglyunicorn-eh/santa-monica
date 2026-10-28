@@ -96,6 +96,9 @@ describe('mail templates', () => {
     const deleted = renderAccountDeleted({ assetsUrl: 'https://api.test' });
     expect(deleted.subject).toBe('Your Anonymous Santa Clauses account is deleted');
     expect(deleted.text).toContain("It's officially over");
+    expect(deleted.html).toContain(`https://api.test/email/farewell.png?v=${version}`);
+    expect(deleted.html).not.toContain('gnomik.png');
+    expect(deleted.html + deleted.text).toContain('Tchau, Anonymous Santa Claus!');
     expect([...deleted.html.matchAll(/href="([^"]*)"/g)].map(m => m[1])).toEqual(['https://uglyunicorn.ca/']);
     for (const mail of [deletion, change, notice, taken, deleted]) {
       expect(`${mail.subject}${mail.html}${mail.text}`).not.toMatch(/\{\{|ACTION_ROW/);
