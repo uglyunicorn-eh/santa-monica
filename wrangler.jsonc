@@ -8,10 +8,12 @@
   // betterstack-logs / betterstack-traces OpenTelemetry destinations set up in the Cloudflare dashboard.
   // Query strings are left out of request URLs in logs and traces: party routes carry the party code there (?code=),
   // and a code lets anyone into a party without a secret phrase.
+  // Sampling: traces, the large and costly part, for 1 request in 10. Logs for every one: head sampling drops a whole
+  // request, its error log included, and every 500 hands the person an `errorId` that has to be found in the logs.
   "observability": {
     "redact_query_string": true,
     "logs": { "enabled": true, "invocation_logs": true, "persist": true, "head_sampling_rate": 1, "destinations": ["betterstack-logs"] },
-    "traces": { "enabled": true, "persist": true, "head_sampling_rate": 1, "destinations": ["betterstack-traces"] }
+    "traces": { "enabled": true, "persist": true, "head_sampling_rate": 0.1, "destinations": ["betterstack-traces"] }
   },
   "assets": { "directory": "./public", "binding": "ASSETS" },
 
