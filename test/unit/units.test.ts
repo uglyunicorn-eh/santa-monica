@@ -53,7 +53,7 @@ describe('ids', () => {
 describe('mail templates', () => {
   it('fills the sign-in template with no SendGrid leftovers', () => {
     const mail = renderSignIn({ magicLink: 'https://gnomik.me/enter/link#abc.def', assetsUrl: 'https://api.test' });
-    expect(mail.subject).toBe('Sign in to Anonymous Ded Morozes');
+    expect(mail.subject).toBe('Sign in to Anonymous Santa Clauses');
     expect(mail.html).toContain('href="https://gnomik.me/enter/link#abc.def"');
     expect(mail.html).toContain(`https://api.test/email/gnomik.png?v=${version}`);
     expect(mail.html).toContain('href="https://gnomik.me/terms/"');
@@ -88,11 +88,11 @@ describe('mail templates', () => {
     expect(notice.html).toContain("This wasn&#39;t me");
 
     const taken = renderEmailTakenNotice({ email: 'a&b@example.com', assetsUrl: 'https://api.test' });
-    expect(taken.text).toContain('another Anonymous Ded Morozes account to a&b@example.com');
+    expect(taken.text).toContain('another Anonymous Santa Clauses account to a&b@example.com');
     expect(taken.html).toContain('a&amp;b@example.com');
     expect([...taken.html.matchAll(/href="([^"]*)"/g)].map(m => m[1])).toEqual(['https://uglyunicorn.ca/']);
     const deleted = renderAccountDeleted({ assetsUrl: 'https://api.test' });
-    expect(deleted.subject).toBe('Your Anonymous Ded Morozes account is deleted');
+    expect(deleted.subject).toBe('Your Anonymous Santa Clauses account is deleted');
     expect(deleted.text).toContain("It's officially over");
     expect([...deleted.html.matchAll(/href="([^"]*)"/g)].map(m => m[1])).toEqual(['https://uglyunicorn.ca/']);
     for (const mail of [deletion, change, notice, taken, deleted]) {

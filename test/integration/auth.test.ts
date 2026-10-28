@@ -16,8 +16,8 @@ describe('magic-link sign-in', () => {
 
     const [mail] = await mailbox(email);
     expect(mail.to).toEqual([email]);
-    expect(mail.from).toEqual({ email: 'info@gnomik.me', name: 'Anonymous Ded Morozes' });
-    expect(mail.subject).toBe('Sign in to Anonymous Ded Morozes');
+    expect(mail.from).toEqual({ email: 'info@gnomik.me', name: 'Anonymous Santa Clauses' });
+    expect(mail.subject).toBe('Sign in to Anonymous Santa Clauses');
     expect(mail.html).toContain('https://gnomik.me/enter/link#');
     expect(mail.html).toContain('https://api.test/email/gnomik.png');
     expect(mail.text).toContain('https://gnomik.me/terms/');

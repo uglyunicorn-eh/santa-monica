@@ -1,6 +1,6 @@
 # Credits
 
-Santa Monica, the API behind [Anonymous Ded Morozes](https://gnomik.me), is built on open-source software. Thank you to
+Santa Monica, the API behind [Anonymous Santa Clauses](https://gnomik.me), is built on open-source software. Thank you to
 everyone who makes it.
 
 The MIT license in [LICENSE](LICENSE) covers this project's own code. Each library below keeps its own license.

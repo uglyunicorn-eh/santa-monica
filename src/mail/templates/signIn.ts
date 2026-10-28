@@ -1,10 +1,10 @@
 import { a, actionTones, layout, p } from './layout';
 
 // Placeholders: {{magicLink}}, {{assetsUrl}}, {{assetsVersion}}.
-export const subject = "Sign in to Anonymous Ded Morozes";
+export const subject = "Sign in to Anonymous Santa Clauses";
 
 export const html = layout({
-  preheader: 'Olá, bonjour, привіт! Please follow the link to sign in to the Anonymous Ded Morozes, the most fun and friendly game!',
+  preheader: 'Olá, bonjour, привіт! Please follow the link to sign in to the Anonymous Santa Clauses, the most fun and friendly game!',
   header: 'greeting',
   title: 'Your magic link is ready!',
   body: p("If you didn't request this email, there's nothing to worry about — you can safely ignore it.")
@@ -13,10 +13,10 @@ export const html = layout({
   note: 'Please note that the magic link is available for a short period of time and will be expired in about 5 minutes. If you need more time just request another one.',
 });
 
-export const text = `Olá, bonjour, привіт! Please follow the link to sign in to the Anonymous Ded Morozes, the most fun and friendly game!
+export const text = `Olá, bonjour, привіт! Please follow the link to sign in to the Anonymous Santa Clauses, the most fun and friendly game!
 
 **************************
-Hola, Anonymous Ded Moroz!
+Hola, Anonymous Santa Claus!
 **************************
 
 -------------------------
