@@ -1,9 +1,10 @@
 import { env } from 'cloudflare:test';
 import * as jose from 'jose';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { isPermanentMailError, render } from 'src/mail';
 import { rateLimitKey } from 'src/utils/ip';
+import { isRetryable, retryRead } from 'src/utils/retry';
 import { createJwtHelpers, isExpiredToken } from 'src/utils/jwt';
 import { strToNodeId } from 'src/utils/strings/nodeId';
 import { randomInt, randomString } from 'src/utils/strings/random';
@@ -170,5 +171,44 @@ describe('rateLimitKey', () => {
     for (const ip of ['1::2::3', '1:2:3', '1:2:3:4:5:6:7:8:9', '1:2:3:4::5:6:7:8', 'g::1', '12345::1']) {
       expect([ip, rateLimitKey(ip)]).toEqual([ip, ip]);
     }
+  });
+});
+
+describe('retryRead', () => {
+  const fault = (props: Record<string, unknown>) => Object.assign(new Error('internal error; reference = x'), props);
+
+  it('reads once when the read works', async () => {
+    const read = vi.fn().mockResolvedValue('view');
+    expect(await retryRead(read)).toBe('view');
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads once more after a transient fault, with the read made afresh', async () => {
+    const read = vi.fn().mockRejectedValueOnce(fault({ retryable: true })).mockResolvedValueOnce('view');
+    expect(await retryRead(read)).toBe('view');
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it('gives up after the second fault', async () => {
+    const second = fault({ retryable: true });
+    const read = vi.fn().mockRejectedValueOnce(fault({ retryable: true })).mockRejectedValueOnce(second);
+    await expect(retryRead(read)).rejects.toBe(second);
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry an overloaded object, or any other error', async () => {
+    for (const error of [fault({ retryable: true, overloaded: true }), fault({}), new Error('nope')]) {
+      const read = vi.fn().mockRejectedValue(error);
+      await expect(retryRead(read)).rejects.toBe(error);
+      expect(read).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('tells transient faults apart', () => {
+    expect(isRetryable(fault({ retryable: true }))).toBe(true);
+    expect(isRetryable(fault({ retryable: true, overloaded: true }))).toBe(false);
+    expect(isRetryable(fault({ retryable: 'yes' }))).toBe(false);
+    expect(isRetryable(null)).toBe(false);
+    expect(isRetryable('internal error')).toBe(false);
   });
 });
