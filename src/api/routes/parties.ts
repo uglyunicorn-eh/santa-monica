@@ -15,6 +15,7 @@ import { newObjectId } from 'src/utils/ids';
 import { randomString } from 'src/utils/strings/random';
 import { partyRef } from 'src/utils/logRef';
 import { annotate } from 'src/utils/tracing';
+import { retryRead } from 'src/utils/retry';
 import { cachedView, forgetView, keepView, viewTtl } from 'src/api/viewCache';
 
 const SLUG_ATTEMPTS = 10;
@@ -93,7 +94,12 @@ async function lookUp(c: ApiContext, span: Span, code: string) {
   let seen = kept ?? null;
   if (!kept) {
     const startedAt = Date.now();
-    const [view, user] = await Promise.all([c.env.PARTY.getByName(code).view(s?.userId), s ? s.verify() : null]);
+    // A read, so a transient fault in the party's object (Cloudflare resets it after an internal storage error) gets
+    // one more try rather than a 500.
+    const [view, user] = await Promise.all([
+      retryRead(() => c.env.PARTY.getByName(code).view(s?.userId)),
+      s ? s.verify() : null,
+    ]);
     seen = view && (user ? view : anonymousView(view));
     if (seen && !s) {
       keepView(ref, seen, viewTtl(c.env), Date.now(), startedAt);
