@@ -261,13 +261,13 @@ export const tokens = {
 const iso = (ms: number) => new Date(ms).toISOString();
 const isoString = v.pipe(v.string(), v.isoTimestamp());
 
-/** The signed-in user. The API never returns anyone else's. */
-export const UserJson = v.object({ id: v.string(), name: v.string(), email: v.string() });
+/** The signed-in user. The API never returns anyone else's. `joinedAt`: when the account was made. */
+export const UserJson = v.object({ id: v.string(), name: v.string(), email: v.string(), joinedAt: isoString });
 
 /** A stored user (UserRecord) as JSON. */
 export const user = v.pipe(
-  v.object({ id: v.string(), name: v.string(), email: v.string() }),
-  v.transform(u => ({ id: nodeIdToStr({ kind: 'User', id: u.id }), name: u.name, email: u.email })),
+  v.object({ id: v.string(), name: v.string(), email: v.string(), joined: v.number() }),
+  v.transform(u => ({ id: nodeIdToStr({ kind: 'User', id: u.id }), name: u.name, email: u.email, joinedAt: iso(u.joined) })),
   UserJson,
 );
 

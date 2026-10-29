@@ -30,7 +30,7 @@ describe('the signed-in user', () => {
   it('includes their email, also right after signing in', async () => {
     const email = uniqueEmail('me');
     const who = await signIn(email);
-    expect(await me(who)).toEqual({ status: 200, body: { id: who.id, name: '', email } });
+    expect(await me(who)).toEqual({ status: 200, body: { id: who.id, name: '', email, joinedAt: expect.any(String) } });
   });
 
   it('shows nothing but a name for other people, such as a party target', async () => {
@@ -51,7 +51,7 @@ describe('updating the profile name', () => {
   it('sets the name, cleaned up, and returns the user; repeating it changes nothing', async () => {
     const who = await person('me');
     const res = await rename(who, '  Santa   Claus ');
-    expect(res).toEqual({ status: 200, body: { id: who.id, name: 'Santa Claus', email: who.email } });
+    expect(res).toEqual({ status: 200, body: { id: who.id, name: 'Santa Claus', email: who.email, joinedAt: expect.any(String) } });
     expect(await rename(who, '  Santa   Claus ')).toEqual(res);
     expect((await me(who)).body.name).toBe('Santa Claus');
   });
@@ -154,7 +154,7 @@ describe('session tokens', () => {
 
     expect(after.id).not.toBe(before.id);
     expect(await jwt().jwtVerify<UserToken>(after.token, 'UserToken')).toMatchObject({ ver: 1 });
-    expect(await me(after)).toEqual({ status: 200, body: { id: after.id, name: '', email } });
+    expect(await me(after)).toEqual({ status: 200, body: { id: after.id, name: '', email, joinedAt: expect.any(String) } });
     expect((await me(before)).status).toBe(401);
   });
 });
