@@ -501,12 +501,10 @@ export class UserDO extends DurableObject<Env> {
 
   /**
    * Parties the user is in, how many of them rolled their dice, and how many they host. Deleted parties don't count. A
-   * party whose roll this list hasn't heard of yet (see `listParties` in src/api/party.ts) counts as not rolled.
+   * party whose roll this list hasn't heard of yet (see `listParties` in src/api/party.ts) counts as not rolled. Only
+   * read once the user was found, so the tables are there.
    */
   private partyCounts(): PartyCounts {
-    if (!this.ready) {
-      return { joined: 0, rolled: 0, hosted: 0 };
-    }
     return this.sql.exec<PartyCounts>(
       `SELECT COUNT(*) AS joined, COALESCE(SUM(is_closed = 1), 0) AS rolled, COALESCE(SUM(is_host = 1), 0) AS hosted
        FROM parties WHERE deleted_at IS NULL`,
