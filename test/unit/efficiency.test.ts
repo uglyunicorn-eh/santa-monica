@@ -151,14 +151,14 @@ describe('Durable Object call budgets', () => {
     expect(counting.count()).toBe(0);
   });
 
-  it('GET and PATCH /me, GET /me/parties: one call each (the rename and the list check the session themselves)', async () => {
+  it('GET and PATCH /me, GET /me/parties: one call each (the profile, the rename and the list check the session themselves)', async () => {
     const who = await person('Me');
     await create(who.token);
     const counting = countingEnv();
     await request('GET', '/v1/me', { token: who.token, env: counting.env });
     await request('PATCH', '/v1/me', { token: who.token, body: { name: 'Renamed' }, env: counting.env });
     await request('GET', '/v1/me/parties', { token: who.token, env: counting.env });
-    expect(counting.methods()).toEqual(['USER.check', 'USER.updateName', 'USER.listParties']);
+    expect(counting.methods()).toEqual(['USER.profile', 'USER.updateName', 'USER.listParties']);
 
     counting.reset();
     expect((await request('GET', '/v1/me', { env: counting.env })).status).toBe(401);

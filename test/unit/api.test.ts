@@ -10,6 +10,7 @@ import { authenticate } from 'src/api/session';
 import { Session } from 'src/utils/session';
 import { EnterRequestToken, UserToken } from 'src/api/types';
 import { MAX_PARTY_MEMBERS, PartyDO } from 'src/do/PartyDO';
+import { UserPartyRecord, UserUpdate } from 'src/do/types';
 import { nodeIdToStr, strToNodeId } from 'src/utils/strings/nodeId';
 
 import { denied, jwt, mailer, request, sessionToken, signIn, testEnv, uniqueEmail } from './helpers';
@@ -110,10 +111,24 @@ describe('GET and PATCH /v1/me', () => {
   it('reads and renames the signed-in user', async () => {
     const who = await signIn(uniqueEmail(), 'Old');
     expect(await request('GET', '/v1/me', { token: who.token })).toEqual(expect.objectContaining({
-      status: 200, body: { id: who.nodeId, name: 'Old', email: who.email, joinedAt: expect.any(String) },
+      status: 200, body: { id: who.nodeId, name: 'Old', email: who.email, joinedAt: expect.any(String), parties: { joined: 0, rolled: 0, hosted: 0 } },
     }));
-    expect((await request('PATCH', '/v1/me', { token: who.token, body: { name: '  New   name ' } })).body).toEqual({ id: who.nodeId, name: 'New name', email: who.email, joinedAt: expect.any(String) });
+    expect((await request('PATCH', '/v1/me', { token: who.token, body: { name: '  New   name ' } })).body).toEqual({ id: who.nodeId, name: 'New name', email: who.email, joinedAt: expect.any(String), parties: { joined: 0, rolled: 0, hosted: 0 } });
     expect((await env.USER.getByName(who.email).get())!.name).toBe('New name');
+  });
+
+  it('counts the parties joined, rolled and hosted, leaving deleted ones out', async () => {
+    const who = await signIn();
+    const party = (slug: string, more: Partial<UserPartyRecord>): UserUpdate =>
+      ({ type: 'addParty', party: { slug, name: slug, createdAt: 1, isHost: false, isProtected: false, isClosed: false, closedAt: null, ...more } });
+    await env.USER.getByName(who.email).apply([
+      party('QQQRA', {}),
+      party('QQQRB', { isClosed: true, closedAt: 2 }),
+      party('QQQRC', { isHost: true, isClosed: true, closedAt: 2 }),
+      party('QQQRD', { isHost: true }),
+      party('QQQRE', { isHost: true, isClosed: true, deletedAt: 3 }),
+    ]);
+    expect((await request('GET', '/v1/me', { token: who.token })).body.parties).toEqual({ joined: 4, rolled: 2, hosted: 2 });
   });
 
   it('answers 401 for a revoked session, and checks the session before the input', async () => {

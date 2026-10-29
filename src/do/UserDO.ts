@@ -7,7 +7,7 @@ import { Session, sessionMatches } from 'src/utils/session';
 
 import { LIVE_USER_HEADER, LIVE_VERSION_HEADER } from 'src/utils/liveHeaders';
 import { Outbox } from './outbox';
-import { HostingStart, PartyListCursor, UserPartyListItem, UserPartyRecord, UserRecord, UserUpdate } from './types';
+import { HostingStart, PartyCounts, PartyListCursor, UserPartyListItem, UserPartyRecord, UserProfile, UserRecord, UserUpdate } from './types';
 
 type UserRow = {
   id: string;
@@ -484,13 +484,31 @@ export class UserDO extends DurableObject<Env> {
    * Sets the profile name, the default name for parties the user joins later. Parties already joined keep the
    * name the user joined them with. Returns null, changing nothing, when the session no longer belongs to this user.
    */
-  updateName(name: string, session: Session): UserRecord | null {
+  updateName(name: string, session: Session): UserProfile | null {
     const user = this.get();
     if (!this.holds(user, session)) {
       return null;
     }
     this.sql.exec('UPDATE user SET name = ?', name);
-    return { ...user!, name };
+    return { ...user!, name, parties: this.partyCounts() };
+  }
+
+  /** The user with their party counts (what the profile shows), when `session` still belongs to them; null otherwise. */
+  profile(session: Session): UserProfile | null {
+    const user = this.check(session);
+    return user && { ...user, parties: this.partyCounts() };
+  }
+
+  /**
+   * Parties the user is in, how many of them rolled their dice, and how many they host. Deleted parties don't count. A
+   * party whose roll this list hasn't heard of yet (see `listParties` in src/api/party.ts) counts as not rolled. Only
+   * read once the user was found, so the tables are there.
+   */
+  private partyCounts(): PartyCounts {
+    return this.sql.exec<PartyCounts>(
+      `SELECT COUNT(*) AS joined, COALESCE(SUM(is_closed = 1), 0) AS rolled, COALESCE(SUM(is_host = 1), 0) AS hosted
+       FROM parties WHERE deleted_at IS NULL`,
+    ).one();
   }
 
   /**

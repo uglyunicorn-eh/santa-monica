@@ -25,7 +25,7 @@ describe('magic-link sign-in', () => {
     const entered = await redeem(magicLinkToken(mail));
     expect(entered).toMatchObject({ status: 200, body: { user: { name: '', email } } });
 
-    expect(await me({ token: entered.body.userToken })).toEqual({ status: 200, body: entered.body.user });
+    expect(await me({ token: entered.body.userToken })).toEqual({ status: 200, body: { ...entered.body.user, parties: { joined: 0, rolled: 0, hosted: 0 } } });
   });
 
   it('creates the account once: the same email (any case) is the same person', async () => {
