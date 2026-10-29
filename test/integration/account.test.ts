@@ -142,7 +142,7 @@ describe('deleting an account', () => {
     await deleteAccount(who);
     const again = await signIn(who.email);
     expect(again.id).not.toBe(who.id);
-    expect(await me(again)).toEqual({ status: 200, body: { id: again.id, name: '', email: who.email, joinedAt: expect.any(String) } });
+    expect(await me(again)).toEqual({ status: 200, body: { id: again.id, name: '', email: who.email, joinedAt: expect.any(String), parties: { joined: 0, rolled: 0, hosted: 0 } } });
   });
 });
 
@@ -166,7 +166,7 @@ describe('changing the email', () => {
     expect(res).toMatchObject({ status: 200, body: { user: { id: who.id, name: 'Claus', email: newEmail } } });
     expect(await jwt().jwtVerify<UserToken>(res.body.userToken, 'UserToken')).toMatchObject({ sub: who.id, email: newEmail, ver: 1 });
 
-    expect(await me({ token: res.body.userToken })).toEqual({ status: 200, body: { id: who.id, name: 'Claus', email: newEmail, joinedAt: expect.any(String) } });
+    expect(await me({ token: res.body.userToken })).toEqual({ status: 200, body: { id: who.id, name: 'Claus', email: newEmail, joinedAt: expect.any(String), parties: { joined: 0, rolled: 0, hosted: 0 } } });
     expect((await me(who)).status).toBe(401);
     // Signing in with the new address finds the same account.
     expect((await signIn(newEmail)).id).toBe(who.id);

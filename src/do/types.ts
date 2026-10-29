@@ -7,6 +7,16 @@ export type UserRecord = {
   tokenVersion: number;
 };
 
+/** The profile's party counts: parties the user is in, how many of them rolled their dice, and how many they host. */
+export type PartyCounts = {
+  joined: number;
+  rolled: number;
+  hosted: number;
+};
+
+/** The signed-in user as the profile shows them: the account and its party counts. */
+export type UserProfile = UserRecord & { parties: PartyCounts };
+
 /** Where to continue a party list from: the last row of the previous page. */
 export type PartyListCursor = {
   createdAt: number;

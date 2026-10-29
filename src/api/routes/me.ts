@@ -29,8 +29,10 @@ const LINK_TTL = 60 * 60;
 const invalidLink = () => fail('invalid_link', 'This link is invalid or has expired. Please request a new one.', 'token');
 export const me = new Hono<ApiEnv>();
 
+/** The signed-in user with their party counts: one UserDO call, which also checks the session. */
 me.get('/', requireSession, action('user', async c => {
-  const user = await session(c).verify();
+  const s = session(c);
+  const user = await c.env.USER.getByName(s.email).profile(s);
   annotate({ 'user.found': Boolean(user) });
   if (!user) {
     throw notSignedIn();

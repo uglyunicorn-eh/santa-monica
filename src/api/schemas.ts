@@ -261,13 +261,30 @@ export const tokens = {
 const iso = (ms: number) => new Date(ms).toISOString();
 const isoString = v.pipe(v.string(), v.isoTimestamp());
 
-/** The signed-in user. The API never returns anyone else's. `joinedAt`: when the account was made. */
-export const UserJson = v.object({ id: v.string(), name: v.string(), email: v.string(), joinedAt: isoString });
+const PartyCountsJson = v.object({ joined: v.number(), rolled: v.number(), hosted: v.number() });
 
-/** A stored user (UserRecord) as JSON. */
+/**
+ * The signed-in user. The API never returns anyone else's. `joinedAt`: when the account was made. `parties`: how many
+ * parties they're in, how many rolled, how many they host; only from GET and PATCH /v1/me, the profile.
+ */
+export const UserJson = v.object({
+  id: v.string(),
+  name: v.string(),
+  email: v.string(),
+  joinedAt: isoString,
+  parties: v.optional(PartyCountsJson),
+});
+
+/** A stored user (UserRecord, or UserProfile with its party counts) as JSON. */
 export const user = v.pipe(
-  v.object({ id: v.string(), name: v.string(), email: v.string(), joined: v.number() }),
-  v.transform(u => ({ id: nodeIdToStr({ kind: 'User', id: u.id }), name: u.name, email: u.email, joinedAt: iso(u.joined) })),
+  v.object({ id: v.string(), name: v.string(), email: v.string(), joined: v.number(), parties: v.optional(PartyCountsJson) }),
+  v.transform(u => ({
+    id: nodeIdToStr({ kind: 'User', id: u.id }),
+    name: u.name,
+    email: u.email,
+    joinedAt: iso(u.joined),
+    ...(u.parties && { parties: u.parties }),
+  })),
   UserJson,
 );
 
