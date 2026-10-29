@@ -79,7 +79,7 @@ describe('signing in with a Gmail address', () => {
     const id = gmailUser();
     const typed = `${id}+old@gmail.com`;
     const old = await signIn(typed);
-    expect((await enter(await signInLink({ email: typed }))).body.user).toEqual({ id: old.nodeId, name: '', email: `${id}@gmail.com` });
+    expect((await enter(await signInLink({ email: typed }))).body.user).toEqual({ id: old.nodeId, name: '', email: `${id}@gmail.com`, joinedAt: expect.any(String) });
   });
 
   it('moves an account kept without the dots to the dotted address it is signed in with', async () => {

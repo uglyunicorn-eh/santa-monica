@@ -28,7 +28,7 @@ describe('Gmail addresses', () => {
     const first = await signIn(email);
     // Three sign-ins: the per-address limit of 3 a minute counts every spelling together.
     for (const spelling of [`${id}+santa@gmail.com`, `${id.toUpperCase()}+x@GoogleMail.com`]) {
-      expect((await signInAs(spelling, email)).body.user).toEqual({ id: first.id, name: '', email });
+      expect((await signInAs(spelling, email)).body.user).toEqual({ id: first.id, name: '', email, joinedAt: expect.any(String) });
     }
     expect(await mailbox(`${id}+santa@gmail.com`)).toEqual([]);
   });
@@ -57,7 +57,7 @@ describe('Gmail addresses', () => {
     expect((await joinParty(old, joined, 'Me')).status).toBe(200);
 
     const entered = await signInAs(typed, email);
-    expect(entered.body.user).toEqual({ id: old.id, name: 'Me', email });
+    expect(entered.body.user).toEqual({ id: old.id, name: 'Me', email, joinedAt: expect.any(String) });
     const moved = { email, id: old.id, token: entered.body.userToken as string };
     expect((await myParties(moved)).body.items.map(p => [p.code, p.isHost])).toEqual([[joined.code, false], [hosted.code, true]]);
     expect((await me(old)).status).toBe(401);
@@ -80,7 +80,7 @@ describe('Gmail addresses', () => {
     const party = await createParty(old, 'Mine');
 
     const entered = await signInAs(email, email);
-    expect(entered.body.user).toEqual({ id: old.id, name: '', email });
+    expect(entered.body.user).toEqual({ id: old.id, name: '', email, joinedAt: expect.any(String) });
     const moved = { email, id: old.id, token: entered.body.userToken as string };
     expect((await myParties(moved)).body.items.map(p => p.code)).toEqual([party.code]);
     expect((await me(old)).status).toBe(401);

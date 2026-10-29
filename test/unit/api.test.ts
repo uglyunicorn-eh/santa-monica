@@ -110,9 +110,9 @@ describe('GET and PATCH /v1/me', () => {
   it('reads and renames the signed-in user', async () => {
     const who = await signIn(uniqueEmail(), 'Old');
     expect(await request('GET', '/v1/me', { token: who.token })).toEqual(expect.objectContaining({
-      status: 200, body: { id: who.nodeId, name: 'Old', email: who.email },
+      status: 200, body: { id: who.nodeId, name: 'Old', email: who.email, joinedAt: expect.any(String) },
     }));
-    expect((await request('PATCH', '/v1/me', { token: who.token, body: { name: '  New   name ' } })).body).toEqual({ id: who.nodeId, name: 'New name', email: who.email });
+    expect((await request('PATCH', '/v1/me', { token: who.token, body: { name: '  New   name ' } })).body).toEqual({ id: who.nodeId, name: 'New name', email: who.email, joinedAt: expect.any(String) });
     expect((await env.USER.getByName(who.email).get())!.name).toBe('New name');
   });
 
@@ -738,7 +738,7 @@ describe('schemas', () => {
       target: null, rolledAt: null, deletedAt: '2026-12-02T00:00:00.000Z', restorableUntil: '2026-12-03T00:00:00.000Z', dueAt: '2026-12-20T18:00:00.000Z',
     });
     expect(v.parse(userJson, { id: 'a'.repeat(24), email: 'a@example.com', name: 'A', joined: 1, tokenVersion: 3 }))
-      .toEqual({ id: nodeIdToStr({ kind: 'User', id: 'a'.repeat(24) }), name: 'A', email: 'a@example.com' });
+      .toEqual({ id: nodeIdToStr({ kind: 'User', id: 'a'.repeat(24) }), name: 'A', email: 'a@example.com', joinedAt: '1970-01-01T00:00:00.001Z' });
     expect(v.parse(partyPage, {
       items: [{ slug: 'QWERT', name: 'P', createdAt: 0, isHost: true, isProtected: false, isClosed: false, closedAt: null }],
       hasMore: false, endCursor: null,
