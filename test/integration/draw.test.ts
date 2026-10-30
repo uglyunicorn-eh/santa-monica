@@ -99,9 +99,11 @@ describe('notification emails', () => {
       expect(notifications).toHaveLength(1);
       const [mail] = notifications;
       expect(mail.to).toEqual([p.email]);
-      expect(mail.html).toContain(`href="https://gnomik.me/p/${party.code}/"`);
+      // The button signs the member in (test/integration/partyLink.test.ts).
+      expect(mail.html).toContain(`href="https://gnomik.me/p/${party.code}/sign-in#`);
       expect(mail.html).not.toContain('Tom & Jerry <3');
-      expect(mail.text).toContain(`https://gnomik.me/p/${party.code}/`);
+      expect(mail.text).toContain(`https://gnomik.me/p/${party.code}/sign-in#`);
+      expect(mail.text).toContain("please don't forward this email");
       expect(mail.html).toContain('https://api.test/email/party.gif');
       expect(`${mail.html} ${mail.text}`).not.toMatch(/unsubscribe/i);
     }

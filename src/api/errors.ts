@@ -11,6 +11,7 @@ export const ERROR_STATUS = {
   link_expired: 400,
   unauthenticated: 401,
   forbidden: 403,
+  not_member: 403,
   not_found: 404,
   conflict: 409,
   link_used: 409,

@@ -295,6 +295,28 @@ export class UserDO extends DurableObject<Env> {
   }
 
   /**
+   * Signs in with a party's emailed link for the member `userId` (`POST /v1/auth/party-link`): returns the user,
+   * `'used'` when the link was already used by another request, or `'not_member'` when this address holds no account or
+   * another one (deleted, moved to another email, or remade since). That last check comes first, and records and makes
+   * nothing: a drawn party keeps a member's old address after an email change, and the link must not make a new account
+   * there. Otherwise it works like `redeemMagicLink`: once, and a repeat of the same request (`requestKey`) gets the user
+   * again.
+   */
+  redeemMemberLink(userId: string, jti: string, expiresAt: number, requestKey?: string): UserRecord | 'used' | 'not_member' {
+    // An object with no tables has no user, and stays without them.
+    const user = this.get();
+    if (user?.id !== userId) {
+      return 'not_member';
+    }
+    const used = this.usedLink(jti);
+    if (used) {
+      return requestKey && used.request_key === requestKey ? user : 'used';
+    }
+    this.sql.exec('INSERT INTO used_magic_links (jti, expires_at, request_key) VALUES (?, ?, ?)', jti, expiresAt, requestKey ?? null);
+    return user;
+  }
+
+  /**
    * The user, when the link `jti` was used by this same request (`requestKey`): a retry after a dropped answer. Null
    * otherwise, whether another request used it or nobody did. Uses up nothing, and stores nothing for a new address.
    */

@@ -96,10 +96,16 @@ auth.post('/magic-link/again', action('enterRequestAgain', async c => {
   }
   // An expired invite asks the same way, and gets a magic link for its party (the address in it is already normalized).
   const invite = v.safeParse(tokens.partyInvite, await payloadOf(jwt, token, 'PartyInvite', AGAIN_WITHIN_S));
-  if (!invite.success) {
+  if (invite.success) {
+    return sendSignInLink(c, { email: invite.output.email, typed: invite.output.email, party: invite.output.party });
+  }
+  // So does a member's expired party link. Its address is the one the party has, which may be an older spelling: the
+  // magic link signs in the usual way (`/session`), which moves such an account first.
+  const member = v.safeParse(tokens.partySignIn, await payloadOf(jwt, token, 'PartySignIn', AGAIN_WITHIN_S));
+  if (!member.success) {
     throw fail('invalid_link', 'Invalid request token.', 'token');
   }
-  return sendSignInLink(c, { email: invite.output.email, typed: invite.output.email, party: invite.output.party });
+  return sendSignInLink(c, { email: canonicalEmail(member.output.email), typed: member.output.email, party: member.output.party });
 }));
 
 /** What a link of `type` says, accepting one expired up to `expiredFor` seconds ago; undefined when it doesn't open. */
@@ -214,4 +220,38 @@ auth.post('/invite', action('acceptInvite', async c => {
   const joined = await party.join({ id: user.id, email, name }, name, password ?? null, { tokenVersion: user.tokenVersion });
   annotate({ 'party.joined': joined.ok });
   return signedIn(user);
+}));
+
+/**
+ * Signs a member in with the link in a party's email (the "dice are rolled" email, or the host's reminder the day
+ * before), and returns the party with the session. It signs in only the member it was sent to (`sub`), and only while
+ * they're still in the party and the account at the address is still theirs. Otherwise it's refused as `not_member`
+ * and left unused, so the app falls back to signing in by email; it never makes or moves an account. Each link works
+ * once; repeating the same request (same Idempotency-Key) signs in again.
+ */
+auth.post('/party-link', action('partySignIn', async c => {
+  const { env } = c;
+  const { token, key: publicKey } = await readBody(c, bodies.session);
+  const key = await keyHash(idempotencyKey(c));
+  const jwt = jwtFor(env);
+  const link = await openLink(jwt, token, 'PartySignIn', tokens.partySignIn, 'auth.party_link', 'This link has expired. We can send you a fresh one.');
+  const { sub: userId, email, party: code, jti, exp } = link;
+  annotate({ 'party.ref': await partyRef(env, code), 'user.id': userId });
+
+  const notMember = () => {
+    annotate({ 'auth.party_link': 'not_member' });
+    return fail('not_member', 'This link is not for an account in this party. Please sign in with your email.', 'token');
+  };
+  if (!await env.PARTY.getByName(code).hasMember(userId)) {
+    throw notMember();
+  }
+  const user = await env.USER.getByName(email).redeemMemberLink(userId, jti, exp * 1000, key);
+  if (user === 'not_member') {
+    throw notMember();
+  }
+  annotate({ 'auth.party_link': user === 'used' ? 'already_used' : 'redeemed' });
+  if (user === 'used') {
+    throw fail('link_used', 'This link has already been used. Please sign in with your email.', 'token');
+  }
+  return send(c, session, { ...await issueSession(env, jwt, user, publicKey), party: code });
 }));

@@ -84,9 +84,10 @@ Sessions last 30 days. Treat every token as an opaque string: tokens are encrypt
 | Endpoint | Body | Returns |
 |---|---|---|
 | `POST /auth/magic-link` | `{email, party?}` | `202`. Emails a sign-in link. |
-| `POST /auth/magic-link/again` | `{token}` | `202`. Emails a fresh link for a sign-in link or an invite that expired (up to 7 days ago). |
+| `POST /auth/magic-link/again` | `{token}` | `202`. Emails a fresh link for a sign-in link, an invite or a party's sign-in link that expired (up to 7 days ago). |
 | `POST /auth/session` | `{token, key?}` | A session. |
 | `POST /auth/invite` | `{token, key?, name, password?}` | A session, with the invited address joined to the party as `name` in one step. A wrong phrase is `forbidden` and the invite can be tried again; a member gets a magic link instead (`202`). |
+| `POST /auth/party-link` | `{token, key?}` | A session, with `party`: the link in a party's "dice are rolled" email or the host's reminder signs that member in. Someone no longer in the party, or no longer that account, gets `not_member`, and the link stays unused. |
 
 ### Account
 
@@ -141,7 +142,7 @@ Every error has the same shape:
 |---|---|
 | 400 | `invalid`, `invalid_link`, `link_expired` |
 | 401 | `unauthenticated` |
-| 403 | `forbidden` |
+| 403 | `forbidden`, `not_member` |
 | 404 | `not_found` |
 | 409 | `conflict`, `link_used`, `account_busy` |
 | 429 | `rate_limited` (with `Retry-After: 60`) |

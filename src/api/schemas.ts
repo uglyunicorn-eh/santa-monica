@@ -246,6 +246,7 @@ export const tokens = {
   }),
   enterRequest: v.object({ email: v.pipe(v.string(), v.nonEmpty(), v.toLowerCase()), typed: v.optional(v.string()), jti: linkId, exp: v.number(), party: v.optional(v.string()) }),
   partyInvite: v.object({ email: v.pipe(v.string(), v.nonEmpty(), v.toLowerCase()), party: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number() }),
+  partySignIn: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), party: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number() }),
   accountDeletion: v.object({ sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number(), ver: v.number() }),
   emailChange: v.object({
     sub: userNodeId, email: v.pipe(v.string(), v.nonEmpty()), newEmail: v.pipe(v.string(), v.nonEmpty()), jti: linkId, exp: v.number(), ver: v.number(),

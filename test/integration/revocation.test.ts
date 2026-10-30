@@ -19,6 +19,7 @@ const ROUTES: Record<string, { revoked: 'unauthenticated' | 'anonymous' | 'no se
   'POST /auth/magic-link': { revoked: 'no session' },
   'POST /auth/session': { revoked: 'no session' },
   'POST /auth/invite': { revoked: 'no session' },
+  'POST /auth/party-link': { revoked: 'no session' },
   'POST /auth/magic-link/again': { revoked: 'no session' },
   'POST /me/deletion/check': { revoked: 'no session' },
   'GET /parties/live': { revoked: 'no session' },
