@@ -932,11 +932,14 @@ export class PartyDO extends DurableObject<Env> {
       this.sql.exec('UPDATE party SET is_closed = 1, closed_at = ?', closedAt);
       // Nobody can join a drawn party, so the invited addresses aren't needed any more.
       this.sql.exec('DELETE FROM invites');
-      // Every member's party list shows the party as closed, and everyone gets the notification email.
+      // Every member's party list shows the party as closed, and everyone but the host gets the "dice are rolled" email:
+      // the host just rolled, and sees their match on the page right away.
       for (const member of members) {
         if (member.member_email) {
           this.enqueue({ kind: 'user.sync', email: member.member_email });
-          this.enqueue({ kind: 'mail.partyNotification', email: member.member_email, partyName: party.name, slug: party.slug, userId: member.member_id });
+          if (member.member_id !== party.host_id) {
+            this.enqueue({ kind: 'mail.partyNotification', email: member.member_email, partyName: party.name, slug: party.slug, userId: member.member_id });
+          }
         }
       }
     });

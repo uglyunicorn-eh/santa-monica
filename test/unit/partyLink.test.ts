@@ -182,22 +182,21 @@ describe('POST /v1/auth/magic-link/again with a party sign-in link', () => {
 });
 
 describe("the party's emails", () => {
-  it('carry a link that signs in each member: 7 days in the "dice are rolled" email, 3 in the reminder', async () => {
+  it('carry a link that signs in the member: 7 days in the "dice are rolled" email (not sent to the host), 3 in the reminder', async () => {
     const host = await signIn(uniqueEmail('host'));
     const guest = await signIn(uniqueEmail('guest'));
     const party = await createParty(host.token);
     await join(guest.token, party.code);
     await request('POST', '/v1/parties/draw', { token: host.token, body: { code: party.code } });
     const rolled = (await deliver(party.code)).filter(m => m.subject.endsWith('the dice are rolled!'));
-    expect(rolled.map(m => m.to).sort()).toEqual([host.email, guest.email].sort());
-    for (const mail of rolled) {
-      expect(mail.text).toContain(`https://gnomik.me/p/${party.code}/sign-in#`);
-      expect(mail.text).toContain("please don't forward this email");
-      const link = await jwt().jwtVerify<PartySignInToken>(tokenIn(mail.text), 'PartySignIn');
-      const who = mail.to === host.email ? host : guest;
-      expect(link).toMatchObject({ sub: who.nodeId, email: who.email, party: party.code, jti: expect.any(String) });
-      expect(link.exp! - link.iat!).toBe(PARTY_SIGN_IN_TTL.rolled);
-    }
+    // The host just rolled and sees their match on the page, so only the guest is emailed.
+    expect(rolled.map(m => m.to)).toEqual([guest.email]);
+    const [mail] = rolled;
+    expect(mail.text).toContain(`https://gnomik.me/p/${party.code}/sign-in#`);
+    expect(mail.text).toContain("please don't forward this email");
+    const rolledLink = await jwt().jwtVerify<PartySignInToken>(tokenIn(mail.text), 'PartySignIn');
+    expect(rolledLink).toMatchObject({ sub: guest.nodeId, email: guest.email, party: party.code, jti: expect.any(String) });
+    expect(rolledLink.exp! - rolledLink.iat!).toBe(PARTY_SIGN_IN_TTL.rolled);
 
     const due = await createParty(host.token);
     await runInDurableObject(env.PARTY.getByName(due.code), async (_i, state) => {
