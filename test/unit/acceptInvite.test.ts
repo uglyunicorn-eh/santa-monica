@@ -5,7 +5,7 @@ import { EnterRequestToken, PartyInviteToken, UserToken } from 'src/api/types';
 import { MAX_PARTY_MEMBERS, MAX_PHRASE_GUESSES } from 'src/do/PartyDO';
 import { nodeIdToStr } from 'src/utils/strings/nodeId';
 
-import { jwt, mailer, request, signIn, testEnv, uniqueEmail } from './helpers';
+import { browserJwk, jwt, mailer, request, signIn, testEnv, tokenIn, uniqueEmail } from './helpers';
 
 const createParty = async (token: string, password?: string) =>
   (await request('POST', '/v1/parties', { token, body: { name: 'Office party', ...(password ? { password } : {}) } })).body;
@@ -18,14 +18,6 @@ const accept = (body: Record<string, unknown>, options: { key?: string; env?: ty
   request('POST', '/v1/auth/invite', { body, key: options.key ?? crypto.randomUUID(), env: options.env });
 
 const lookUp = (token: string, code: string) => request('POST', '/v1/parties/lookup', { token, body: { code } });
-
-const tokenIn = (text: string) => /#([\w-]+(?:\.[\w-]*){4})/.exec(text)![1];
-
-const browserJwk = async () => {
-  const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']) as CryptoKeyPair;
-  const { kty, crv, x, y } = await crypto.subtle.exportKey('jwk', pair.publicKey) as JsonWebKey;
-  return { kty, crv, x, y };
-};
 
 describe('POST /v1/auth/invite', () => {
   it('signs a new address in and joins the party in one step, with the name typed', async () => {

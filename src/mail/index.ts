@@ -45,8 +45,9 @@ export const render = (template: Template, vars: Record<string, string>): MailMe
 export const renderSignIn = ({ magicLink, assetsUrl }: { magicLink: string; assetsUrl: string }) =>
   render(signIn, { magicLink, assetsUrl, assetsVersion });
 
-export const renderPartyNotification = ({ party, assetsUrl }: { party: { name: string; url: string }; assetsUrl: string }) =>
-  render(partyNotification, { 'party.name': party.name, 'party.url': party.url, assetsUrl, assetsVersion });
+/** A member's "dice are rolled" email. `signsIn`: the link signs them in, so the email says so (and not to forward it). */
+export const renderPartyNotification = ({ party, signsIn = false, assetsUrl }: { party: { name: string; url: string }; signsIn?: boolean; assetsUrl: string }) =>
+  render(signsIn ? partyNotification : partyNotification.bare, { 'party.name': party.name, 'party.url': party.url, assetsUrl, assetsVersion });
 
 export const renderAccountDeleted = ({ assetsUrl }: { assetsUrl: string }) =>
   render(accountDeleted, { ...accountDeleted.vars, assetsUrl, assetsVersion });
@@ -57,10 +58,14 @@ export const renderAccountDeletion = ({ url, assetsUrl }: { url: string; assetsU
 // The body has placeholders of its own, so it is filled first (as plain text: render escapes it once, in the HTML part).
 const fillBody = (body: string, vars: Record<string, string>) => fill(body, vars, s => s);
 
-/** The host's reminder the day before the party starts (its due time), with how many people are in. */
-export const renderPartyDue = ({ party, members, assetsUrl }: { party: { name: string; url: string }; members: number; assetsUrl: string }) => {
+/**
+ * The host's reminder the day before the party starts (its due time), with how many people are in. `signsIn`: the link
+ * signs them in, so the footer says so.
+ */
+export const renderPartyDue = ({ party, members, signsIn = false, assetsUrl }: { party: { name: string; url: string }; members: number; signsIn?: boolean; assetsUrl: string }) => {
   const vars = { 'party.name': party.name, url: party.url, members: members === 1 ? 'only you are in' : `${members} people are in`, assetsUrl, assetsVersion };
-  return render(partyDue, { ...partyDue.vars, ...vars, body: fillBody(partyDue.body, vars) });
+  const footer = signsIn ? `${partyDue.vars.footer} ${partyDue.signInNote}` : partyDue.vars.footer;
+  return render(partyDue, { ...partyDue.vars, ...vars, footer, body: fillBody(partyDue.body, vars) });
 };
 
 /** The host's notice that an open party was deleted for want of activity, with the date until which it can come back. */

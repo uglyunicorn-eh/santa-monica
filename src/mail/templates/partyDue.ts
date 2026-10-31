@@ -1,8 +1,8 @@
 import { actionTones, withAction } from './simple';
 
 // Sent to the host the day before the party starts: the due time is roughly when they mean to roll the dice
-// (src/do/PartyDO.ts, `remindIfDue`). Placeholders: {{party.name}}, {{url}} (the party page), {{members}} (how many
-// people are in), {{assetsUrl}}, {{assetsVersion}}.
+// (src/do/PartyDO.ts, `remindIfDue`). Placeholders: {{party.name}}, {{url}} (the party page, with a sign-in token after "#"), {{members}} (how many
+// people are in), {{footer}}, {{assetsUrl}}, {{assetsVersion}}.
 export const subject = '{{party.name}} starts in about a day';
 
 export const vars = {
@@ -12,6 +12,9 @@ export const vars = {
   ...actionTones.go,
   footer: "It's only a reminder: nothing happens on its own, and you roll the dice when you're ready.",
 };
+
+/** Added to the footer when the button signs the host in (not for a bare link queued before that). */
+export const signInNote = "The button signs you in, so please don't forward this email.";
 
 export const body = "You planned to roll the dice for {{party.name}} in about a day, and {{members}} so far. Once everyone's in, roll the dice and let the gifting begin.";
 
@@ -24,5 +27,5 @@ ${body}
 To open it, follow this link:
 {{url}}
 
-${vars.footer}
+{{footer}}
 `;

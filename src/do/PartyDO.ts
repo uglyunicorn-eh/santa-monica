@@ -9,8 +9,9 @@ import { newObjectId } from 'src/utils/ids';
 import { LIVE_USER_HEADER } from 'src/utils/liveHeaders';
 import { jwtFor } from 'src/api/context';
 import { takeAddressLimit, takeAllMail } from 'src/api/rateLimit';
-import type { PartyInviteToken } from 'src/api/types';
+import type { PartyInviteToken, PartySignInToken } from 'src/api/types';
 import { mailRef } from 'src/utils/logRef';
+import { nodeIdToStr } from 'src/utils/strings/nodeId';
 import { STATS_NAME } from './StatsDO';
 import { Outbox, RetryLater } from './outbox';
 
@@ -59,9 +60,11 @@ type OutboxMessage =
   // Sent when the party is gone for good (erased after deletion, or its host's account was deleted): the party row is
   // gone, so the slug travels with the message.
   | { kind: 'user.partyPurged'; email: string; slug: string }
-  | { kind: 'mail.partyNotification'; email: string; partyName: string; slug: string }
+  // `userId` (the member's) makes the link sign them in (PARTY_SIGN_IN_TTL). Messages queued before it existed have none,
+  // and link to the bare party page.
+  | { kind: 'mail.partyNotification'; email: string; partyName: string; slug: string; userId?: string }
   // To the host, the day before the party's due time (`remindIfDue`).
-  | { kind: 'mail.partyDue'; email: string; partyName: string; slug: string; members: number }
+  | { kind: 'mail.partyDue'; email: string; partyName: string; slug: string; members: number; userId?: string }
   // To the host, when an open party was deleted for want of activity (`pruneIfDue`).
   | { kind: 'mail.partyPruned'; email: string; partyName: string; slug: string; restorableUntil: number }
   // An invite from the host. Counted against the recipient's per-address limit when it goes out; over it, it's dropped.
@@ -145,6 +148,12 @@ export const REINVITE_AFTER_MS = 24 * 60 * 60 * 1000;
  * invited address in, so it's single-use like a magic link, and it only signs in to join (`POST /v1/auth/invite`).
  */
 export const INVITE_LINK_TTL = 7 * 24 * 60 * 60;
+
+/**
+ * How long the sign-in link in a member's party email works, in seconds: the host's reminder the day before (`due`),
+ * and the "dice are rolled" email (`rolled`). It signs in only that member, once (`POST /v1/auth/party-link`).
+ */
+export const PARTY_SIGN_IN_TTL = { due: 3 * 24 * 60 * 60, rolled: 7 * 24 * 60 * 60 };
 
 /** What the host asked to invite, address by address. */
 export type InviteResult =
@@ -564,6 +573,19 @@ export class PartyDO extends DurableObject<Env> {
     return { ok: true, member: false };
   }
 
+  /**
+   * Whether `userId` may sign in with the party's emailed link (`POST /v1/auth/party-link`): a member of the party, or,
+   * once it's deleted, its host while it can still be restored (whoever else sees it as gone). Deleting an account
+   * takes or anonymizes its membership, so it no longer counts.
+   */
+  hasMember(userId: string): boolean {
+    const party = this.party();
+    if (!party || !this.membership(userId)) {
+      return false;
+    }
+    return !party.deleted_at || (party.host_id === userId && !this.restoreExpired(party));
+  }
+
   /** Only the host can still see a deleted party (to restore it): everyone else stops watching. */
   async delete(userId: string): Promise<PartyResult> {
     const result = await this.deleteNow(userId);
@@ -914,7 +936,7 @@ export class PartyDO extends DurableObject<Env> {
       for (const member of members) {
         if (member.member_email) {
           this.enqueue({ kind: 'user.sync', email: member.member_email });
-          this.enqueue({ kind: 'mail.partyNotification', email: member.member_email, partyName: party.name, slug: party.slug });
+          this.enqueue({ kind: 'mail.partyNotification', email: member.member_email, partyName: party.name, slug: party.slug, userId: member.member_id });
         }
       }
     });
@@ -1067,7 +1089,7 @@ export class PartyDO extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       this.sql.exec('UPDATE party SET remind_at = NULL');
       if (hostEmail && party.due_at !== null && party.due_at > Date.now()) {
-        this.enqueue({ kind: 'mail.partyDue', email: hostEmail, partyName: party.name, slug: party.slug, members: this.memberCount() });
+        this.enqueue({ kind: 'mail.partyDue', email: hostEmail, partyName: party.name, slug: party.slug, members: this.memberCount(), userId: party.host_id });
       }
     });
   }
@@ -1172,6 +1194,22 @@ export class PartyDO extends DurableObject<Env> {
     return party.deleted_at && party.host_id !== userId ? null : this.summary(party, userId);
   }
 
+  /**
+   * The party's page for a member's email, with a link that signs them in (`POST /v1/auth/party-link`) for `ttl`
+   * seconds. `/sign-in` tells the app it's a member's link, not an invite. Like an invite, the token is made at sending,
+   * so it's never stored, and goes after "#". A message queued before `userId` existed gets the bare page, and an email
+   * that doesn't say the button signs in (`signsIn`).
+   */
+  private async memberLink({ email, slug, userId }: { email: string; slug: string; userId?: string }, ttl: number): Promise<{ url: string; signsIn: boolean }> {
+    if (!userId) {
+      return { url: `${this.env.FRONTEND_URL}/p/${slug}/`, signsIn: false };
+    }
+    const token = await jwtFor(this.env).issueToken<PartySignInToken>('PartySignIn', {
+      sub: nodeIdToStr({ kind: 'User', id: userId }), email, party: slug, jti: crypto.randomUUID(),
+    }, { ttl });
+    return { url: `${this.env.FRONTEND_URL}/p/${slug}/sign-in#${token}`, signsIn: true };
+  }
+
   /** Delivers a batch: one email, or all queued changes for one user in a single UserDO call. */
   private async deliver(messages: OutboxMessage[]) {
     const [first] = messages;
@@ -1203,9 +1241,11 @@ export class PartyDO extends DurableObject<Env> {
       }));
     }
     if (first.kind === 'mail.partyDue') {
+      const { url, signsIn } = await this.memberLink(first, PARTY_SIGN_IN_TTL.due);
       return await sendMail(this.env, first.email, renderPartyDue({
-        party: { name: first.partyName, url: `${this.env.FRONTEND_URL}/p/${first.slug}/` },
+        party: { name: first.partyName, url },
         members: first.members,
+        signsIn,
         assetsUrl: this.env.PUBLIC_URL,
       }));
     }
@@ -1217,8 +1257,10 @@ export class PartyDO extends DurableObject<Env> {
       }));
     }
     if (first.kind === 'mail.partyNotification') {
+      const { url, signsIn } = await this.memberLink(first, PARTY_SIGN_IN_TTL.rolled);
       return await sendMail(this.env, first.email, renderPartyNotification({
-        party: { name: first.partyName, url: `${this.env.FRONTEND_URL}/p/${first.slug}/` },
+        party: { name: first.partyName, url },
+        signsIn,
         assetsUrl: this.env.PUBLIC_URL,
       }));
     }

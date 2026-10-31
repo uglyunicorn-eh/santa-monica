@@ -60,6 +60,8 @@ describe("a party's due time", () => {
     const sent = await reminders(host.email);
     expect(sent).toHaveLength(1);
     expect(sent[0].text).toContain('2 people are in');
+    expect(sent[0].text).toContain(`https://gnomik.me/p/${party.code}/sign-in#`);
+    expect(sent[0].text).toContain("please don't forward this email");
     expect(await reminders(guest.email)).toEqual([]);
     await alarmNow(party.code);
     expect(await reminders(host.email)).toHaveLength(1);

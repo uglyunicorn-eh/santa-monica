@@ -24,6 +24,23 @@ export interface PartyInviteToken extends TokenPayload {
 }
 
 /**
+ * Emailed to a member with the party's "dice are rolled" email and the host's reminder the day before: signs them in
+ * and opens the party (`POST /v1/auth/party-link`). Single-use (`jti`), and it lasts PARTY_SIGN_IN_TTL. It signs in only
+ * the user `sub`, and only while they're still in the party and the account at `email` is still theirs: it never makes
+ * an account. It carries no `ver`, since nobody can ask for one (the party sends each once), and an email change already
+ * voids it through the user check.
+ */
+export interface PartySignInToken extends TokenPayload {
+  /** The member's user id (`nodeIdToStr`). */
+  sub: string;
+  /** The address the party has for them, where the email went. */
+  email: string;
+  /** The party's code. */
+  party: string;
+  jti: string;
+}
+
+/**
  * Emailed to confirm deleting the account. Single-use (`jti`), identifies the user by id and email, and works only
  * while the account's token version is still `ver`: cancelling an email change (or any version bump) voids it.
  */

@@ -52,10 +52,13 @@ const settle = async (code: string) => {
 const BUDGETS: Record<string, { USER: number | string; PARTY: number | string }> = {
   // Nothing is stored for a sign-in request: no call to the user at all.
   'POST /auth/magic-link': { USER: 0, PARTY: '0, or 1 with a party code' },
-  'POST /auth/magic-link/again': { USER: 0, PARTY: '0, or 1 with a party code' },
+  // A party's sign-in link asks first whether the account is still at its address (or its normalized spelling).
+  'POST /auth/magic-link/again': { USER: '0, or 1-2 for a party sign-in link', PARTY: '0, or 1 with a party code' },
   'POST /auth/session': { USER: 1, PARTY: 0 },
   // Joining: the invitee check and the join. A member gets a magic link (the party is looked up for it) instead.
   'POST /auth/invite': { USER: 1, PARTY: '2, or 1 for a repeat' },
+  // The member check, then the sign-in at the address: never more, whatever the answer.
+  'POST /auth/party-link': { USER: '1 (2 for an address under an older spelling), or 0 for a non-member', PARTY: 1 },
   'GET /me': { USER: 1, PARTY: 0 },
   'PATCH /me': { USER: 1, PARTY: 0 },
   'GET /me/parties': { USER: 1, PARTY: 0 },
@@ -110,6 +113,11 @@ describe('Durable Object call budgets', () => {
     const expired = await jwt().issueToken('EnterRequest', { email, jti: crypto.randomUUID(), party: party.code }, { ttl: -60 });
     expect((await request('POST', '/v1/auth/magic-link/again', { body: { token: expired }, env: counting.env })).status).toBe(202);
     expect(counting.methods()).toEqual(['PARTY.view']);
+
+    counting.reset();
+    const member = await jwt().issueToken('PartySignIn', { sub: host.nodeId, email: host.email, party: party.code, jti: crypto.randomUUID() }, { ttl: -60 });
+    expect((await request('POST', '/v1/auth/magic-link/again', { body: { token: member }, env: counting.env })).status).toBe(202);
+    expect(counting.methods()).toEqual(['USER.holdsMember', 'PARTY.view']);
   });
 
   it('POST /auth/session: one call, whether the link is fresh, used or repeated; none when it is invalid', async () => {
@@ -148,6 +156,25 @@ describe('Durable Object call budgets', () => {
 
     counting.reset();
     await request('POST', '/v1/auth/invite', { body: { token: 'garbage', name: 'Guest' }, env: counting.env });
+    expect(counting.count()).toBe(0);
+  });
+
+  it('POST /auth/party-link: the member check and the sign-in; only the check for a non-member; none when it is invalid', async () => {
+    const host = await person();
+    const party = await create(host.token);
+    const token = await jwt().issueToken('PartySignIn', { sub: host.nodeId, email: host.email, party: party.code, jti: crypto.randomUUID() }, { ttl: 60 });
+    const counting = countingEnv();
+    await request('POST', '/v1/auth/party-link', { key: key(), body: { token }, env: counting.env });
+    expect(counting.methods()).toEqual(['PARTY.hasMember', 'USER.redeemMemberLink']);
+
+    counting.reset();
+    const stranger = await person();
+    const theirs = await jwt().issueToken('PartySignIn', { sub: stranger.nodeId, email: stranger.email, party: party.code, jti: crypto.randomUUID() }, { ttl: 60 });
+    await request('POST', '/v1/auth/party-link', { body: { token: theirs }, env: counting.env });
+    expect(counting.methods()).toEqual(['PARTY.hasMember']);
+
+    counting.reset();
+    await request('POST', '/v1/auth/party-link', { body: { token: 'garbage' }, env: counting.env });
     expect(counting.count()).toBe(0);
   });
 
