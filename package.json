@@ -1,7 +1,7 @@
 {
   "name": "santa-monica",
   "description": "Backyard of the Anonymous Santa Clauses",
-  "version": "5.1.1",
+  "version": "5.2.0",
   "license": "MIT",
   "private": true,
   "type": "module",
