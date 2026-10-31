@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { EnterRequestToken, PartySignInToken, UserToken } from 'src/api/types';
 import { PARTY_SIGN_IN_TTL } from 'src/do/PartyDO';
 
-import { Sent, jwt, mailer, request, signIn, testEnv, uniqueEmail } from './helpers';
+import { Sent, browserJwk, jwt, mailer, request, signIn, testEnv, tokenIn, uniqueEmail } from './helpers';
 
 type Who = { nodeId: string; email: string };
 
@@ -18,18 +18,19 @@ const memberLink = (who: Who, party: string, ttl = 60, jti: string = crypto.rand
 const useLink = (token: string, key?: string, extra: Record<string, unknown> = {}) =>
   request('POST', '/v1/auth/party-link', { body: { token, ...extra }, key });
 
-const tokenIn = (text: string) => /#([\w-]+(?:\.[\w-]*){4})/.exec(text)![1];
-
 const notMember = { status: 403, body: { error: { code: 'not_member', field: 'token' } } };
+const busy = { status: 409, body: { error: { code: 'account_busy', field: 'token' } } };
+
+const again = (token: string, EMAIL?: SendEmail) =>
+  request('POST', '/v1/auth/magic-link/again', { body: { token }, env: testEnv(EMAIL ? { EMAIL } : {}) });
+
+/** Holds the account at `email` the way an email change or deletion does while it runs. */
+const holdAccount = (email: string) => runInDurableObject(env.USER.getByName(email), async (_i, state) => {
+  state.storage.sql.exec('UPDATE user SET changing_until = ?', Date.now() + 60_000);
+});
 
 const tablesOf = (email: string) => runInDurableObject(env.USER.getByName(email), async (_i, state) =>
   state.storage.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '_cf_%'").toArray());
-
-const browserJwk = async () => {
-  const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']) as CryptoKeyPair;
-  const { kty, crv, x, y } = await crypto.subtle.exportKey('jwk', pair.publicKey) as JsonWebKey;
-  return { kty, crv, x, y };
-};
 
 /** Runs the party's alarm with its email captured, until its outbox is empty, and returns what it sent. */
 async function deliver(code: string): Promise<Sent> {
@@ -96,6 +97,34 @@ describe('POST /v1/auth/party-link', () => {
     expect(await runInDurableObject(env.USER.getByName(other.email), async (_i, state) =>
       state.storage.sql.exec('SELECT jti FROM used_magic_links WHERE jti = ?', jti).toArray())).toEqual([]);
     expect(await env.USER.getByName(other.email).get()).toMatchObject({ id: other.id });
+
+    // A deleted account at the address is no one's.
+    const gone = await signIn(uniqueEmail('gone'));
+    await join(gone.token, party.code);
+    await env.USER.getByName(gone.email).tombstone();
+    expect(await useLink(await memberLink(gone, party.code))).toMatchObject(notMember);
+  });
+
+  it('signs in an account that has moved from the spelling the party keeps to the normalized one', async () => {
+    const typed = uniqueEmail('Mixed.Case');
+    const member = await signIn(typed.toLowerCase());
+    const party = await createParty(member.token);
+    const token = await memberLink({ nodeId: member.nodeId, email: typed }, party.code);
+    expect(await useLink(token)).toMatchObject({ status: 200, body: { party: party.code, user: { id: member.nodeId } } });
+    expect(await useLink(token)).toMatchObject({ status: 409, body: { error: { code: 'link_used' } } });
+    expect(await tablesOf(typed)).toEqual([]);
+  });
+
+  it('is account_busy while the account is being changed, and left unused for after', async () => {
+    const host = await signIn(uniqueEmail('host'));
+    const party = await createParty(host.token);
+    const token = await memberLink(host, party.code);
+    await holdAccount(host.email);
+    expect(await useLink(token)).toMatchObject(busy);
+    await runInDurableObject(env.USER.getByName(host.email), async (_i, state) => {
+      state.storage.sql.exec('UPDATE user SET changing_until = NULL');
+    });
+    expect((await useLink(token)).status).toBe(200);
   });
 
   it('signs in the host of a deleted party while it can be restored, and nobody else', async () => {
@@ -126,15 +155,29 @@ describe('POST /v1/auth/party-link', () => {
 
 describe('POST /v1/auth/magic-link/again with a party sign-in link', () => {
   it('emails a magic link for the party to the normalized address, keeping the one the party had as typed', async () => {
-    const host = await signIn(uniqueEmail('host'));
-    const party = await createParty(host.token);
     const typed = uniqueEmail('Mixed.Case');
+    const member = await signIn(typed.toLowerCase());
+    const party = await createParty(member.token);
     const { sent, EMAIL } = mailer();
-    const expired = await memberLink({ nodeId: host.nodeId, email: typed }, party.code, -3600);
-    expect((await request('POST', '/v1/auth/magic-link/again', { body: { token: expired }, env: testEnv({ EMAIL }) })).status).toBe(202);
+    expect((await again(await memberLink({ nodeId: member.nodeId, email: typed }, party.code, -3600), EMAIL)).status).toBe(202);
     expect(sent.map(m => m.to)).toEqual([typed.toLowerCase()]);
     expect(await jwt().jwtVerify<EnterRequestToken>(tokenIn(sent[0].text), 'EnterRequest'))
       .toMatchObject({ email: typed.toLowerCase(), typed, party: party.code });
+  });
+
+  it('sends nothing when the account is no longer at the address, or is being changed', async () => {
+    const host = await signIn(uniqueEmail('host'));
+    const party = await createParty(host.token);
+    const { sent, EMAIL } = mailer();
+
+    // The address the party kept after an email change: a magic link there would make a new, empty account.
+    const nobody = uniqueEmail('moved-away');
+    expect(await again(await memberLink({ nodeId: host.nodeId, email: nobody }, party.code, -60), EMAIL)).toMatchObject(notMember);
+    expect(await tablesOf(nobody)).toEqual([]);
+
+    await holdAccount(host.email);
+    expect(await again(await memberLink(host, party.code, -60), EMAIL)).toMatchObject(busy);
+    expect(sent).toEqual([]);
   });
 });
 
@@ -149,6 +192,7 @@ describe("the party's emails", () => {
     expect(rolled.map(m => m.to).sort()).toEqual([host.email, guest.email].sort());
     for (const mail of rolled) {
       expect(mail.text).toContain(`https://gnomik.me/p/${party.code}/sign-in#`);
+      expect(mail.text).toContain("please don't forward this email");
       const link = await jwt().jwtVerify<PartySignInToken>(tokenIn(mail.text), 'PartySignIn');
       const who = mail.to === host.email ? host : guest;
       expect(link).toMatchObject({ sub: who.nodeId, email: who.email, party: party.code, jti: expect.any(String) });
@@ -161,6 +205,7 @@ describe("the party's emails", () => {
     });
     const [reminder] = await deliver(due.code);
     expect(reminder.subject).toBe('Link party starts in about a day');
+    expect(reminder.text).toContain("you're ready. The button signs you in, so please don't forward this email.");
     const link = await jwt().jwtVerify<PartySignInToken>(tokenIn(reminder.text), 'PartySignIn');
     expect(link).toMatchObject({ sub: host.nodeId, email: host.email, party: due.code });
     expect(link.exp! - link.iat!).toBe(PARTY_SIGN_IN_TTL.due);
@@ -179,6 +224,8 @@ describe("the party's emails", () => {
     for (const mail of sent) {
       expect(mail.text).toContain(`https://gnomik.me/p/${party.code}/`);
       expect(mail.text).not.toContain('sign-in');
+      // Nor does it say the button signs in.
+      expect(mail.text).not.toContain('signs you in');
     }
   });
 });

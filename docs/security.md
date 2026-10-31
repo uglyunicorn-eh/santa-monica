@@ -88,8 +88,9 @@ Account links carry the token version they were issued for. Any version bump voi
 **Party sign-in links** (`POST /v1/auth/party-link`, `PartySignIn` tokens) are the one long-lived link that opens an existing account, so they go only to members, and sign in only the member they were sent to:
 
 - The token names the member's user ID, and the party must still have that user as a member. For a deleted party, only its host counts, while it can be restored.
-- The account at the address must still be that same user. A drawn party keeps a member's old address after an email change, so without this check a link to the old address would make a new, empty account there. It also covers deleted accounts and accounts kept under an older spelling.
-- When either check fails the link is refused as `not_member` and left unused: the app falls back to signing in by email. The link never makes or moves an account.
+- The account at the address, or at its normalized spelling, must still be that same user. A drawn party keeps a member's old address after an email change, so without this check a link to the old address would make a new, empty account there. It also covers deleted accounts.
+- When either check fails the link is refused as `not_member` and left unused: the app falls back to signing in by email. While an email change or deletion holds the account, it's `account_busy`, also left unused. The link never makes or moves an account.
+- An expired one gets a fresh magic link only after the same account check, so the resend can't make that empty account either.
 
 They carry no token version. Account links need one because someone with a stolen session could request them; nobody can request these, since the party sends each one once, and changing your email already voids them through the user ID check. The app signs in with one only when the person presses a button, so mail scanners that open links can't use it up.
 

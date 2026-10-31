@@ -1197,16 +1197,17 @@ export class PartyDO extends DurableObject<Env> {
   /**
    * The party's page for a member's email, with a link that signs them in (`POST /v1/auth/party-link`) for `ttl`
    * seconds. `/sign-in` tells the app it's a member's link, not an invite. Like an invite, the token is made at sending,
-   * so it's never stored, and goes after "#". A message queued before `userId` existed gets the bare page.
+   * so it's never stored, and goes after "#". A message queued before `userId` existed gets the bare page, and an email
+   * that doesn't say the button signs in (`signsIn`).
    */
-  private async memberLink({ email, slug, userId }: { email: string; slug: string; userId?: string }, ttl: number): Promise<string> {
+  private async memberLink({ email, slug, userId }: { email: string; slug: string; userId?: string }, ttl: number): Promise<{ url: string; signsIn: boolean }> {
     if (!userId) {
-      return `${this.env.FRONTEND_URL}/p/${slug}/`;
+      return { url: `${this.env.FRONTEND_URL}/p/${slug}/`, signsIn: false };
     }
     const token = await jwtFor(this.env).issueToken<PartySignInToken>('PartySignIn', {
       sub: nodeIdToStr({ kind: 'User', id: userId }), email, party: slug, jti: crypto.randomUUID(),
     }, { ttl });
-    return `${this.env.FRONTEND_URL}/p/${slug}/sign-in#${token}`;
+    return { url: `${this.env.FRONTEND_URL}/p/${slug}/sign-in#${token}`, signsIn: true };
   }
 
   /** Delivers a batch: one email, or all queued changes for one user in a single UserDO call. */
@@ -1240,9 +1241,11 @@ export class PartyDO extends DurableObject<Env> {
       }));
     }
     if (first.kind === 'mail.partyDue') {
+      const { url, signsIn } = await this.memberLink(first, PARTY_SIGN_IN_TTL.due);
       return await sendMail(this.env, first.email, renderPartyDue({
-        party: { name: first.partyName, url: await this.memberLink(first, PARTY_SIGN_IN_TTL.due) },
+        party: { name: first.partyName, url },
         members: first.members,
+        signsIn,
         assetsUrl: this.env.PUBLIC_URL,
       }));
     }
@@ -1254,8 +1257,10 @@ export class PartyDO extends DurableObject<Env> {
       }));
     }
     if (first.kind === 'mail.partyNotification') {
+      const { url, signsIn } = await this.memberLink(first, PARTY_SIGN_IN_TTL.rolled);
       return await sendMail(this.env, first.email, renderPartyNotification({
-        party: { name: first.partyName, url: await this.memberLink(first, PARTY_SIGN_IN_TTL.rolled) },
+        party: { name: first.partyName, url },
+        signsIn,
         assetsUrl: this.env.PUBLIC_URL,
       }));
     }

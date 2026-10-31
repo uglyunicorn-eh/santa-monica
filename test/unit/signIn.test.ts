@@ -3,14 +3,12 @@ import { describe, expect, it } from 'vitest';
 import { AGAIN_WITHIN_S } from 'src/api/routes/auth';
 import { EnterRequestToken } from 'src/api/types';
 
-import { jwt, mailer, request, signIn, testEnv, uniqueEmail } from './helpers';
+import { jwt, mailer, request, signIn, testEnv, tokenIn, uniqueEmail } from './helpers';
 
 // Plan section 4.2: tokens are encrypted, so the app reads nothing from them; the API tells it what it needs.
 
 const link = (payload: Partial<EnterRequestToken>, ttl = 300) =>
   jwt().issueToken('EnterRequest', { email: uniqueEmail(), jti: crypto.randomUUID(), ...payload }, { ttl });
-
-const tokenIn = (text: string) => /#([\w-]+(?:\.[\w-]*){4})/.exec(text)![1];
 
 describe('signing in', () => {
   it("answers with when the session ends and the link's party, since the app can't read the token", async () => {

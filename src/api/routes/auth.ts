@@ -99,13 +99,21 @@ auth.post('/magic-link/again', action('enterRequestAgain', async c => {
   if (invite.success) {
     return sendSignInLink(c, { email: invite.output.email, typed: invite.output.email, party: invite.output.party });
   }
-  // So does a member's expired party link. Its address is the one the party has, which may be an older spelling: the
-  // magic link signs in the usual way (`/session`), which moves such an account first.
+  // So does a member's expired party link, but only while the account it was for is still at its address, as the link
+  // itself checks: a drawn party keeps a member's old address after an email change, and a magic link there would make
+  // a new, empty account. The address may be an older spelling: the magic link signs in the usual way (`/session`),
+  // which moves such an account first.
   const member = v.safeParse(tokens.partySignIn, await payloadOf(jwt, token, 'PartySignIn', AGAIN_WITHIN_S));
   if (!member.success) {
     throw fail('invalid_link', 'Invalid request token.', 'token');
   }
-  return sendSignInLink(c, { email: canonicalEmail(member.output.email), typed: member.output.email, party: member.output.party });
+  const { sub: userId, email, party } = member.output;
+  const held = await askMemberAddresses<'ok' | 'busy'>(email, async address => c.env.USER.getByName(address).holdsMember(userId));
+  if (held !== 'ok') {
+    annotate({ 'auth.party_link': held });
+    throw memberLinkRefused[held]();
+  }
+  return sendSignInLink(c, { email: canonicalEmail(email), typed: email, party });
 }));
 
 /** What a link of `type` says, accepting one expired up to `expiredFor` seconds ago; undefined when it doesn't open. */
@@ -222,12 +230,36 @@ auth.post('/invite', action('acceptInvite', async c => {
   return signedIn(user);
 }));
 
+/** How a party's sign-in link (or a fresh link asked for an expired one) is refused, by reason. */
+const memberLinkRefused = {
+  not_member: () => fail('not_member', 'This link is not for an account in this party. Please sign in with your email.', 'token'),
+  used: () => fail('link_used', 'This link has already been used. Please sign in with your email.', 'token'),
+  busy: () => fail('account_busy', 'Another change to this account is in progress. Please try again in a minute.', 'token'),
+};
+
+/**
+ * Asks the account at a member's address, then at its normalized spelling when that differs (a party keeps the address
+ * its member joined with, and an account saved under an older spelling moves to the normalized one on sign-in), until
+ * one says it's theirs.
+ */
+async function askMemberAddresses<T>(email: string, ask: (address: string) => Promise<T | 'not_member'>): Promise<T | 'not_member'> {
+  let answer: T | 'not_member' = 'not_member';
+  for (const address of new Set([email, canonicalEmail(email)])) {
+    answer = await ask(address);
+    if (answer !== 'not_member') {
+      break;
+    }
+  }
+  return answer;
+}
+
 /**
  * Signs a member in with the link in a party's email (the "dice are rolled" email, or the host's reminder the day
  * before), and returns the party with the session. It signs in only the member it was sent to (`sub`), and only while
- * they're still in the party and the account at the address is still theirs. Otherwise it's refused as `not_member`
- * and left unused, so the app falls back to signing in by email; it never makes or moves an account. Each link works
- * once; repeating the same request (same Idempotency-Key) signs in again.
+ * they're still in the party and the account at the address (or its normalized spelling) is still theirs. Otherwise
+ * it's refused as `not_member` (`account_busy` while the account is being changed) and left unused, so the app falls
+ * back to signing in by email; it never makes or moves an account. Each link works once; repeating the same request
+ * (same Idempotency-Key) signs in again.
  */
 auth.post('/party-link', action('partySignIn', async c => {
   const { env } = c;
@@ -238,20 +270,13 @@ auth.post('/party-link', action('partySignIn', async c => {
   const { sub: userId, email, party: code, jti, exp } = link;
   annotate({ 'party.ref': await partyRef(env, code), 'user.id': userId });
 
-  const notMember = () => {
-    annotate({ 'auth.party_link': 'not_member' });
-    return fail('not_member', 'This link is not for an account in this party. Please sign in with your email.', 'token');
-  };
-  if (!await env.PARTY.getByName(code).hasMember(userId)) {
-    throw notMember();
+  const user = await env.PARTY.getByName(code).hasMember(userId)
+    ? await askMemberAddresses<UserRecord | 'used' | 'busy'>(email, async address => env.USER.getByName(address).redeemMemberLink(userId, jti, exp * 1000, key))
+    : 'not_member';
+  if (typeof user === 'string') {
+    annotate({ 'auth.party_link': user });
+    throw memberLinkRefused[user]();
   }
-  const user = await env.USER.getByName(email).redeemMemberLink(userId, jti, exp * 1000, key);
-  if (user === 'not_member') {
-    throw notMember();
-  }
-  annotate({ 'auth.party_link': user === 'used' ? 'already_used' : 'redeemed' });
-  if (user === 'used') {
-    throw fail('link_used', 'This link has already been used. Please sign in with your email.', 'token');
-  }
+  annotate({ 'auth.party_link': 'redeemed' });
   return send(c, session, { ...await issueSession(env, jwt, user, publicKey), party: code });
 }));

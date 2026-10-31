@@ -66,6 +66,11 @@ describe('the link in the "dice are rolled" email', () => {
     const moved = await changeEmail(guest, uniqueEmail('moved'));
 
     expect(await useLink(token, newKey())).toMatchObject({ status: 403, body: apiError('not_member', undefined, 'token') });
+    // Nor does an expired one get a magic link to the old address.
+    const sent = (await mailbox(guest.email)).length;
+    expect(await call('POST', '/v1/auth/magic-link/again', { key: newKey(), body: { token: await mintLink(guest, party.code, -60) } }))
+      .toMatchObject({ status: 403, body: apiError('not_member', undefined, 'token') });
+    expect(await mailbox(guest.email)).toHaveLength(sent);
     expect(await env.USER.getByName(guest.email).get()).toBeNull();
     // The member is still in the party, at the new address.
     expect((await viewParty(party.code, moved)).body).toMatchObject({ isJoined: true });

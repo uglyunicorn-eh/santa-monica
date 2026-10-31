@@ -65,6 +65,16 @@ export async function request<T = any>(method: string, path: string, options: Re
   return { status: res.status, body: await res.json() as T, headers: res.headers };
 }
 
+/** The token after "#" in an emailed link. */
+export const tokenIn = (text: string) => /#([\w-]+(?:\.[\w-]*){4})/.exec(text)![1];
+
+/** A browser's public key, the way the app sends it to bind a new session. */
+export async function browserJwk() {
+  const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']) as CryptoKeyPair;
+  const { kty, crv, x, y } = await crypto.subtle.exportKey('jwk', pair.publicKey) as JsonWebKey;
+  return { kty, crv, x, y };
+}
+
 /** A session token for a user id and email, with an optional token version. */
 export const sessionToken = (id: string, email: string, ver?: number) =>
   jwt().issueToken<UserToken>('UserToken', { sub: nodeIdToStr({ kind: 'User', id }), email, ...(ver === undefined ? {} : { ver }) }, { ttl: 3600 });

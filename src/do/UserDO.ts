@@ -295,18 +295,35 @@ export class UserDO extends DurableObject<Env> {
   }
 
   /**
-   * Signs in with a party's emailed link for the member `userId` (`POST /v1/auth/party-link`): returns the user,
-   * `'used'` when the link was already used by another request, or `'not_member'` when this address holds no account or
-   * another one (deleted, moved to another email, or remade since). That last check comes first, and records and makes
-   * nothing: a drawn party keeps a member's old address after an email change, and the link must not make a new account
-   * there. Otherwise it works like `redeemMagicLink`: once, and a repeat of the same request (`requestKey`) gets the user
-   * again.
+   * The account `userId`, when it's the one at this address: `'not_member'` when the address holds no account or another
+   * one (deleted, moved to another email, or remade since), and `'busy'` while an email change or deletion holds it. Reads
+   * only: an object with no tables stays without them.
    */
-  redeemMemberLink(userId: string, jti: string, expiresAt: number, requestKey?: string): UserRecord | 'used' | 'not_member' {
-    // An object with no tables has no user, and stays without them.
-    const user = this.get();
-    if (user?.id !== userId) {
+  private memberAccount(userId: string): UserRecord | 'busy' | 'not_member' {
+    const row = this.row();
+    if (!row || row.deleted_at !== null || row.id !== userId) {
       return 'not_member';
+    }
+    return isChanging(row) ? 'busy' : toRecord(row);
+  }
+
+  /** Whether this address still holds the account `userId` (see `memberAccount`), without using or storing anything. */
+  holdsMember(userId: string): 'ok' | 'busy' | 'not_member' {
+    const account = this.memberAccount(userId);
+    return typeof account === 'string' ? account : 'ok';
+  }
+
+  /**
+   * Signs in with a party's emailed link for the member `userId` (`POST /v1/auth/party-link`): returns the user,
+   * `'used'` when the link was already used by another request, or what `memberAccount` refuses with. That check comes
+   * first, and records and makes nothing: a drawn party keeps a member's old address after an email change, and the
+   * link must not make a new account there. Otherwise it works like `redeemMagicLink`: once, and a repeat of the same
+   * request (`requestKey`) gets the user again.
+   */
+  redeemMemberLink(userId: string, jti: string, expiresAt: number, requestKey?: string): UserRecord | 'used' | 'busy' | 'not_member' {
+    const user = this.memberAccount(userId);
+    if (typeof user === 'string') {
+      return user;
     }
     const used = this.usedLink(jti);
     if (used) {
