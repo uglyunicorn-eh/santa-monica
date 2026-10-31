@@ -22,7 +22,7 @@ async function emailedLink(email: string, code: string, subject: (s: string) => 
   return linkToken(mail, `p/${code}/sign-in`);
 }
 
-/** A rolled party of a host and a guest, with each one's link from the "dice are rolled" email. */
+/** A rolled party of a host and a guest, with the guest's link from the "dice are rolled" email (the host gets none). */
 async function rolledParty() {
   const host = await signIn(uniqueEmail('host'));
   const guest = await signIn(uniqueEmail('guest'));
@@ -50,12 +50,12 @@ describe('the link in the "dice are rolled" email', () => {
   });
 
   it('works once: a second use is link_used, and the same request (same Idempotency-Key) signs in again', async () => {
-    const { host, link } = await rolledParty();
-    const token = await link(host);
+    const { guest, link } = await rolledParty();
+    const token = await link(guest);
     const key = newKey();
     const first = await useLink(token, key);
     expect(first.status).toBe(200);
-    expect(await useLink(token, key)).toMatchObject({ status: 200, body: { user: { id: host.id } } });
+    expect(await useLink(token, key)).toMatchObject({ status: 200, body: { user: { id: guest.id } } });
     expect(await useLink(token, newKey())).toMatchObject({ status: 409, body: apiError('link_used', undefined, 'token') });
     expect(await useLink(token)).toMatchObject({ status: 409, body: apiError('link_used', undefined, 'token') });
   });

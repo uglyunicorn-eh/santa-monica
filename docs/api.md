@@ -410,7 +410,7 @@ Creates a party with the signed-in person as its host.
 
 `POST /parties/draw`
 
-Draws a match for every member and emails each of them. Only the host can do this, and the party needs at least two people.
+Draws a match for every member and emails everyone but the host, who sees their match in the response. Only the host can do this, and the party needs at least two people.
 
 | Parameter | Type | Description |
 |---|---|---|

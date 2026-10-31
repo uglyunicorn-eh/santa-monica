@@ -56,7 +56,7 @@ describe('the draw', () => {
   });
 
   it('draws once: rolling again answers with the same draw and mails nobody again', async () => {
-    const { host, party, everyone } = await partyOf(3);
+    const { host, guests, party, everyone } = await partyOf(3);
     const first = await drawParty(host, party);
     const before = await Promise.all(everyone.map(async p => (await viewParty(party.code, p)).body.target));
     await settleParty(party.code);
@@ -65,9 +65,10 @@ describe('the draw', () => {
     expect(again).toEqual(first);
     await settleParty(party.code);
     expect(await Promise.all(everyone.map(async p => (await viewParty(party.code, p)).body.target))).toEqual(before);
-    for (const p of everyone) {
+    for (const p of guests) {
       expect((await mailbox(p.email)).filter(m => m.subject === 'Draw party: the dice are rolled!')).toHaveLength(1);
     }
+    expect((await mailbox(host.email)).filter(m => m.subject === 'Draw party: the dice are rolled!')).toHaveLength(0);
   });
 });
 
@@ -89,12 +90,13 @@ describe('after closing', () => {
 });
 
 describe('notification emails', () => {
-  it('emails every participant once, with the party name and link', async () => {
-    const { host, party, everyone } = await partyOf(4, 'Tom & Jerry <3');
+  it('emails every guest once, with the party name and link, and not the host, who just rolled', async () => {
+    const { host, guests, party } = await partyOf(4, 'Tom & Jerry <3');
     await drawParty(host, party);
     expect(await settleParty(party.code)).toBe(0);
 
-    for (const p of everyone) {
+    expect((await mailbox(host.email)).filter(m => m.subject === 'Tom & Jerry <3: the dice are rolled!')).toHaveLength(0);
+    for (const p of guests) {
       const notifications = (await mailbox(p.email)).filter(m => m.subject === 'Tom & Jerry <3: the dice are rolled!');
       expect(notifications).toHaveLength(1);
       const [mail] = notifications;
@@ -125,7 +127,6 @@ describe('notification emails', () => {
     expect((await drawParty(host, party)).status).toBe(200);
 
     expect(await settleParty(party.code, 5)).toBe(1);
-    expect((await mailbox(host.email)).some(m => m.subject === 'Flaky mail: the dice are rolled!')).toBe(true);
     expect((await mailbox(ok.email)).some(m => m.subject === 'Flaky mail: the dice are rolled!')).toBe(true);
     expect((await viewParty(party.code, flaky)).body.target).not.toBeNull();
   });

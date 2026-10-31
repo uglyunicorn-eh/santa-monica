@@ -63,7 +63,8 @@ describe('PartyDO', () => {
     // Drawing again answers with the same draw.
     expect(await env.PARTY.getByName('ZXCVB').close(host.id)).toMatchObject({ ok: true, view: { isClosed: true } });
 
-    // Five notification emails plus the party-list updates go out through the local email binding.
+    // A notification email for each guest (not the host, who just rolled) plus the party-list updates go out through
+    // the local email binding.
     await drainOutbox('ZXCVB');
   });
 

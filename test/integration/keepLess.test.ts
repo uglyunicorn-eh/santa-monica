@@ -89,8 +89,8 @@ describe("members' emails in a drawn party", () => {
     await drawParty(host, party);
     await settleParty(party.code);
     expect(await partySql(party.code, 'SELECT member_email FROM memberships WHERE member_email IS NOT NULL')).toEqual([]);
-    // The draw emails went out before the addresses were dropped.
-    for (const person of [host, ...guests]) {
+    // The draw emails went out before the addresses were dropped (to the guests: the host just rolled).
+    for (const person of guests) {
       expect((await mailbox(person.email)).some(m => m.text?.includes(party.code))).toBe(true);
     }
 
