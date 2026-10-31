@@ -9,42 +9,50 @@
 
 # Santa Monica API
 
-Santa Monica is the API behind [Anonymous Santa Clauses](https://gnomik.me), a Secret Santa app. Use it to sign people in with a magic link, host and join parties, and draw who gives a gift to whom.
+Santa Monica is the API behind [Anonymous Santa Clauses](https://gnomik.me), a Secret Santa app. Use it to sign people in with emailed links, host and join parties, and draw who gives a gift to whom.
 
-The web app lives in [santa-barbara](https://github.com/uglyunicorn-eh/santa-barbara).
+The web app that uses it lives in [santa-barbara](https://github.com/uglyunicorn-eh/santa-barbara).
 
 **Base URL:** `https://api.gnomik.me/v1`
 
----
+## Run the API locally
 
-## Quickstart
+Before you begin, install Node.js 22.
 
-You need Node.js 22.
+1. Install the dependencies:
 
-```bash
-npm install
-cp .dev.vars.example .dev.vars   # set JWT_PRIVATE_KEY
-npm run dev                      # http://localhost:8787
-```
+   ```bash
+   npm install
+   ```
 
-To run the web app against your local API:
+2. Create your local settings, and set `JWT_PRIVATE_KEY` to any long random string:
 
-1. Start the API with `npx wrangler dev --env preview`. It allows `localhost:4321`–`4323` and writes sent emails to files.
+   ```bash
+   cp .dev.vars.example .dev.vars
+   ```
+
+3. Start the API. It runs at `http://localhost:8787`.
+
+   ```bash
+   npm run dev
+   ```
+
+### Run the web app against it
+
+1. Start the API with `npx wrangler dev --env preview`. This environment allows the app's local origins (`localhost:4321` to `4323`) and writes sent emails to files instead of sending them.
 2. Start santa-barbara with `PUBLIC_API_ENDPOINT=http://localhost:8787`.
-
----
 
 ## How it works
 
-| Piece | What it does |
+The API is a Cloudflare Worker. All data lives in Durable Objects with SQLite storage.
+
+| Component | What it does |
 |---|---|
-| Cloudflare Worker ([Hono](https://hono.dev)) | Serves the JSON API. |
-| `PartyDO` | One Durable Object per party: members, the draw, and an outbox for emails and cross-object updates. |
-| `UserDO` | One per signed-in email address: profile, parties, session version. Stores nothing until the first sign-in. |
+| Worker ([Hono](https://hono.dev)) | Serves the JSON API. |
+| `PartyDO` | One object per party: its members, the draw, and an outbox that delivers emails and updates to other objects. |
+| `UserDO` | One object per account, keyed by email address: the profile, the party list, and the session version. Stores nothing until the first sign-in. |
 | `StatsDO` | The Party'o'meter: how many parties have rolled their dice. |
 | Cloudflare Email Service | Sends email from `info@gnomik.me`. |
-
-All data lives in Durable Objects with SQLite storage.
 
 ```
 src/
@@ -52,196 +60,151 @@ src/
   api/       routes, schemas, sessions, rate limits
   do/        Durable Objects
   mail/      email templates
-  utils/     tokens, ids, the draw, tracing
+  utils/     tokens, IDs, the draw, tracing
 ```
-
----
 
 ## Authentication
 
 Send the session token in the `Authorization` header:
 
 ```
-Authorization: Bearer <session token>
+Authorization: Bearer <userToken>
 ```
 
-To get a token:
+To get a session token:
 
-1. Call `POST /auth/magic-link` with `{email}`. The user gets an email.
-2. Call `POST /auth/session` with the `{token}` from the link. You get `{userToken, user, expiresAt, party}`.
+1. Call `POST /auth/magic-link` with the person's email address. They receive an email with a sign-in link.
+2. Call `POST /auth/session` with the token from that link. The response contains `userToken`, `user`, `expiresAt`, and `party`.
 
-Sessions last 30 days. Treat every token as an opaque string: tokens are encrypted, and only the Worker can read them.
+Sessions last 30 days. Treat every token as an opaque string: tokens are encrypted, and only the API can read them.
 
-> [!TIP]
-> Pass a public `key` (P-256 JWK) when you create a session: it binds the session to the browser with [DPoP](docs/security.md#bound-sessions-dpop), and only bound sessions are accepted. Each request then needs a `DPoP` proof signed by that key, so a leaked token is useless on its own.
+> [!IMPORTANT]
+> Production accepts only bound sessions. Pass a public `key` (a P-256 JWK) when you create a session, then sign each request with a `DPoP` proof from the matching private key. A leaked token is useless without the key. See [Bound sessions](docs/security.md#bound-sessions-dpop).
 
----
+## API overview
 
-## API reference
+For parameters, responses, and errors, see the [API reference](docs/api.md).
 
-### Auth
+### Sessions
 
-| Endpoint | Body | Returns |
-|---|---|---|
-| `POST /auth/magic-link` | `{email, party?}` | `202`. Emails a sign-in link. |
-| `POST /auth/magic-link/again` | `{token}` | `202`. Emails a fresh link for a sign-in link, an invite or a party's sign-in link that expired (up to 7 days ago). |
-| `POST /auth/session` | `{token, key?}` | A session. |
-| `POST /auth/invite` | `{token, key?, name, password?}` | A session, with the invited address joined to the party as `name` in one step. A wrong phrase is `forbidden` and the invite can be tried again; a member gets a magic link instead (`202`). |
-| `POST /auth/party-link` | `{token, key?}` | A session, with `party`: the link in a party's "dice are rolled" email or the host's reminder signs that member in. Someone no longer in the party, or no longer that account, gets `not_member` (`account_busy` while the account is being changed), and the link stays unused. |
+| Endpoint | Description |
+|---|---|
+| [`POST /auth/magic-link`](docs/api.md#send-a-magic-link) | Emails a sign-in link. |
+| [`POST /auth/magic-link/again`](docs/api.md#resend-an-expired-link) | Emails a fresh link for an expired sign-in link, invite, or party sign-in link. |
+| [`POST /auth/session`](docs/api.md#create-a-session) | Signs in with a magic link. |
+| [`POST /auth/invite`](docs/api.md#accept-an-invite) | Signs in with an invite and joins the party in one step. |
+| [`POST /auth/party-link`](docs/api.md#sign-in-with-a-party-link) | Signs a member in with the link in a party's emails. |
 
-### Account
+### Users
 
-| Endpoint | Body | Returns |
-|---|---|---|
-| `GET /me` | | The signed-in user. |
-| `PATCH /me` | `{name}` | The updated user. |
-| `GET /me/parties` | `?first&after` | `{items, hasMore, endCursor}`, newest first. |
-| `POST /me/email-change` | `{email}` | `202`. Emails a confirmation link. |
-| `POST /me/email-change/confirm` | `{token, key?}` | A session on the new address. |
-| `POST /me/email-change/cancel` | `{token}` | Stops the change and signs out everywhere. |
-| `POST /me/sign-out` | | Signs out every device. |
-| `POST /me/deletion` | | `202`. Emails a deletion link. |
-| `POST /me/deletion/confirm` | `{token}` | Deletes the account. |
+| Endpoint | Description |
+|---|---|
+| [`GET /me`](docs/api.md#retrieve-the-current-user) | Retrieves the signed-in user. |
+| [`PATCH /me`](docs/api.md#update-the-current-user) | Updates the profile name. |
+| [`GET /me/parties`](docs/api.md#list-the-users-parties) | Lists the user's parties, newest first. |
+| [`GET /me/parties/unrevealed`](docs/api.md#list-unrevealed-parties) | Lists rolled parties where the user hasn't seen their match. |
+| [`POST /me/parties/revealed`](docs/api.md#mark-a-party-as-revealed) | Records that the user saw their match. |
+| [`POST /me/sign-out`](docs/api.md#sign-out-everywhere) | Signs out every device. |
+| [`POST /me/email-change`](docs/api.md#request-an-email-change) | Emails a link to confirm a new address. |
+| [`POST /me/email-change/confirm`](docs/api.md#confirm-an-email-change) | Moves the account to the new address. |
+| [`POST /me/email-change/cancel`](docs/api.md#cancel-an-email-change) | Stops an email change and signs out everywhere. |
+| [`POST /me/deletion`](docs/api.md#request-account-deletion) | Emails a link to delete the account. |
+| [`POST /me/deletion/check`](docs/api.md#check-a-deletion-link) | Checks a deletion link without using it. |
+| [`POST /me/deletion/confirm`](docs/api.md#confirm-account-deletion) | Deletes the account. |
 
 ### Parties
 
-Party codes always go in the request body, never in the URL.
-
-| Endpoint | Body | Returns |
-|---|---|---|
-| `POST /parties/lookup` | `{code}` | The party. Session optional. |
-| `POST /parties` | `{name, password?, dueAt?}` | `201`. The new party. |
-| `POST /parties/join` | `{code, name, password?}` | The party. |
-| `POST /parties/leave` | `{code}` | The party. |
-| `POST /parties/draw` | `{code}` | The party. Host only. |
-| `POST /parties/invite` | `{code, emails}` | `{invited, alreadyInvited, alreadyJoined, invitesLeft}`. Host only. |
-| `POST /parties/delete` | `{code}` | Host only. Restorable for 24 hours. |
-| `POST /parties/restore` | `{code}` | Host only. |
+| Endpoint | Description |
+|---|---|
+| [`POST /parties/lookup`](docs/api.md#retrieve-a-party) | Retrieves a party by its code. |
+| [`POST /parties`](docs/api.md#create-a-party) | Creates a party. |
+| [`POST /parties/join`](docs/api.md#join-a-party) | Joins a party. |
+| [`POST /parties/leave`](docs/api.md#leave-a-party) | Leaves a party. |
+| [`POST /parties/draw`](docs/api.md#roll-the-dice) | Rolls the dice. Host only. |
+| [`POST /parties/invite`](docs/api.md#invite-people) | Emails invites. Host only. |
+| [`POST /parties/delete`](docs/api.md#delete-a-party) | Deletes a party. Host only. |
+| [`POST /parties/restore`](docs/api.md#restore-a-party) | Restores a deleted party. Host only. |
 
 ### Live updates
 
-| Endpoint | Returns |
+| Endpoint | Description |
 |---|---|
-| `POST /live/ticket` `{code?}` | A ticket valid for 5 minutes. |
-| `GET /parties/live?ticket=` | WebSocket for a party. |
-| `GET /me/live?ticket=` | WebSocket for your account. |
-| `GET /stats` | `{rolled}`. No session needed. |
-| `GET /stats/live` | WebSocket: `{"type":"stats","rolled":N}`. |
-
----
+| [`POST /live/ticket`](docs/api.md#create-a-ticket) | Creates a ticket for a live-updates WebSocket. |
+| [`GET /parties/live`](docs/api.md#watch-a-party) | Opens a WebSocket for a party. |
+| [`GET /me/live`](docs/api.md#watch-the-account) | Opens a WebSocket for the user's account. |
+| [`GET /stats`](docs/api.md#retrieve-the-partyometer) | Retrieves the Party'o'meter. |
+| [`GET /stats/live`](docs/api.md#watch-the-partyometer) | Opens a WebSocket for the Party'o'meter. |
 
 ## Errors
 
 Every error has the same shape:
 
 ```json
-{ "error": { "code": "not_found", "message": "…", "field": null } }
+{ "error": { "code": "not_found", "message": "Party does not exist.", "field": "party" } }
 ```
 
-| Status | Codes |
-|---|---|
-| 400 | `invalid`, `invalid_link`, `link_expired` |
-| 401 | `unauthenticated` |
-| 403 | `forbidden`, `not_member` |
-| 404 | `not_found` |
-| 409 | `conflict`, `link_used`, `account_busy` |
-| 429 | `rate_limited` (with `Retry-After: 60`) |
-| 500 | `internal` (with an `errorId` to find it in logs) |
-| 503 | `unavailable`, `not_finished` |
+Branch on `code`, not on `message`. A `401` always means the session is missing, invalid, or revoked: sign the person out when you get one. See [Errors](docs/api.md#errors) for every code.
 
-> [!NOTE]
-> A `401` always means the session is missing, invalid, or revoked. Sign the user out when you get one.
+## Idempotent requests
 
----
-
-## Idempotency
-
-Every write is safe to retry. Join, leave, draw, delete, restore, and rename return the current state if already done.
-
-Routes that send email or create something accept an `Idempotency-Key` header (16–100 characters: letters, digits, `-`, `_`). A retry within 10 minutes returns the same response without doing the work again.
-
----
+Every write is safe to retry. Routes that send email or create something also accept an `Idempotency-Key` header. A retry with the same key within 10 minutes returns the same response without doing the work again. See [Idempotent requests](docs/api.md#idempotent-requests).
 
 ## Rate limits
 
 | What | Limit |
 |---|---|
-| Party codes tried | 60/min per IP (10/min for old 5-letter codes) |
-| Joins | 10/min per user |
-| Wrong secret phrases | 5 per person, 20 per party, per 15 min |
-| Emails | 10/min per IP, 3/min per address, ~60/min overall |
-| Invites | 10 addresses per request, 3 requests/min, 50 per party |
+| Party codes tried | 60 per minute per IP, or 10 for older 5-letter codes |
+| Joins | 10 per minute per user |
+| Wrong secret phrases | 5 per person and 20 per party, every 15 minutes |
+| Emails | 10 per minute per IP, 3 per minute per address, and about 60 per minute overall |
+| Invites | 10 addresses per request, 3 requests per minute, and 50 per party |
 | Open parties | 3 per host |
-| New parties | 10/day per person |
+| New parties | 10 per day per person |
 | Party size | 100 people |
-| Names | 32 characters (person), 48 (party) |
+| Names | 32 characters for a person, 48 for a party |
 | Request body | 16 KB |
 
-Limits live in `src/api/rateLimit.ts`, `src/api/limits.ts`, and `src/do/PartyDO.ts`. See [Rate limits](docs/security.md#rate-limits) for how they're checked.
-
----
+A refused request returns `429` with `Retry-After: 60`. See [Rate limits](docs/security.md#rate-limits) for how limits are checked.
 
 ## Security and privacy
 
 - **Encrypted tokens.** Every token is a JWE (`dir` + `A256GCM`) with a key derived from `JWT_PRIVATE_KEY`.
-- **Revocation.** Signing out, changing email, or deleting the account ends every session at once.
-- **Single-use links.** Sign-in links last 5 minutes; account links last 1 hour.
+- **Revocation.** Signing out, changing the email address, or deleting the account ends every session at once.
+- **Single-use links.** Every emailed link works once. Sign-in links last 5 minutes and account links 1 hour.
 - **No account enumeration.** The API never reveals whether an address has an account.
-- **Fair draw.** Uniformly random, using a cryptographic source (`src/utils/santaShuffle.ts`).
-- **Minimal data.** A party drops members' emails after the draw. Inactive open parties are deleted after 45 days.
-- **Clean logs.** Logs never contain emails, names, or party codes. Parties appear as `party.ref`, an HMAC of the code.
+- **Fair draw.** The draw is uniformly random and uses a cryptographic random source (`src/utils/santaShuffle.ts`).
+- **Minimal data.** A party drops members' email addresses after the draw. Open parties with no activity for 45 days are deleted.
+- **Clean logs.** Logs never contain email addresses, names, or party codes.
 
-For the details, see [Security and privacy](docs/security.md).
+To learn more, see [Security and privacy](docs/security.md).
 
----
-
-## Testing
+## Test the API
 
 ```bash
 npm run typecheck
 npm run test:unit          # requires 100% coverage
 npm run test:integration   # end-to-end flows through the Worker
-SMOKE_URL=https://... npm run smoke   # read-only checks on a deployed API
+SMOKE_URL=https://... npm run smoke   # read-only checks against a deployed API
 ```
 
-In integration tests, recipients starting with `fail+` simulate a failed delivery.
+In integration tests, email to an address that starts with `fail+` simulates a failed delivery.
 
----
+## Deploy the API
 
-## Deploy
-
-Settings live in `wrangler.jsonc`. The one secret is `JWT_PRIVATE_KEY` (plus `JWT_PRIVATE_KEY_PREVIOUS` while it's rotated).
+Settings live in `wrangler.jsonc`. The only secret is `JWT_PRIVATE_KEY`, plus `JWT_PRIVATE_KEY_PREVIOUS` while you rotate it.
 
 ```bash
 npx wrangler secret put JWT_PRIVATE_KEY
 npx wrangler deploy --env=""
 ```
 
-CI checks every pull request, deploys it as a [Worker Preview](https://developers.cloudflare.com/workers/previews/), and deploys `main` to production. Previews only email addresses in `EMAIL_ALLOWLIST`.
+CI tests every pull request, deploys it as a [Worker Preview](https://developers.cloudflare.com/workers/previews/), and deploys `main` to production. Previews email only addresses in `EMAIL_ALLOWLIST`.
 
-### Rotate the key
+To rotate the signing key, maintain production data, or turn off bound sessions, see [Deployment](docs/deployment.md).
 
-Put the current key in `JWT_PRIVATE_KEY_PREVIOUS` and a new one in `JWT_PRIVATE_KEY`: old tokens keep working, so nobody is signed out. Delete the previous key after 30 days. See [Deployment](docs/deployment.md#rotate-the-key).
+## Monitor the API
 
-### Maintain data
-
-`scripts/data.ts` works on production data. It needs `CLOUDFLARE_API_TOKEN` (Workers Scripts Write) and `CLOUDFLARE_ACCOUNT_ID`.
-
-| Command | What it does |
-|---|---|
-| `node scripts/data.ts count` | Counts drawn and open parties. |
-| `node scripts/data.ts tidy` | Shows what clean-up would change. Add `--apply` to change it. |
-| `node scripts/data.ts wake` | Starts every open party once, so auto-prune can schedule it. |
-
-For environments, CI, `REQUIRE_BOUND_SESSIONS`, and release steps, see [Deployment](docs/deployment.md).
-
----
-
-## Monitoring
-
-Logs and traces go to Workers Logs and can be exported over OpenTelemetry. Each route runs in a span named `api.<action>`, with `api.status`, `api.error_code`, and `rate_limit.hit`.
-
----
+Logs and traces go to Workers Logs, and you can export them over OpenTelemetry. Each route runs in a span named `api.<action>` with `api.status`, `api.error_code`, and `rate_limit.hit`. See [Monitoring](docs/deployment.md#monitor-the-api).
 
 ## Credits
 
