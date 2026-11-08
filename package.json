@@ -26,8 +26,8 @@
   },
   "homepage": "https://github.com/uglyunicorn-eh/santa-monica",
   "dependencies": {
-    "hono": "^4.13.14",
-    "jose": "^6.2.13",
+    "hono": "^4.13.16",
+    "jose": "^6.2.14",
     "valibot": "1.5.0"
   },
   "devDependencies": {
